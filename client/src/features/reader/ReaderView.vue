@@ -164,7 +164,7 @@ onMounted(async () => {
     shouldApplyStyles.value = false
   }
 
-  await open(bookId, fileId, fileFormat, progress.cfi.value)
+  await open(bookId, fileId, fileFormat, progress.cfi.value, progress.percentage.value > 0 ? progress.percentage.value / 100 : undefined)
   setChapters(getChapters())
   sectionFractions.value = getSectionFractions()
   await bookmarks.load(bookId)

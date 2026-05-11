@@ -1452,7 +1452,6 @@ export class BookService {
             createdAtKobo: readingStateRow.createdAtKobo ?? null,
             lastModifiedKobo: readingStateRow.lastModifiedKobo ?? null,
             priorityTimestamp: readingStateRow.priorityTimestamp ?? null,
-            progressSyncedAt: readingStateRow.progressSyncedAt?.toISOString() ?? null,
             updatedAt: readingStateRow.updatedAt.toISOString(),
           }
         : null,

@@ -40,12 +40,6 @@ export interface KoboBookEntry {
   updatedAt: Date;
 }
 
-export interface SyncSettings {
-  readingThreshold: number;
-  finishedThreshold: number;
-  twoWayProgressSync: boolean;
-}
-
 function encodeSyncToken(snapshotId: number): string {
   return TOKEN_PREFIX + Buffer.from(JSON.stringify({ snapshotId })).toString('base64');
 }
@@ -58,13 +52,7 @@ export class KoboSyncService {
     private readonly readingStateService: KoboReadingStateService,
   ) {}
 
-  async getDelta(
-    userId: number,
-    deviceToken: string,
-    baseUrl: string,
-    syncToken: string | null,
-    settings: SyncSettings,
-  ): Promise<{ entitlements: unknown[]; hasMore: boolean; syncToken: string }> {
+  async getDelta(userId: number, deviceToken: string, baseUrl: string): Promise<{ entitlements: unknown[]; hasMore: boolean; syncToken: string }> {
     const snapshot = await this.db.query.koboLibrarySnapshots.findFirst({
       where: eq(schema.koboLibrarySnapshots.userId, userId),
     });
@@ -77,7 +65,7 @@ export class KoboSyncService {
       await this.reconcileSnapshot(snapshot.id, eligibleSnapshotRows);
     }
 
-    return this.getPageFromSnapshot(userId, deviceToken, baseUrl, settings, new Set(eligibleSnapshotRows.map((row) => row.bookId)));
+    return this.getPageFromSnapshot(userId, deviceToken, baseUrl, new Set(eligibleSnapshotRows.map((row) => row.bookId)));
   }
 
   async getBookMetadata(userId: number, bookId: number, deviceToken: string, baseUrl: string): Promise<unknown[]> {
@@ -230,7 +218,6 @@ export class KoboSyncService {
     userId: number,
     deviceToken: string,
     baseUrl: string,
-    settings: SyncSettings,
     eligibleIds: Set<number>,
   ): Promise<{ entitlements: unknown[]; hasMore: boolean; syncToken: string }> {
     const snapshot = await this.db.query.koboLibrarySnapshots.findFirst({
@@ -252,20 +239,8 @@ export class KoboSyncService {
     const page = pending.slice(0, SYNC_PAGE_SIZE);
 
     if (page.length === 0) {
-      const endItems: unknown[] = [];
-
-      if (settings.twoWayProgressSync) {
-        const pushed = await this.readingStateService.getAndMarkStatesNeedingPush(userId, settings.readingThreshold, settings.finishedThreshold);
-        endItems.push(...pushed.items);
-        if (pushed.hasMore) {
-          return { entitlements: endItems, hasMore: true, syncToken };
-        }
-      }
-
       const tagItems = await this.buildTagItems(userId, eligibleIds);
-      endItems.push(...tagItems);
-
-      return { entitlements: endItems, hasMore: false, syncToken };
+      return { entitlements: tagItems, hasMore: false, syncToken };
     }
 
     const pageIds = page.map((r) => r.bookId);

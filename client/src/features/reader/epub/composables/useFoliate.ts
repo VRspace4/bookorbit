@@ -50,7 +50,7 @@ export function useFoliate(
     await customElements.whenDefined('foliate-view')
   }
 
-  async function open(bookId: number, fileId: number, format: string, cfi?: string | null) {
+  async function open(bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number) {
     const el = container()
     if (!el) return
 
@@ -64,6 +64,7 @@ export function useFoliate(
         renderer: FoliateRenderer
         open: (file: File) => Promise<void>
         goTo: (target: string | number) => Promise<void>
+        goToFraction?: (f: number) => void
         book?: { toc?: unknown[] }
         getSectionFractions?: () => number[]
         prev?: () => void
@@ -131,7 +132,11 @@ export function useFoliate(
         await view.open(file)
       }
       if (onApplyStyles) onApplyStyles(view.renderer)
-      await view.goTo(cfi ?? 0).catch(() => {})
+      if (cfi) {
+        await view.goTo(cfi).catch(() => {})
+      } else if (fallbackFraction !== undefined && fallbackFraction > 0) {
+        view.goToFraction?.(fallbackFraction)
+      }
     } catch (e) {
       console.error('[useFoliate]', e)
       error.value = e instanceof Error ? e.message : 'Failed to open book'
@@ -165,7 +170,8 @@ export function useFoliate(
     error,
     fraction,
     view: viewRef,
-    open: (bookId: number, fileId: number, format: string, cfi?: string | null) => open(bookId, fileId, format, cfi),
+    open: (bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number) =>
+      open(bookId, fileId, format, cfi, fallbackFraction),
     prev: () => getViewEl()?.prev?.(),
     next: () => getViewEl()?.next?.(),
     goTo: (t: string | number) => getViewEl()?.goTo?.(t),

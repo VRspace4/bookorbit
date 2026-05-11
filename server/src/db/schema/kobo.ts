@@ -30,7 +30,6 @@ export const koboSyncSettings = pgTable(
     readingThreshold: real('reading_threshold').notNull().default(1),
     finishedThreshold: real('finished_threshold').notNull().default(99),
     convertToKepub: boolean('convert_to_kepub').notNull().default(false),
-    twoWayProgressSync: boolean('two_way_progress_sync').notNull().default(false),
     forceEnableHyphenation: boolean('force_enable_hyphenation').notNull().default(false),
     kepubConversionLimitMb: integer('kepub_conversion_limit_mb').notNull().default(100),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
@@ -98,7 +97,6 @@ export const koboReadingStates = pgTable(
     currentBookmark: jsonb('current_bookmark'),
     statistics: jsonb('statistics'),
     statusInfo: jsonb('status_info'),
-    progressSyncedAt: timestamp('progress_synced_at', { withTimezone: true }),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
       .notNull()

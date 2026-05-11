@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsInt, IsBoolean, Max, Min } from 'class-validator';
 
 export class UpdateSettingsDto {
   @IsOptional()
@@ -16,10 +16,6 @@ export class UpdateSettingsDto {
   @IsOptional()
   @IsBoolean()
   convertToKepub?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  twoWayProgressSync?: boolean;
 
   @IsOptional()
   @IsBoolean()

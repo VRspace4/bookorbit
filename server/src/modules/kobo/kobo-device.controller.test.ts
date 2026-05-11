@@ -26,6 +26,33 @@ describe('KoboDeviceController', () => {
     vi.clearAllMocks();
   });
 
+  it('parses compound CoverImageId format (bookId-timestamp) correctly for thumbnails and downloads', async () => {
+    const req = { method: 'GET', url: '/api/v1/kobo/token/v1/books/42-1778450221186/thumbnail/355/530/80/False/image.jpg' };
+    const reply = makeReply();
+
+    await controller.thumbnailFull(
+      '42-1778450221186',
+      undefined,
+      { id: 5 } as never,
+      { deviceToken: 'token' } as never,
+      req as never,
+      reply as never,
+    );
+    await controller.thumbnailSimple(
+      '42-1778450221186',
+      undefined,
+      { id: 5 } as never,
+      { deviceToken: 'token' } as never,
+      req as never,
+      reply as never,
+    );
+    await controller.download('42-1778450221186', { id: 5 } as never, { deviceToken: 'token' } as never, req as never, reply as never);
+
+    expect(thumbnailService.serveThumbnail).toHaveBeenNthCalledWith(1, 5, 42, undefined, reply);
+    expect(thumbnailService.serveThumbnail).toHaveBeenNthCalledWith(2, 5, 42, undefined, reply);
+    expect(downloadService.streamBook).toHaveBeenCalledWith(5, 42, reply);
+  });
+
   it('serves thumbnail for valid book ids across all thumbnail endpoints', async () => {
     const req = { method: 'GET', url: '/api/v1/kobo/token/v1/books/12/thumbnail/300/300/false/image.jpg' };
     const reply = makeReply();

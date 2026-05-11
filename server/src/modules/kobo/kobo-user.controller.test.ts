@@ -40,16 +40,22 @@ describe('KoboUserController', () => {
   });
 
   it('delegates settings reads and writes with current user id', async () => {
-    settingsService.getSettings.mockResolvedValue({ readingThreshold: 1.2 });
-    settingsService.updateSettings.mockResolvedValue({ readingThreshold: 2 });
+    settingsService.getSettings.mockResolvedValue({ convertToKepub: true, forceEnableHyphenation: false, kepubConversionLimitMb: 100 });
+    settingsService.updateSettings.mockResolvedValue({ convertToKepub: false, forceEnableHyphenation: true, kepubConversionLimitMb: 150 });
 
-    await expect(controller.getSettings({ id: 5 } as never)).resolves.toEqual({ readingThreshold: 1.2 });
-    await expect(controller.updateSettings({ readingThreshold: 2 } as never, { id: 5 } as never)).resolves.toEqual({
-      readingThreshold: 2,
+    await expect(controller.getSettings({ id: 5 } as never)).resolves.toEqual({
+      convertToKepub: true,
+      forceEnableHyphenation: false,
+      kepubConversionLimitMb: 100,
+    });
+    await expect(controller.updateSettings({ convertToKepub: false } as never, { id: 5 } as never)).resolves.toEqual({
+      convertToKepub: false,
+      forceEnableHyphenation: true,
+      kepubConversionLimitMb: 150,
     });
 
     expect(settingsService.getSettings).toHaveBeenCalledWith(5);
-    expect(settingsService.updateSettings).toHaveBeenCalledWith(5, { readingThreshold: 2 });
+    expect(settingsService.updateSettings).toHaveBeenCalledWith(5, { convertToKepub: false });
   });
 
   it('registers auditable metadata for create/rename/remove actions', () => {

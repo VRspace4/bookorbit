@@ -19,8 +19,19 @@ export default defineConfig({
     include: ['@tanstack/vue-table', '@tanstack/vue-virtual'],
   },
   server: {
+    host: true,
     proxy: {
-      '/api': 'http://localhost:3000',
+      '/api': {
+        target: 'http://localhost:3000',
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq, req) => {
+            if (req.headers.host) proxyReq.setHeader('x-forwarded-host', req.headers.host)
+            const localPort = (req.socket as { localPort?: number })?.localPort
+            if (localPort) proxyReq.setHeader('x-forwarded-port', String(localPort))
+            proxyReq.setHeader('x-forwarded-proto', 'http')
+          })
+        },
+      },
       '/socket.io': {
         target: 'http://localhost:3000',
         ws: true,

@@ -53,6 +53,86 @@ describe('KoboSyncController', () => {
     expect(resources.library_sync).toBe('https://reader.example.com/api/v1/kobo/device-token/v1/library/sync');
   });
 
+  it('initialization appends x-forwarded-port when host has no port (Vite dev proxy scenario)', () => {
+    const req = {
+      headers: {
+        'x-forwarded-host': '192.168.8.134',
+        'x-forwarded-port': '5173',
+        'x-forwarded-proto': 'http',
+        host: '192.168.8.134',
+      },
+      protocol: 'http',
+      hostname: '192.168.8.134',
+      socket: { localPort: 3000 },
+    };
+
+    const payload = controller.initialization({ deviceToken: 'dev' } as never, req as never);
+    const resources = payload.Resources as Record<string, string>;
+
+    expect(resources.image_host).toBe('http://192.168.8.134:5173');
+    expect(resources.library_sync).toBe('http://192.168.8.134:5173/api/v1/kobo/dev/v1/library/sync');
+  });
+
+  it('initialization does not append x-forwarded-port when it is the default for the scheme', () => {
+    const httpDefault = {
+      headers: { 'x-forwarded-host': 'example.com', 'x-forwarded-port': '80', 'x-forwarded-proto': 'http' },
+      protocol: 'http',
+      hostname: 'example.com',
+      socket: { localPort: 80 },
+    };
+    const httpsDefault = {
+      headers: { 'x-forwarded-host': 'example.com', 'x-forwarded-port': '443', 'x-forwarded-proto': 'https' },
+      protocol: 'https',
+      hostname: 'example.com',
+      socket: { localPort: 443 },
+    };
+
+    const r1 = controller.initialization({ deviceToken: 'x' } as never, httpDefault as never);
+    const r2 = controller.initialization({ deviceToken: 'x' } as never, httpsDefault as never);
+
+    expect((r1.Resources as Record<string, string>).image_host).toBe('http://example.com');
+    expect((r2.Resources as Record<string, string>).image_host).toBe('https://example.com');
+  });
+
+  it('initialization uses custom x-forwarded-port for non-standard HTTPS', () => {
+    const req = {
+      headers: { 'x-forwarded-host': 'myapp.com', 'x-forwarded-port': '8443', 'x-forwarded-proto': 'https' },
+      protocol: 'https',
+      hostname: 'myapp.com',
+      socket: { localPort: 3000 },
+    };
+
+    const payload = controller.initialization({ deviceToken: 'x' } as never, req as never);
+
+    expect((payload.Resources as Record<string, string>).image_host).toBe('https://myapp.com:8443');
+  });
+
+  it('initialization ignores x-forwarded-port when host already contains a port', () => {
+    const req = {
+      headers: { 'x-forwarded-host': 'myapp.com:8080', 'x-forwarded-port': '9090', 'x-forwarded-proto': 'https' },
+      protocol: 'https',
+      hostname: 'myapp.com',
+      socket: { localPort: 3000 },
+    };
+
+    const payload = controller.initialization({ deviceToken: 'x' } as never, req as never);
+
+    expect((payload.Resources as Record<string, string>).image_host).toBe('https://myapp.com:8080');
+  });
+
+  it('initialization takes first value when x-forwarded-host is an array', () => {
+    const req = {
+      headers: { 'x-forwarded-host': ['primary.example.com', 'fallback.example.com'], 'x-forwarded-proto': 'https' },
+      protocol: 'http',
+      hostname: 'localhost',
+      socket: { localPort: 3000 },
+    };
+
+    const payload = controller.initialization({ deviceToken: 'x' } as never, req as never);
+
+    expect((payload.Resources as Record<string, string>).image_host).toBe('https://primary.example.com');
+  });
+
   it('initialization appends local port when request host has no explicit port', () => {
     const req = {
       headers: { host: '127.0.0.1' },
@@ -66,12 +146,20 @@ describe('KoboSyncController', () => {
     expect((payload.Resources as Record<string, string>).image_host).toBe('http://127.0.0.1:8080');
   });
 
+  it('initialization does not append local port when it is the HTTP default', () => {
+    const req = {
+      headers: { host: 'example.com' },
+      protocol: 'http',
+      hostname: 'example.com',
+      socket: { localPort: 80 },
+    };
+
+    const payload = controller.initialization({ deviceToken: 'abc' } as never, req as never);
+
+    expect((payload.Resources as Record<string, string>).image_host).toBe('http://example.com');
+  });
+
   it('librarySync sets response headers and sends entitlement payload', async () => {
-    settingsService.getSettings.mockResolvedValue({
-      readingThreshold: 2.5,
-      finishedThreshold: 95,
-      twoWayProgressSync: true,
-    });
     syncService.getDelta.mockResolvedValue({
       entitlements: [{ NewEntitlement: { BookEntitlement: { Id: '12' } } }],
       hasMore: true,
@@ -87,12 +175,8 @@ describe('KoboSyncController', () => {
 
     await controller.librarySync({ deviceToken: 'token-9' } as never, { id: 21 } as never, 'old-sync', req as never, reply as never);
 
-    expect(settingsService.getSettings).toHaveBeenCalledWith(21);
-    expect(syncService.getDelta).toHaveBeenCalledWith(21, 'token-9', 'http://kobo.local:3000', 'old-sync', {
-      readingThreshold: 2.5,
-      finishedThreshold: 95,
-      twoWayProgressSync: true,
-    });
+    expect(settingsService.getSettings).not.toHaveBeenCalled();
+    expect(syncService.getDelta).toHaveBeenCalledWith(21, 'token-9', 'http://kobo.local:3000');
     expect(reply.header).toHaveBeenCalledWith('x-kobo-sync', 'continue');
     expect(reply.header).toHaveBeenCalledWith('x-kobo-synctoken', 'SYNC-2');
     expect(reply.send).toHaveBeenCalledWith([{ NewEntitlement: { BookEntitlement: { Id: '12' } } }]);
@@ -131,10 +215,13 @@ describe('KoboSyncController', () => {
     expect(reply.send).toHaveBeenNthCalledWith(4, [{ EntitlementId: '5' }]);
   });
 
-  it('updateReadingState reads thresholds and uses first ReadingStates element when provided', async () => {
+  it('updateReadingState uses first ReadingStates element when provided', async () => {
     settingsService.getSettings.mockResolvedValue({
-      readingThreshold: 3,
-      finishedThreshold: 92,
+      readingThreshold: 1,
+      finishedThreshold: 99,
+      convertToKepub: true,
+      forceEnableHyphenation: false,
+      kepubConversionLimitMb: 100,
     });
     readingStateService.upsertState.mockResolvedValue({ RequestResult: 'Success' });
     const reply = makeReply();
@@ -151,8 +238,7 @@ describe('KoboSyncController', () => {
       reply as never,
     );
 
-    expect(settingsService.getSettings).toHaveBeenCalledWith(8);
-    expect(readingStateService.upsertState).toHaveBeenCalledWith(8, 77, { EntitlementId: '77', CurrentBookmark: { ProgressPercent: 56 } }, 3, 92);
+    expect(readingStateService.upsertState).toHaveBeenCalledWith(8, 77, { EntitlementId: '77', CurrentBookmark: { ProgressPercent: 56 } }, 1, 99);
     expect(reply.send).toHaveBeenCalledWith({ RequestResult: 'Success' });
   });
 });

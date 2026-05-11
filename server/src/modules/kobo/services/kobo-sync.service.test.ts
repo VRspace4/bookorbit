@@ -106,14 +106,12 @@ describe('KoboSyncService', () => {
     getAccessibleLibraryIds: vi.fn(),
   };
   const readingStateService = {
-    getAndMarkStatesNeedingPush: vi.fn(),
     getRawState: vi.fn(),
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
     bookAccessService.getAccessibleLibraryIds.mockResolvedValue(null);
-    readingStateService.getAndMarkStatesNeedingPush.mockResolvedValue({ items: [], hasMore: false });
     readingStateService.getRawState.mockResolvedValue(null);
   });
 
@@ -132,24 +130,14 @@ describe('KoboSyncService', () => {
 
     db.query.koboLibrarySnapshots.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 9, userId: 5 });
 
-    await expect(
-      service.getDelta(5, 'device-token', 'https://reader.example.com', null, {
-        readingThreshold: 2,
-        finishedThreshold: 90,
-        twoWayProgressSync: false,
-      }),
-    ).resolves.toEqual({
+    await expect(service.getDelta(5, 'device-token', 'https://reader.example.com')).resolves.toEqual({
       entitlements: [{ ChangedTag: {} }],
       hasMore: false,
       syncToken: 'PX.token',
     });
     expect(createSpy).toHaveBeenCalledWith(5, eligible);
 
-    await service.getDelta(5, 'device-token', 'https://reader.example.com', null, {
-      readingThreshold: 2,
-      finishedThreshold: 90,
-      twoWayProgressSync: false,
-    });
+    await service.getDelta(5, 'device-token', 'https://reader.example.com');
     expect(reconcileSpy).toHaveBeenCalledWith(9, eligible);
     expect(pageSpy).toHaveBeenCalledTimes(2);
   });
@@ -230,43 +218,27 @@ describe('KoboSyncService', () => {
     db.query.koboLibrarySnapshots.findFirst.mockResolvedValue(null);
     const service = new KoboSyncService(db as never, bookAccessService as never, readingStateService as never);
 
-    await expect(
-      (service as any).getPageFromSnapshot(
-        7,
-        'tok',
-        'https://base',
-        { readingThreshold: 2, finishedThreshold: 90, twoWayProgressSync: false },
-        new Set(),
-      ),
-    ).resolves.toEqual({
+    await expect((service as any).getPageFromSnapshot(7, 'tok', 'https://base', new Set())).resolves.toEqual({
       entitlements: [],
       hasMore: false,
       syncToken: expect.stringMatching(/^PX\./),
     });
   });
 
-  it('getPageFromSnapshot returns progress + tags on final page when no pending rows', async () => {
+  it('getPageFromSnapshot returns tags on final page when no pending rows', async () => {
     const db = makeDb({ select: [[]] });
     db.query.koboLibrarySnapshots.findFirst.mockResolvedValue({ id: 1, userId: 7 });
-    readingStateService.getAndMarkStatesNeedingPush.mockResolvedValue({ items: [{ ChangedReadingState: {} }], hasMore: false });
     const service = new KoboSyncService(db as never, bookAccessService as never, readingStateService as never);
     vi.spyOn(service as any, 'buildTagItems').mockResolvedValue([{ ChangedTag: {} }]);
 
-    const result = await (service as any).getPageFromSnapshot(
-      7,
-      'tok',
-      'https://base',
-      { readingThreshold: 2, finishedThreshold: 90, twoWayProgressSync: true },
-      new Set([1]),
-    );
+    const result = await (service as any).getPageFromSnapshot(7, 'tok', 'https://base', new Set([1]));
 
     expect(result).toEqual({
-      entitlements: [{ ChangedReadingState: {} }, { ChangedTag: {} }],
+      entitlements: [{ ChangedTag: {} }],
       hasMore: false,
       syncToken: expect.stringMatching(/^PX\./),
     });
   });
-
   it('getPageFromSnapshot returns page entitlements for removed/new/changed books', async () => {
     const db = makeDb({
       select: [
@@ -287,13 +259,7 @@ describe('KoboSyncService', () => {
     );
     readingStateService.getRawState.mockResolvedValue(null);
 
-    const result = await (service as any).getPageFromSnapshot(
-      7,
-      'tok',
-      'https://base',
-      { readingThreshold: 2, finishedThreshold: 90, twoWayProgressSync: false },
-      new Set([1, 2, 3]),
-    );
+    const result = await (service as any).getPageFromSnapshot(7, 'tok', 'https://base', new Set([1, 2, 3]));
 
     expect(result.hasMore).toBe(false);
     expect(result.entitlements).toHaveLength(3);

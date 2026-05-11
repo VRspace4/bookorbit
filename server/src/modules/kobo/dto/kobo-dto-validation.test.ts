@@ -21,27 +21,35 @@ describe('Kobo DTO validation', () => {
     expect((await getErrors(CreateDeviceDto, { name: 'x'.repeat(256) })).length).toBeGreaterThan(0);
   });
 
-  it('validates threshold ranges and integer limits in update settings DTO', async () => {
+  it('validates boolean and integer limits in update settings DTO', async () => {
     expect(
       (
         await getErrors(UpdateSettingsDto, {
-          readingThreshold: 2.5,
-          finishedThreshold: 95,
           convertToKepub: true,
-          twoWayProgressSync: true,
           forceEnableHyphenation: false,
           kepubConversionLimitMb: 120,
         })
       ).length,
     ).toBe(0);
 
-    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 0.49 })).length).toBeGreaterThan(0);
-    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 10.01 })).length).toBeGreaterThan(0);
-    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 74 })).length).toBeGreaterThan(0);
-    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 101 })).length).toBeGreaterThan(0);
     expect((await getErrors(UpdateSettingsDto, { convertToKepub: 'true' })).length).toBeGreaterThan(0);
+    expect((await getErrors(UpdateSettingsDto, { forceEnableHyphenation: 'false' })).length).toBeGreaterThan(0);
     expect((await getErrors(UpdateSettingsDto, { kepubConversionLimitMb: 0 })).length).toBeGreaterThan(0);
     expect((await getErrors(UpdateSettingsDto, { kepubConversionLimitMb: 501 })).length).toBeGreaterThan(0);
     expect((await getErrors(UpdateSettingsDto, { kepubConversionLimitMb: 10.5 })).length).toBeGreaterThan(0);
+  });
+
+  it('validates readingThreshold and finishedThreshold bounds', async () => {
+    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 1 })).length).toBe(0);
+    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 0.5 })).length).toBe(0);
+    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 10 })).length).toBe(0);
+    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 99 })).length).toBe(0);
+    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 75 })).length).toBe(0);
+    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 100 })).length).toBe(0);
+
+    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 0.4 })).length).toBeGreaterThan(0);
+    expect((await getErrors(UpdateSettingsDto, { readingThreshold: 10.1 })).length).toBeGreaterThan(0);
+    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 74 })).length).toBeGreaterThan(0);
+    expect((await getErrors(UpdateSettingsDto, { finishedThreshold: 101 })).length).toBeGreaterThan(0);
   });
 });

@@ -539,7 +539,12 @@ onMounted(async () => {
 
   await load()
   const saved = progress.pageNumber.value
-  if (saved && saved > 1) currentPage.value = Math.min(saved - 1, pageCount.value - 1)
+  if (saved && saved > 1) {
+    currentPage.value = Math.min(saved - 1, pageCount.value - 1)
+  } else if (progress.percentage.value > 0 && pageCount.value > 1) {
+    const estimated = Math.round((progress.percentage.value / 100) * pageCount.value)
+    currentPage.value = Math.max(0, Math.min(estimated - 1, pageCount.value - 1))
+  }
 
   if (scrollMode.value === 'paginated' && isTwoPageEffective.value) {
     currentPage.value = spreadLayout.value.anchorForPage(currentPage.value)

@@ -13,7 +13,6 @@ export interface KoboSyncSettings {
   readingThreshold: number;
   finishedThreshold: number;
   convertToKepub: boolean;
-  twoWayProgressSync: boolean;
   forceEnableHyphenation: boolean;
   kepubConversionLimitMb: number;
 }
@@ -30,7 +29,6 @@ export interface UpdateKoboSyncSettingsRequest {
   readingThreshold?: number;
   finishedThreshold?: number;
   convertToKepub?: boolean;
-  twoWayProgressSync?: boolean;
   forceEnableHyphenation?: boolean;
   kepubConversionLimitMb?: number;
 }

@@ -511,7 +511,6 @@ export class BookRepository {
         currentBookmark: koboReadingStates.currentBookmark,
         statistics: koboReadingStates.statistics,
         statusInfo: koboReadingStates.statusInfo,
-        progressSyncedAt: koboReadingStates.progressSyncedAt,
         updatedAt: koboReadingStates.updatedAt,
       })
       .from(koboReadingStates)

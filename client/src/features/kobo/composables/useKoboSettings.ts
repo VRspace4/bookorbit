@@ -6,7 +6,6 @@ const settings = ref<KoboSyncSettings>({
   readingThreshold: 1,
   finishedThreshold: 99,
   convertToKepub: true,
-  twoWayProgressSync: false,
   forceEnableHyphenation: false,
   kepubConversionLimitMb: 100,
 })

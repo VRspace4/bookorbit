@@ -11,7 +11,6 @@ export interface KoboSettings {
   readingThreshold: number;
   finishedThreshold: number;
   convertToKepub: boolean;
-  twoWayProgressSync: boolean;
   forceEnableHyphenation: boolean;
   kepubConversionLimitMb: number;
 }
@@ -35,7 +34,6 @@ export class KoboSettingsService {
       readingThreshold: row.readingThreshold,
       finishedThreshold: row.finishedThreshold,
       convertToKepub: row.convertToKepub,
-      twoWayProgressSync: row.twoWayProgressSync,
       forceEnableHyphenation: row.forceEnableHyphenation,
       kepubConversionLimitMb: row.kepubConversionLimitMb,
     };
@@ -57,7 +55,6 @@ export class KoboSettingsService {
         readingThreshold: newReading,
         finishedThreshold: newFinished,
         convertToKepub: patch.convertToKepub ?? current.convertToKepub,
-        twoWayProgressSync: patch.twoWayProgressSync ?? current.twoWayProgressSync,
         forceEnableHyphenation: patch.forceEnableHyphenation ?? current.forceEnableHyphenation,
         kepubConversionLimitMb: patch.kepubConversionLimitMb ?? current.kepubConversionLimitMb,
         updatedAt: sql`now()`,
@@ -73,7 +70,6 @@ export class KoboSettingsService {
       readingThreshold: updated.readingThreshold,
       finishedThreshold: updated.finishedThreshold,
       convertToKepub: updated.convertToKepub,
-      twoWayProgressSync: updated.twoWayProgressSync,
       forceEnableHyphenation: updated.forceEnableHyphenation,
       kepubConversionLimitMb: updated.kepubConversionLimitMb,
     };

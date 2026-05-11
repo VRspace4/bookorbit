@@ -255,7 +255,12 @@ onMounted(async () => {
     await nextTick()
     measure()
 
-    const initialPage = progress.pageNumber.value && progress.pageNumber.value > 1 ? progress.pageNumber.value : 1
+    const initialPage =
+      progress.pageNumber.value && progress.pageNumber.value > 1
+        ? progress.pageNumber.value
+        : progress.percentage.value > 0
+          ? Math.max(1, Math.round((progress.percentage.value / 100) * totalPages.value))
+          : 1
     goToPage(initialPage, 'instant')
     await renderPage(initialPage)
 

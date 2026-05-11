@@ -33,7 +33,6 @@ const renaming = ref(false)
 const readingThreshold = ref(1)
 const finishedThreshold = ref(99)
 const convertToKepub = ref(true)
-const twoWayProgressSync = ref(false)
 const forceEnableHyphenation = ref(false)
 const kepubConversionLimitMb = ref(100)
 const savingSettings = ref(false)
@@ -59,7 +58,6 @@ onMounted(async () => {
     readingThreshold.value = settings.value.readingThreshold
     finishedThreshold.value = settings.value.finishedThreshold
     convertToKepub.value = settings.value.convertToKepub
-    twoWayProgressSync.value = settings.value.twoWayProgressSync
     forceEnableHyphenation.value = settings.value.forceEnableHyphenation
     kepubConversionLimitMb.value = settings.value.kepubConversionLimitMb
   } catch (e) {
@@ -152,7 +150,6 @@ async function saveSettings() {
       readingThreshold: readingThreshold.value,
       finishedThreshold: finishedThreshold.value,
       convertToKepub: convertToKepub.value,
-      twoWayProgressSync: twoWayProgressSync.value,
       forceEnableHyphenation: forceEnableHyphenation.value,
       kepubConversionLimitMb: kepubConversionLimitMb.value,
     })
@@ -167,7 +164,7 @@ async function saveSettings() {
 </script>
 
 <template>
-  <SettingsPageHeader title="Kobo Sync" subtitle="Pair your Kobo device to sync your library and reading progress." />
+  <SettingsPageHeader title="Kobo Sync" subtitle="Pair your Kobo device to sync your library." />
 
   <div v-if="loading" class="text-sm text-muted-foreground">Loading...</div>
   <div v-else-if="error" class="text-sm text-destructive">{{ error }}</div>
@@ -243,9 +240,7 @@ async function saveSettings() {
           <Tablet :size="18" class="text-muted-foreground/70" />
         </div>
         <p class="text-sm font-medium text-foreground">No devices yet</p>
-        <p class="text-xs text-muted-foreground mt-1 max-w-[240px] mx-auto">
-          Add a device to start syncing your books and reading progress to your Kobo.
-        </p>
+        <p class="text-xs text-muted-foreground mt-1 max-w-[240px] mx-auto">Add a device to start syncing your books to your Kobo.</p>
       </div>
 
       <div v-else-if="devices.length > 0" class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
@@ -306,14 +301,6 @@ async function saveSettings() {
           <ToggleSwitch v-model="forceEnableHyphenation" />
         </div>
 
-        <div class="flex items-center justify-between px-5 py-4 bg-card">
-          <div class="pr-8">
-            <p class="settings-label">Two-way progress sync</p>
-            <p class="settings-hint">Pushes progress from the web reader to your device during sync.</p>
-          </div>
-          <ToggleSwitch v-model="twoWayProgressSync" />
-        </div>
-
         <div class="px-5 py-5 bg-card space-y-5">
           <div>
             <p class="settings-label mb-1">Progress Thresholds</p>
@@ -339,7 +326,7 @@ async function saveSettings() {
             </div>
           </div>
 
-          <div class="pt-2">
+          <div>
             <div class="flex items-center justify-between mb-2">
               <label class="text-[12px] font-bold text-muted-foreground uppercase tracking-widest">KEPUB conversion limit</label>
               <span class="text-xs font-mono text-primary font-bold">{{ kepubConversionLimitMb }} MB</span>

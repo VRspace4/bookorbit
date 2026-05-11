@@ -120,7 +120,6 @@ export type BookKoboReadingState = {
   createdAtKobo: string | null;
   lastModifiedKobo: string | null;
   priorityTimestamp: string | null;
-  progressSyncedAt: string | null;
   updatedAt: string;
 };
 

@@ -39,11 +39,15 @@ function buildBaseUrl(req: FastifyRequest): string {
   const headerHost = fwdHost ?? req.headers.host;
   let host = headerHost ? (Array.isArray(headerHost) ? headerHost[0] : headerHost) : req.hostname;
 
-  if (!hasForwarded && !host.includes(':')) {
-    const localPort = req.socket?.localPort;
-    const isDefault = (proto === 'http' && localPort === 80) || (proto === 'https' && localPort === 443);
-    if (localPort && !isDefault) {
-      host = host + ':' + String(localPort);
+  if (!host.includes(':')) {
+    const port = fwdPort ? (Array.isArray(fwdPort) ? fwdPort[0] : fwdPort) : null;
+    if (port) {
+      const isDefault = (proto === 'http' && port === '80') || (proto === 'https' && port === '443');
+      if (!isDefault) host = host + ':' + port;
+    } else if (!hasForwarded) {
+      const localPort = req.socket?.localPort;
+      const isDefault = (proto === 'http' && localPort === 80) || (proto === 'https' && localPort === 443);
+      if (localPort && !isDefault) host = host + ':' + String(localPort);
     }
   }
 
@@ -89,14 +93,7 @@ export class KoboSyncController {
   ) {
     this.logger.log(`librarySync: userId=${user.id} syncToken=${incomingToken ?? 'none'}`);
     const baseUrl = buildBaseUrl(req);
-    const settings = await this.settingsService.getSettings(user.id);
-    const { entitlements, hasMore, syncToken } = await this.syncService.getDelta(
-      user.id,
-      device.deviceToken,
-      baseUrl,
-      incomingToken ?? null,
-      settings,
-    );
+    const { entitlements, hasMore, syncToken } = await this.syncService.getDelta(user.id, device.deviceToken, baseUrl);
     reply.header('x-kobo-sync', hasMore ? 'continue' : '');
     reply.header('x-kobo-synctoken', syncToken);
     reply.send(entitlements);
@@ -158,9 +155,9 @@ export class KoboSyncController {
   ) {
     const id = parseInt(bookId, 10);
     if (isNaN(id)) return this.proxyService.forward(req, reply, device.deviceToken);
+    const settings = await this.settingsService.getSettings(user.id);
     const states = body.ReadingStates as Record<string, unknown>[] | undefined;
     const statePayload = states?.[0] ?? body;
-    const settings = await this.settingsService.getSettings(user.id);
     const result = await this.readingStateService.upsertState(user.id, id, statePayload, settings.readingThreshold, settings.finishedThreshold);
     reply.send(result);
   }
