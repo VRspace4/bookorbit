@@ -209,7 +209,7 @@ export class BookDockFinalizeService implements OnModuleInit {
       let bookId: number;
       try {
         const { size } = await stat(destPath);
-        const bookFolderPath = dirname(destPath);
+        const bookFolderPath = library.organizationMode === 'book_per_file' ? destPath : dirname(destPath);
         ({ bookId } = await this.processor.createBookRecord(
           libraryId,
           folder.id,

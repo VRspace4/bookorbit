@@ -440,6 +440,30 @@ describe('BookDockFinalizeService', () => {
         success: true,
         bookId: 555,
       });
+      expect(processor.createBookRecord).toHaveBeenCalledWith(5, 9, '/library/new', '/library/new/book.epub', 'new/book.epub', 'epub', 100);
+    });
+
+    it('uses the file path as bookFolderPath in book_per_file mode', async () => {
+      const { service, processor } = makeService();
+      vi.spyOn(service as never, 'findLibraryOrFail').mockResolvedValue({
+        id: 5,
+        allowedFormats: ['epub'],
+        fileNamingPattern: null,
+        organizationMode: 'book_per_file',
+      } as never);
+      vi.spyOn(service as never, 'findFolderOrFail').mockResolvedValue({ id: 9, libraryId: 5, path: '/library' } as never);
+      vi.spyOn(service as never, 'resolveDestination').mockResolvedValue('/library/new/book.epub' as never);
+      vi.spyOn(service as never, 'findDuplicate').mockResolvedValue(null as never);
+      vi.spyOn(service as never, 'applyMetadata').mockResolvedValue(undefined as never);
+      vi.spyOn(service as never, 'cleanupBookDockRecord').mockResolvedValue(undefined as never);
+      mockAccess.mockRejectedValueOnce(new Error('missing'));
+      mockStat.mockResolvedValueOnce({ size: 100 } as never);
+      processor.createBookRecord.mockResolvedValueOnce({ bookId: 556 });
+
+      await expect(
+        (service as any).finalizeFile(makeRow({ targetLibraryId: 5, targetFolderId: 9 }), undefined, undefined, new Map(), 1, true),
+      ).resolves.toMatchObject({ success: true, bookId: 556 });
+      expect(processor.createBookRecord).toHaveBeenCalledWith(5, 9, '/library/new/book.epub', '/library/new/book.epub', 'new/book.epub', 'epub', 100);
     });
   });
 
