@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BookModule } from '../book/book.module';
 import { BookMetadataLockModule } from '../book-metadata-lock/book-metadata-lock.module';
+import { FileWriteModule } from '../file-write/file-write.module';
 import { LibraryModule } from '../library/library.module';
 import { MetadataPreferencesModule } from '../metadata-preferences/metadata-preferences.module';
 import { COVER_PROVIDERS } from './constants';
@@ -14,7 +15,7 @@ import { CoverProviderRegistry } from './provider-registry';
 const PROVIDER_CLASSES = [DuckDuckGoCoverProvider, ITunesCoverProvider];
 
 @Module({
-  imports: [BookModule, BookMetadataLockModule, LibraryModule, MetadataPreferencesModule],
+  imports: [BookModule, BookMetadataLockModule, FileWriteModule, LibraryModule, MetadataPreferencesModule],
   controllers: [CoverController],
   providers: [
     ...PROVIDER_CLASSES,

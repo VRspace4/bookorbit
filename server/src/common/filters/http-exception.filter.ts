@@ -12,6 +12,10 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     const exc = exception as Record<string, unknown> | undefined;
 
+    if (exc?.code === 'ERR_STREAM_PREMATURE_CLOSE') {
+      return;
+    }
+
     const status =
       exception instanceof HttpException
         ? exception.getStatus()
@@ -25,6 +29,10 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     if (status >= (HttpStatus.INTERNAL_SERVER_ERROR as number)) {
       this.logger.error(exception);
+    }
+
+    if (reply.sent) {
+      return;
     }
 
     reply.status(status).send({

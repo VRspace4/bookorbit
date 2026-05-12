@@ -1,14 +1,14 @@
 vi.mock('fs/promises', () => ({ stat: vi.fn() }));
-vi.mock('../scanner/lib/hash', () => ({ fingerprintFile: vi.fn() }));
+vi.mock('../scanner/lib/hash', () => ({ computeFileHash: vi.fn() }));
 
 import { InternalServerErrorException } from '@nestjs/common';
 import { stat } from 'fs/promises';
-import { fingerprintFile } from '../scanner/lib/hash';
+import { computeFileHash } from '../scanner/lib/hash';
 import { books, bookFiles, bookMetadata } from '../../db/schema';
 import { UploadProcessorService } from './upload-processor.service';
 
 const mockStat = stat as MockedFunction<typeof stat>;
-const mockFingerprintFile = fingerprintFile as MockedFunction<typeof fingerprintFile>;
+const mockComputeFileHash = computeFileHash as MockedFunction<typeof computeFileHash>;
 
 describe('UploadProcessorService', () => {
   const metadataService = {
@@ -76,7 +76,7 @@ describe('UploadProcessorService', () => {
     orchestrator.scheduleIfEligible.mockResolvedValue(undefined);
 
     mockStat.mockResolvedValue({ ino: 111, mtime: new Date('2024-01-01') } as Awaited<ReturnType<typeof stat>>);
-    mockFingerprintFile.mockResolvedValue('hash-abc');
+    mockComputeFileHash.mockResolvedValue('hash-abc');
 
     service = new UploadProcessorService(db as any, metadataService as any, orchestrator as any);
   });
@@ -96,7 +96,7 @@ describe('UploadProcessorService', () => {
         relPath: 'book/book.epub',
         ino: 111,
         sizeBytes: 12345,
-        hash: 'hash-abc',
+        fileHash: 'hash-abc',
         format: 'epub',
         role: 'content',
       }),

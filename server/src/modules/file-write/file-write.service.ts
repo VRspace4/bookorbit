@@ -7,6 +7,7 @@ import type { WriteResult } from '@bookorbit/types';
 import { NotificationType } from '@bookorbit/types';
 import { bookCoverDirPath, findPreferredBookCoverFileName } from '../../common/book-cover-storage';
 import { NotificationService } from '../notification/notification.service';
+import { computeFileHash } from '../scanner/lib/hash';
 import { FORMAT_CB7, FORMAT_CBZ, FORMAT_EPUB, FORMAT_PDF, createBookWriteFieldMask } from './file-write.constants';
 import { FileLockService } from './file-lock.service';
 import { FileWriteRepository } from './file-write.repository';
@@ -171,6 +172,10 @@ export class FileWriteService implements OnModuleDestroy {
 
       const writer = this.registry.get(format)!;
 
+      if (!dryRun && file.fileHash) {
+        await this.fileWriteRepo.recordHashHistory(file.id, file.fileHash, 'file_write');
+      }
+
       let result: WriteResult;
       try {
         result = await this.lockService.withLock(file.absolutePath, () =>
@@ -200,6 +205,16 @@ export class FileWriteService implements OnModuleDestroy {
       await this.fileWriteRepo.insertLog({ bookId, bookFileId: file.id, userId: userId ?? null, format, result, triggeredBy });
       if (result.status === 'success') {
         await this.fileWriteRepo.setLastWrittenAt(bookId, new Date());
+
+        const newHash = await computeFileHash(file.absolutePath).catch((err: unknown) => {
+          this.logger.warn(
+            `[file_write.hash_update] [fail] bookId=${bookId} bookFileId=${file.id} errorClass=${err instanceof Error ? err.constructor.name : 'Unknown'} error="${(err instanceof Error ? err.message : String(err)).slice(0, 100)}" - post-write hash recompute failed`,
+          );
+          return null;
+        });
+        if (newHash) {
+          await this.fileWriteRepo.updateFileHash(file.id, newHash);
+        }
 
         if (userId && triggeredBy === 'sync') {
           this.notificationService

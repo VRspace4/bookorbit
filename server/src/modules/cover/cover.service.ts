@@ -13,6 +13,7 @@ import * as schema from '../../db/schema';
 import { bookMetadata } from '../../db/schema';
 import { BookReadService } from '../book/book-read.service';
 import { BookMetadataLockService } from '../book-metadata-lock/book-metadata-lock.service';
+import { FileWriteService } from '../file-write/file-write.service';
 import { LibraryService } from '../library/library.service';
 import { generateThumbnail, imageExt } from '../metadata/lib/cover';
 import {
@@ -46,6 +47,7 @@ export class CoverService {
     @Inject(DB) private readonly db: Db,
     private readonly bookReadService: BookReadService,
     private readonly bookMetadataLockService: BookMetadataLockService,
+    private readonly fileWriteService: FileWriteService,
     private readonly libraryService: LibraryService,
     private readonly config: ConfigService,
     private readonly providerRegistry: CoverProviderRegistry,
@@ -110,6 +112,7 @@ export class CoverService {
       await this.bookMetadataLockService.assertFieldsUnlocked(bookId, ['cover']);
       await this.saveCustomCover(bookId, buffer);
       await this.setCoverSource(bookId, 'custom');
+      this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
       this.logger.log(
         `[cover.upload] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} coverSource=custom - custom cover upload completed`,
       );
@@ -133,6 +136,7 @@ export class CoverService {
       const { buffer } = await this.fetchRemoteImage(url);
       await this.saveCustomCover(bookId, buffer);
       await this.setCoverSource(bookId, 'custom');
+      this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
       this.logger.log(
         `[cover.upload_from_url] [end] bookId=${bookId} userId=${user.id} urlHost=${hostForLog(url)} durationMs=${Date.now() - startedAt} coverSource=custom - custom cover upload from URL completed`,
       );
@@ -168,6 +172,7 @@ export class CoverService {
       const thumb = await generateThumbnail(bytes);
       await writeFile(bookThumbnailPath(this.appDataPath, bookId), thumb);
       await this.setCoverSource(bookId, 'extracted');
+      this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
       this.logger.log(
         `[cover.delete] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} coverSource=extracted - cover deletion completed`,
       );

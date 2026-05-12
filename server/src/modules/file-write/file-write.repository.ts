@@ -20,6 +20,7 @@ export class FileWriteRepository {
         absolutePath: bookFiles.absolutePath,
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
+        fileHash: bookFiles.fileHash,
         libraryId: books.libraryId,
       })
       .from(books)
@@ -60,6 +61,14 @@ export class FileWriteRepository {
       .innerJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
       .where(and(eq(books.libraryId, libraryId), ne(books.status, 'missing')))
       .orderBy(asc(books.id));
+  }
+
+  async updateFileHash(bookFileId: number, fileHash: string): Promise<void> {
+    await this.db.update(bookFiles).set({ fileHash, updatedAt: new Date() }).where(eq(bookFiles.id, bookFileId));
+  }
+
+  async recordHashHistory(bookFileId: number, fileHash: string, reason: string): Promise<void> {
+    await this.db.insert(schema.bookFileHashHistory).values({ bookFileId, fileHash, reason }).onConflictDoNothing();
   }
 
   async loadPayload(bookId: number) {

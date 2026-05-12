@@ -21,13 +21,13 @@ import { ScanJobStore } from './scan-job-store.service';
 import { DEFAULT_FORMAT_PRIORITY } from './lib/classify';
 import type { BookCandidate, FileStat } from './lib/walk';
 import { findBookCandidates, findLooseFileCandidates, buildSingleBookCandidate } from './lib/walk';
-import { fingerprintFile } from './lib/hash';
+import { computeFileHash } from './lib/hash';
 import * as assembleBookCardsModule from '../book/utils/assemble-book-cards';
 
 const mockFindCandidates = findBookCandidates as MockedFunction<typeof findBookCandidates>;
 const mockFindLooseCandidates = findLooseFileCandidates as MockedFunction<typeof findLooseFileCandidates>;
 const mockBuildSingleCandidate = buildSingleBookCandidate as MockedFunction<typeof buildSingleBookCandidate>;
-const mockFingerprint = fingerprintFile as MockedFunction<typeof fingerprintFile>;
+const mockFingerprint = computeFileHash as MockedFunction<typeof computeFileHash>;
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockStat = stat as MockedFunction<typeof stat>;
 
@@ -58,7 +58,7 @@ function makeBookFile(overrides: Record<string, unknown> = {}) {
     ino: 1001,
     sizeBytes: 1024,
     mtime: new Date('2024-01-01'),
-    hash: 'abc123',
+    fileHash: 'abc123',
     format: 'epub',
     role: 'content',
     sortOrder: 0,
@@ -545,7 +545,7 @@ describe('file identity resolution', () => {
 
   it('updates path when hash matches a known file from a different filesystem (cross-fs move)', async () => {
     const fileStat = makeFileStat({ absolutePath: '/library/moved.epub', relPath: 'moved.epub', ino: 8888 });
-    const existingFile = makeBookFile({ absolutePath: '/old-library/book.epub', ino: 1111, hash: 'fixed-hash' });
+    const existingFile = makeBookFile({ absolutePath: '/old-library/book.epub', ino: 1111, fileHash: 'fixed-hash' });
 
     const repo = makeRepo({
       findBookFilesByLibraryFolder: vi.fn().mockResolvedValue([existingFile]),
@@ -1107,7 +1107,7 @@ describe('cross-library transfer', () => {
       absolutePath: '/source/Book/book.epub',
       relPath: 'Book/book.epub',
       ino: 4242,
-      hash: 'transfer-hash',
+      fileHash: 'transfer-hash',
     });
 
     const repo = makeRepo({
@@ -1168,7 +1168,7 @@ describe('cross-library transfer', () => {
       absolutePath: '/source/Book/book.epub',
       relPath: 'Book/book.epub',
       ino: 4343,
-      hash: 'transfer-hash',
+      fileHash: 'transfer-hash',
     });
 
     const repo = makeRepo({
@@ -1226,7 +1226,7 @@ describe('cross-library transfer', () => {
       absolutePath: '/source/Book/book.epub',
       relPath: 'Book/book.epub',
       ino: 2222,
-      hash: 'transfer-hash',
+      fileHash: 'transfer-hash',
     });
 
     const repo = makeRepo({
@@ -1290,7 +1290,7 @@ describe('cross-library transfer', () => {
       absolutePath: '/source/Book/book.epub',
       relPath: 'Book/book.epub',
       ino: 5151,
-      hash: 'transfer-hash',
+      fileHash: 'transfer-hash',
     });
     const repo = makeRepo({
       findLibraryFolders: vi.fn().mockResolvedValue([{ id: 30, path: '/dest', libraryId: 4 }]),

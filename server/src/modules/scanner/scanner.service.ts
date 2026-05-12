@@ -12,7 +12,7 @@ import { basename, dirname, relative, sep } from 'path';
 import { readdir, stat } from 'fs/promises';
 
 import { classifyFile, DEFAULT_FORMAT_PRIORITY, FileRole, isAudioFormat } from './lib/classify';
-import { fingerprintFile } from './lib/hash';
+import { computeFileHash } from './lib/hash';
 import { waitForStability } from './lib/stability';
 import { BookCandidate, FileStat, findBookCandidates, findLooseFileCandidates, buildSingleBookCandidate, type WalkResult } from './lib/walk';
 import { ScannerRepository } from './scanner.repository';
@@ -30,7 +30,7 @@ interface FileByPathEntry {
   ino: number;
   sizeBytes: number | null;
   mtime: Date | null;
-  hash: string | null;
+  fileHash: string | null;
   sortOrder: number | null;
 }
 
@@ -139,7 +139,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: number;
       sizeBytes: number | null;
       mtime: Date | null;
-      hash: string | null;
+      fileHash: string | null;
       sortOrder?: number | null;
     }>,
   ): ScanLookupMaps {
@@ -161,7 +161,7 @@ export class ScannerService implements OnApplicationBootstrap {
     const fileByPath = new Map<string, FileByPathEntry>(
       knownFiles.map((f) => [
         f.absolutePath,
-        { id: f.id, bookId: f.bookId, ino: f.ino, sizeBytes: f.sizeBytes, mtime: f.mtime, hash: f.hash, sortOrder: f.sortOrder ?? null },
+        { id: f.id, bookId: f.bookId, ino: f.ino, sizeBytes: f.sizeBytes, mtime: f.mtime, fileHash: f.fileHash, sortOrder: f.sortOrder ?? null },
       ]),
     );
 
@@ -683,8 +683,7 @@ export class ScannerService implements OnApplicationBootstrap {
         ino: f.ino,
         sizeBytes: f.sizeBytes,
         mtime: f.mtime,
-        hash: f.hash,
-        sortOrder: f.sortOrder,
+        fileHash: f.fileHash,
       })),
     );
   }
@@ -1422,22 +1421,22 @@ export class ScannerService implements OnApplicationBootstrap {
 
     if (sourceBookId == null) {
       for (const file of contentFiles) {
-        let hash: string;
+        let fileHash: string;
         try {
-          hash = await fingerprintFile(file.absolutePath);
+          fileHash = await computeFileHash(file.absolutePath);
         } catch (err) {
           const code = (err as NodeJS.ErrnoException).code;
           if (code === 'ENOENT' || code === 'EACCES') continue;
           throw err;
         }
 
-        const byHash = await this.scannerRepo.findMissingBookFileWithContextByHash(hash);
+        const byHash = await this.scannerRepo.findMissingBookFileWithContextByHash(fileHash);
         if (byHash) {
           sourceBookId = byHash.file.bookId;
           break;
         }
 
-        const byHashAny = await this.scannerRepo.findBookFileWithContextByHash(hash);
+        const byHashAny = await this.scannerRepo.findBookFileWithContextByHash(fileHash);
         if (!byHashAny || byHashAny.file.absolutePath === file.absolutePath) continue;
         if (byHashAny.libraryId === libraryId) continue;
         const previousPathStat = await stat(byHashAny.file.absolutePath).catch(() => null);
@@ -1553,7 +1552,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      hash: byPath.hash,
+      fileHash: byPath.fileHash,
       sortOrder,
     });
     if (fileStat.ino !== 0) {
@@ -1599,7 +1598,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      hash: oldPathEntry?.hash ?? null,
+      fileHash: oldPathEntry?.fileHash ?? null,
       sortOrder,
     });
     fileByIno.set(fileStat.ino, { id: byIno.id, bookId, absolutePath: fileStat.absolutePath });
@@ -1662,7 +1661,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      hash: globalByIno.file.hash,
+      fileHash: globalByIno.file.fileHash,
       sortOrder,
     });
     fileByIno.set(fileStat.ino, { id: globalByIno.file.id, bookId, absolutePath: fileStat.absolutePath });
@@ -1681,9 +1680,9 @@ export class ScannerService implements OnApplicationBootstrap {
     counts: ScanCounts,
     isFirstScan: boolean,
   ): Promise<{ isNew: boolean; reassigned: boolean; fileId: number | null }> {
-    let hash: string;
+    let fileHash: string;
     try {
-      hash = await fingerprintFile(fileStat.absolutePath);
+      fileHash = await computeFileHash(fileStat.absolutePath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'EACCES') {
@@ -1696,7 +1695,7 @@ export class ScannerService implements OnApplicationBootstrap {
     }
 
     if (!isFirstScan) {
-      const byHash = await this.scannerRepo.findBookFileByHash(hash, libraryFolderId);
+      const byHash = await this.scannerRepo.findBookFileByHash(fileHash, libraryFolderId);
       if (byHash) {
         const oldAbsolutePath = byHash.absolutePath;
         await this.scannerRepo.updateBookFile(byHash.id, {
@@ -1726,7 +1725,7 @@ export class ScannerService implements OnApplicationBootstrap {
           ino: fileStat.ino,
           sizeBytes: fileStat.sizeBytes,
           mtime: fileStat.mtime,
-          hash: byHash.hash,
+          fileHash: byHash.fileHash,
           sortOrder,
         });
         if (fileStat.ino !== 0) {
@@ -1735,13 +1734,13 @@ export class ScannerService implements OnApplicationBootstrap {
         return { isNew: false, reassigned: byHash.bookId !== bookId, fileId: byHash.id };
       }
 
-      let globalByHash = await this.scannerRepo.findBookFileWithContextByHash(hash);
+      let globalByHash = await this.scannerRepo.findBookFileWithContextByHash(fileHash);
       if (
         !globalByHash ||
         globalByHash.file.absolutePath === fileStat.absolutePath ||
         (globalByHash.file.bookId !== bookId && globalByHash.bookStatus !== 'missing')
       ) {
-        globalByHash = await this.scannerRepo.findMissingBookFileWithContextByHash(hash);
+        globalByHash = await this.scannerRepo.findMissingBookFileWithContextByHash(fileHash);
       }
 
       if (
@@ -1758,7 +1757,7 @@ export class ScannerService implements OnApplicationBootstrap {
           ino: fileStat.ino,
           sizeBytes: fileStat.sizeBytes,
           mtime: fileStat.mtime,
-          hash,
+          fileHash,
           format,
           role,
           sortOrder,
@@ -1778,7 +1777,7 @@ export class ScannerService implements OnApplicationBootstrap {
           ino: fileStat.ino,
           sizeBytes: fileStat.sizeBytes,
           mtime: fileStat.mtime,
-          hash,
+          fileHash,
           sortOrder,
         });
         if (fileStat.ino !== 0) {
@@ -1796,7 +1795,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      hash,
+      fileHash,
       format,
       role,
       sortOrder,
@@ -1808,7 +1807,7 @@ export class ScannerService implements OnApplicationBootstrap {
       ino: fileStat.ino,
       sizeBytes: fileStat.sizeBytes,
       mtime: fileStat.mtime,
-      hash,
+      fileHash,
       sortOrder,
     });
     if (fileStat.ino !== 0) {

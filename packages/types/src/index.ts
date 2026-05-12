@@ -17,6 +17,7 @@ export * from "./reader-settings";
 export * from "./scanner";
 export * from "./opds";
 export * from "./kobo";
+export * from "./koreader";
 export * from "./book-dock";
 export * from "./file-write";
 export * from "./epub";

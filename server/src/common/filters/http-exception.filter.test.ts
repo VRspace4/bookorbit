@@ -3,10 +3,10 @@ import { BadRequestException, HttpException, HttpStatus, Logger } from '@nestjs/
 
 import { GlobalExceptionFilter } from './http-exception.filter';
 
-function makeHost() {
+function makeHost(options: { sent?: boolean } = {}) {
   const send = vi.fn();
   const status = vi.fn().mockReturnValue({ send });
-  const reply = { status };
+  const reply = { status, sent: options.sent ?? false };
   const request = { url: '/api/books/1', id: 'req-123' };
 
   const host = {
@@ -82,5 +82,25 @@ describe('GlobalExceptionFilter', () => {
     filter.catch(new HttpException({ message: 'conflict' }, HttpStatus.CONFLICT), host);
 
     expect(loggerSpy).not.toHaveBeenCalled();
+  });
+
+  it('silently ignores ERR_STREAM_PREMATURE_CLOSE without sending a reply', () => {
+    const loggerSpy = vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const filter = new GlobalExceptionFilter();
+    const { host, status } = makeHost();
+
+    filter.catch({ code: 'ERR_STREAM_PREMATURE_CLOSE', message: 'Premature close' }, host);
+
+    expect(loggerSpy).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('skips sending a reply when reply is already sent', () => {
+    const filter = new GlobalExceptionFilter();
+    const { host, status } = makeHost({ sent: true });
+
+    filter.catch(new BadRequestException('too late'), host);
+
+    expect(status).not.toHaveBeenCalled();
   });
 });

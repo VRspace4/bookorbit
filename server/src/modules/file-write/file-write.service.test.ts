@@ -2,6 +2,14 @@ import { ConfigService } from '@nestjs/config';
 import type { MockedFunction } from 'vitest';
 import { readdir, readFile } from 'fs/promises';
 
+const { computeFileHashMock } = vi.hoisted(() => ({
+  computeFileHashMock: vi.fn(),
+}));
+
+vi.mock('../scanner/lib/hash', () => ({
+  computeFileHash: computeFileHashMock,
+}));
+
 import { FileWriteService } from './file-write.service';
 
 vi.mock('fs/promises', async () => {
@@ -35,6 +43,8 @@ describe('FileWriteService', () => {
       loadPayload: vi.fn(),
       insertLog: vi.fn().mockResolvedValue(undefined),
       setLastWrittenAt: vi.fn().mockResolvedValue(undefined),
+      updateFileHash: vi.fn().mockResolvedValue(undefined),
+      recordHashHistory: vi.fn().mockResolvedValue(undefined),
     };
     const writer = {
       write: vi.fn(),
@@ -61,6 +71,8 @@ describe('FileWriteService', () => {
     vi.clearAllMocks();
     mockReaddir.mockReset();
     mockReadFile.mockReset();
+    computeFileHashMock.mockReset();
+    computeFileHashMock.mockRejectedValue(new Error('missing file'));
   });
 
   it('returns skip when no primary file exists', async () => {
@@ -152,6 +164,7 @@ describe('FileWriteService', () => {
       absolutePath: '/books/lib/book.epub',
       format: 'epub',
       sizeBytes: 40,
+      fileHash: 'oldhash',
       libraryId: 2,
     });
     fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Dune', authors: [{ name: 'Frank Herbert', sortName: null }] });
@@ -173,7 +186,31 @@ describe('FileWriteService', () => {
       expect.objectContaining({ dryRun: false }),
     );
     expect(mockReadFile).toHaveBeenCalledWith('/books/covers/5/cover_custom.png');
+
     expect(fileWriteRepo.insertLog).toHaveBeenCalledTimes(1);
+    expect(fileWriteRepo.setLastWrittenAt).toHaveBeenCalledWith(5, expect.any(Date));
+    expect(fileWriteRepo.recordHashHistory).toHaveBeenCalledWith(1, 'oldhash', 'file_write');
+  });
+
+  it('updates file hash after successful write', async () => {
+    const { service, fileWriteRepo, writer } = makeService();
+
+    fileWriteRepo.findPrimaryFileForBook.mockResolvedValue({
+      id: 1,
+      absolutePath: '/books/lib/book.epub',
+      format: 'epub',
+      sizeBytes: 40,
+      fileHash: 'oldhash',
+      libraryId: 2,
+    });
+    fileWriteRepo.loadPayload.mockResolvedValue({ title: 'Book' });
+    fileWriteRepo.findLibraryFileWriteConfig.mockResolvedValue({ ...DEFAULT_LIB_CONFIG, fileWriteWriteCover: false });
+    writer.write.mockResolvedValue({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+    computeFileHashMock.mockResolvedValue('newhash');
+
+    await expect(service.writeToFile(5, 'auto')).resolves.toEqual({ status: 'success', fieldsWritten: ['title'], durationMs: 5 });
+
+    expect(fileWriteRepo.updateFileHash).toHaveBeenCalledWith(1, 'newhash');
     expect(fileWriteRepo.setLastWrittenAt).toHaveBeenCalledWith(5, expect.any(Date));
   });
 

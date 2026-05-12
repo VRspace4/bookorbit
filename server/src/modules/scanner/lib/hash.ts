@@ -5,33 +5,22 @@ const BASE = 1024;
 const BLOCK_SIZE = 1024;
 
 /**
- * Partial MD5 fingerprint — reads 1 KB blocks from exponentially spaced positions
- * (1 KB, 4 KB, 16 KB, … up to 1 GB) rather than the entire file.
- * Used only when path and inode lookups both fail (cross-filesystem move detection).
- * For files too small to reach the first sample offset, fall back to the first
- * 1 KB so tiny files do not collapse to the same empty hash.
+ * Partial MD5 fingerprint matching KOReader's util.partialMD5 algorithm.
+ * Reads 1 KB blocks from positions 0, 1 KB, 4 KB, 16 KB, … up to 1 GB.
+ * The loop starts at i=-1 so that `BASE << (2 * -1)` overflows 32-bit to 0,
+ * producing the same byte sequence KOReader uses for its document hash.
  */
-export async function fingerprintFile(absolutePath: string): Promise<string> {
+export async function computeFileHash(absolutePath: string): Promise<string> {
   const fh = await open(absolutePath, 'r');
   try {
     const { size } = await fh.stat();
     const hash = createHash('md5');
     const buf = Buffer.allocUnsafe(BLOCK_SIZE);
-    let sampled = false;
 
-    for (let i = 0; i <= 10; i++) {
-      const position = BASE << (2 * i);
+    for (let i = -1; i <= 10; i++) {
+      const position = BASE << (2 * i); // BASE << -2 overflows 32-bit to 0 when i = -1
       if (position >= size) break;
       const { bytesRead } = await fh.read(buf, 0, BLOCK_SIZE, position);
-      if (bytesRead > 0) {
-        hash.update(buf.subarray(0, bytesRead));
-        sampled = true;
-      }
-    }
-
-    if (!sampled && size > 0) {
-      const readLength = Math.min(BLOCK_SIZE, size);
-      const { bytesRead } = await fh.read(buf, 0, readLength, 0);
       if (bytesRead > 0) {
         hash.update(buf.subarray(0, bytesRead));
       }

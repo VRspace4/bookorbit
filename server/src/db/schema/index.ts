@@ -23,3 +23,4 @@ export * from './email-send-log';
 export * from './notifications';
 export * from './tools';
 export * from './fonts';
+export * from './koreader';

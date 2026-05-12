@@ -15,6 +15,13 @@
       "when": 1778533843441,
       "tag": "0001_remove_two_way_progress_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1778543840852,
+      "tag": "0002_koreader-sync",
+      "breakpoints": true
     }
   ]
 }

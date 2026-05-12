@@ -122,7 +122,7 @@ describe('ScannerRepository', () => {
     queues.select.push([{ id: 1, status: 'present', folderPath: '/books/A' }]);
     queues.select.push([{ bookId: 1, absolutePath: '/books/A/book.epub', format: 'epub' }]);
     queues.select.push([{ id: 7, absolutePath: '/books/A/book.epub' }]);
-    queues.select.push([{ id: 90, bookId: 1, absolutePath: '/books/A/book.epub', ino: 999, sizeBytes: 10, mtime: new Date(), hash: 'x' }]);
+    queues.select.push([{ id: 90, bookId: 1, absolutePath: '/books/A/book.epub', ino: 999, sizeBytes: 10, mtime: new Date(), fileHash: 'x' }]);
     queues.select.push([{ id: 15, bookId: 1, libraryId: 4, primaryFileId: 90 }]);
     queues.select.push([{ id: 16, bookId: 2, libraryId: 5, primaryFileId: 91 }]);
     queues.select.push([{ id: 3, folderPath: '/books/A' }]);
@@ -136,7 +136,7 @@ describe('ScannerRepository', () => {
     await expect(repo.findPrimaryBookFilesByLibrary(4)).resolves.toEqual([{ bookId: 1, absolutePath: '/books/A/book.epub', format: 'epub' }]);
     await expect(repo.findPrimaryBookFilesByBookId(1)).resolves.toEqual([{ id: 7, absolutePath: '/books/A/book.epub' }]);
     await expect(repo.findBookFilesByLibraryFolder(4)).resolves.toEqual([
-      { id: 90, bookId: 1, absolutePath: '/books/A/book.epub', ino: 999, sizeBytes: 10, mtime: expect.any(Date), hash: 'x' },
+      { id: 90, bookId: 1, absolutePath: '/books/A/book.epub', ino: 999, sizeBytes: 10, mtime: expect.any(Date), fileHash: 'x' },
     ]);
     await expect(repo.findBookFileByAbsolutePath('/books/A/book.epub')).resolves.toEqual({ id: 15, bookId: 1, libraryId: 4, primaryFileId: 90 });
     await expect(repo.findBookFileByAbsolutePath('/books/B/book.epub', 5)).resolves.toEqual({ id: 16, bookId: 2, libraryId: 5, primaryFileId: 91 });
@@ -150,23 +150,24 @@ describe('ScannerRepository', () => {
 
   it('creates and updates book files and supports hash lookup', async () => {
     const { repo, queues, chains, db } = makeRepo();
-    queues.select.push([{ id: 50, hash: 'abc123' }]);
-    queues.insert.push([{ id: 300, absolutePath: '/books/C/book.epub', hash: 'abc123' }]);
-    queues.update.push([{ id: 300, absolutePath: '/books/C/book.epub', hash: 'abc123', format: 'epub' }]);
+    queues.select.push([{ id: 50, fileHash: 'abc123' }]);
+    queues.insert.push([{ id: 300, absolutePath: '/books/C/book.epub', fileHash: 'abc123' }]);
+    queues.update.push([]); // orphan-sync update inside createBookFile
+    queues.update.push([{ id: 300, absolutePath: '/books/C/book.epub', fileHash: 'abc123', format: 'epub' }]);
 
-    await expect(repo.findBookFileByHash('abc123', 9)).resolves.toEqual({ id: 50, hash: 'abc123' });
+    await expect(repo.findBookFileByHash('abc123', 9)).resolves.toEqual({ id: 50, fileHash: 'abc123' });
     await expect(repo.createBookFile({ bookId: 1, libraryFolderId: 9, absolutePath: '/books/C/book.epub' } as any)).resolves.toEqual({
       id: 300,
       absolutePath: '/books/C/book.epub',
-      hash: 'abc123',
+      fileHash: 'abc123',
     });
     await expect(repo.updateBookFile(300, { format: 'epub' } as any)).resolves.toEqual({
       id: 300,
       absolutePath: '/books/C/book.epub',
-      hash: 'abc123',
+      fileHash: 'abc123',
       format: 'epub',
     });
-    expect(chains.update[0].mocks.set).toHaveBeenCalledWith(expect.objectContaining({ format: 'epub' }));
+    expect(chains.update[1].mocks.set).toHaveBeenCalledWith(expect.objectContaining({ format: 'epub' }));
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
 
@@ -203,10 +204,10 @@ describe('ScannerRepository', () => {
     queues.select.push([{ id: 2, bookId: 2 }]);
     queues.select.push([{ id: 10, file: { id: 10, ino: 123 } }]);
     queues.select.push([{ id: 11, file: { id: 11, ino: 124 } }]);
-    queues.select.push([{ id: 12, file: { id: 12, hash: 'x' } }]);
-    queues.select.push([{ id: 13, file: { id: 13, hash: 'y' } }]);
-    queues.select.push([{ id: 14, file: { id: 14, hash: 'z' } }]);
-    queues.select.push([{ id: 15, file: { id: 15, hash: 'zz' } }]);
+    queues.select.push([{ id: 12, file: { id: 12, fileHash: 'x' } }]);
+    queues.select.push([{ id: 13, file: { id: 13, fileHash: 'y' } }]);
+    queues.select.push([{ id: 14, file: { id: 14, fileHash: 'z' } }]);
+    queues.select.push([{ id: 15, file: { id: 15, fileHash: 'zz' } }]);
     queues.select.push([{ id: 20, bookId: 4, absolutePath: '/books/D/book.epub' }]);
     queues.select.push([{ id: 21, bookId: 5, absolutePath: '/books/E/book.epub' }]);
 
@@ -214,12 +215,12 @@ describe('ScannerRepository', () => {
     await expect(repo.findBookFilesByBookIds([1, 2])).resolves.toEqual([{ id: 2, bookId: 2 }]);
     await expect(repo.findBookFileWithContextByIno(123)).resolves.toEqual({ id: 10, file: { id: 10, ino: 123 } });
     await expect(repo.findBookFileWithContextByIno(124, 4)).resolves.toEqual({ id: 11, file: { id: 11, ino: 124 } });
-    await expect(repo.findMissingBookFileWithContextByIno(125)).resolves.toEqual({ id: 12, file: { id: 12, hash: 'x' } });
-    await expect(repo.findBookFileWithContextByHash('abc')).resolves.toEqual({ id: 13, file: { id: 13, hash: 'y' } });
-    await expect(repo.findMissingBookFileWithContextByHash('def')).resolves.toEqual({ id: 14, file: { id: 14, hash: 'z' } });
+    await expect(repo.findMissingBookFileWithContextByIno(125)).resolves.toEqual({ id: 12, file: { id: 12, fileHash: 'x' } });
+    await expect(repo.findBookFileWithContextByHash('abc')).resolves.toEqual({ id: 13, file: { id: 13, fileHash: 'y' } });
+    await expect(repo.findMissingBookFileWithContextByHash('def')).resolves.toEqual({ id: 14, file: { id: 14, fileHash: 'z' } });
     await expect(repo.findBookFileByAbsolutePath('/books/D/book.epub', 4)).resolves.toEqual({
       id: 15,
-      file: { id: 15, hash: 'zz' },
+      file: { id: 15, fileHash: 'zz' },
     });
     await expect(repo.findBookFilesByBookId(4)).resolves.toEqual([{ id: 20, bookId: 4, absolutePath: '/books/D/book.epub' }]);
     await expect(repo.findBookFilesByBookIds([4, 5])).resolves.toEqual([{ id: 21, bookId: 5, absolutePath: '/books/E/book.epub' }]);

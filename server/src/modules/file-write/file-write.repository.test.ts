@@ -12,7 +12,7 @@ describe('FileWriteRepository', () => {
   }
 
   it('findPrimaryFileForBook returns row or null', async () => {
-    const primary = { id: 1, absolutePath: '/a.epub', format: 'epub', sizeBytes: 5, libraryId: 10 };
+    const primary = { id: 1, absolutePath: '/a.epub', format: 'epub', sizeBytes: 5, fileHash: 'hash', libraryId: 10 };
     const c1 = chain([primary]);
     const c2 = chain([]);
 

@@ -56,6 +56,7 @@ import { NotificationModule } from './modules/notification/notification.module';
 import { SeriesModule } from './modules/series/series.module';
 import { EntityManagerModule } from './modules/entity-manager/entity-manager.module';
 import { FontModule } from './modules/font/font.module';
+import { KoreaderModule } from './modules/koreader/koreader.module';
 
 @Module({
   imports: [
@@ -120,6 +121,7 @@ import { FontModule } from './modules/font/font.module';
     SeriesModule,
     EntityManagerModule,
     FontModule,
+    KoreaderModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

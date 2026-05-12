@@ -4,7 +4,19 @@ import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { authors, bookAuthors, bookFiles, bookGenres, bookMetadata, books, genres, libraries, libraryFolders, scanJobs } from '../../db/schema';
+import {
+  authors,
+  bookAuthors,
+  bookFiles,
+  bookGenres,
+  bookMetadata,
+  books,
+  genres,
+  koreaderDeviceProgress,
+  libraries,
+  libraryFolders,
+  scanJobs,
+} from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -95,8 +107,7 @@ export class ScannerRepository {
         ino: bookFiles.ino,
         sizeBytes: bookFiles.sizeBytes,
         mtime: bookFiles.mtime,
-        hash: bookFiles.hash,
-        format: bookFiles.format,
+        fileHash: bookFiles.fileHash,
         role: bookFiles.role,
         sortOrder: bookFiles.sortOrder,
         durationSeconds: bookFiles.durationSeconds,
@@ -169,25 +180,32 @@ export class ScannerRepository {
         ino: bookFiles.ino,
         sizeBytes: bookFiles.sizeBytes,
         mtime: bookFiles.mtime,
-        hash: bookFiles.hash,
+        fileHash: bookFiles.fileHash,
         sortOrder: bookFiles.sortOrder,
       })
       .from(bookFiles)
       .where(eq(bookFiles.libraryFolderId, libraryFolderId));
   }
 
-  async findBookFileByHash(hash: string, libraryFolderId: number) {
+  async findBookFileByHash(fileHash: string, libraryFolderId: number) {
     const [file] = await this.db
       .select()
       .from(bookFiles)
-      .where(and(eq(bookFiles.hash, hash), eq(bookFiles.libraryFolderId, libraryFolderId)))
+      .where(and(eq(bookFiles.fileHash, fileHash), eq(bookFiles.libraryFolderId, libraryFolderId)))
       .limit(1);
     return file ?? null;
   }
 
   async createBookFile(data: typeof bookFiles.$inferInsert) {
     const rows = await this.db.insert(bookFiles).values(data).returning();
-    return rows[0]!;
+    const created = rows[0]!;
+    if (created.fileHash) {
+      await this.db
+        .update(koreaderDeviceProgress)
+        .set({ bookFileId: created.id, orphaned: false, orphanedHash: null })
+        .where(and(eq(koreaderDeviceProgress.orphanedHash, created.fileHash), eq(koreaderDeviceProgress.orphaned, true)));
+    }
+    return created;
   }
 
   async updateBookFile(id: number, data: Partial<typeof bookFiles.$inferInsert>) {
@@ -273,6 +291,13 @@ export class ScannerRepository {
   }
 
   async deleteBookFile(id: number) {
+    const [file] = await this.db.select({ fileHash: bookFiles.fileHash }).from(bookFiles).where(eq(bookFiles.id, id)).limit(1);
+    if (file?.fileHash) {
+      await this.db
+        .update(koreaderDeviceProgress)
+        .set({ orphaned: true, orphanedHash: file.fileHash })
+        .where(and(eq(koreaderDeviceProgress.bookFileId, id), eq(koreaderDeviceProgress.orphaned, false)));
+    }
     await this.db.delete(bookFiles).where(eq(bookFiles.id, id));
   }
 
@@ -311,7 +336,7 @@ export class ScannerRepository {
     return row ?? null;
   }
 
-  async findBookFileWithContextByHash(hash: string) {
+  async findBookFileWithContextByHash(fileHash: string) {
     const [row] = await this.db
       .select({
         file: bookFiles,
@@ -323,12 +348,12 @@ export class ScannerRepository {
       .from(bookFiles)
       .innerJoin(books, eq(books.id, bookFiles.bookId))
       .innerJoin(libraryFolders, eq(libraryFolders.id, bookFiles.libraryFolderId))
-      .where(eq(bookFiles.hash, hash))
+      .where(eq(bookFiles.fileHash, fileHash))
       .limit(1);
     return row ?? null;
   }
 
-  async findMissingBookFileWithContextByHash(hash: string) {
+  async findMissingBookFileWithContextByHash(fileHash: string) {
     const [row] = await this.db
       .select({
         file: bookFiles,
@@ -340,7 +365,7 @@ export class ScannerRepository {
       .from(bookFiles)
       .innerJoin(books, eq(books.id, bookFiles.bookId))
       .innerJoin(libraryFolders, eq(libraryFolders.id, bookFiles.libraryFolderId))
-      .where(and(eq(bookFiles.hash, hash), eq(books.status, 'missing')))
+      .where(and(eq(bookFiles.fileHash, fileHash), eq(books.status, 'missing')))
       .limit(1);
     return row ?? null;
   }

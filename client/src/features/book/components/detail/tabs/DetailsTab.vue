@@ -15,6 +15,7 @@ import { STATUS_OPTIONS, STATUS_ICONS, STATUS_COLORS, useBookStatus } from '@/fe
 import BookDownloadButton from '@/features/book/components/BookDownloadButton.vue'
 import DiscoverRow from '@/features/book/components/detail/DiscoverRow.vue'
 import BookCoverPlaceholder from '@/features/book/components/BookCoverPlaceholder.vue'
+import KoreaderBookSyncCard from '@/features/koreader/components/KoreaderBookSyncCard.vue'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -28,6 +29,7 @@ import MetadataScoreBadge from '@/features/metadata-score/components/MetadataSco
 import MetadataScoreBreakdown from '@/features/metadata-score/components/MetadataScoreBreakdown.vue'
 import { useMetadataScoreWeights } from '@/features/metadata-score/composables/useMetadataScoreWeights'
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
+import { useKoreaderBookProgress } from '@/features/koreader/composables/useKoreaderBookProgress'
 
 type FileProgress = {
   percentage: number
@@ -68,6 +70,7 @@ const readMenuOpen = ref(false)
 const mobileReadMenuOpen = ref(false)
 
 const { weights: scoreWeights, fetchWeights } = useMetadataScoreWeights()
+const { bookProgress: koreaderBookProgress, fetchBookProgress: fetchKoreaderProgress } = useKoreaderBookProgress()
 
 onMounted(fetchWeights)
 
@@ -236,6 +239,7 @@ watch(
 
 const isRatingLocked = computed(() => isLocked('rating'))
 const canViewKobo = computed(() => hasPermission('kobo_sync'))
+const canViewKoreader = computed(() => hasPermission('koreader_sync'))
 const canEditMetadata = computed(() => hasPermission('library_edit_metadata'))
 
 const coverSeed = computed(() => props.book.title ?? props.book.folderPath.split('/').pop() ?? String(props.book.id))
@@ -483,6 +487,17 @@ const leftColumnProgressRows = computed<ProgressRow[]>(() => {
       finished: koboPercent >= 100,
     })
   }
+  if (canViewKoreader.value && koreaderBookProgress.value != null && koreaderBookProgress.value.canonicalPercentage > 0) {
+    const koreaderColor = '#b3b910'
+    rows.push({
+      label: 'KO',
+      percentage: koreaderBookProgress.value.canonicalPercentage,
+      color: koreaderColor,
+      badgeStyle: { color: koreaderColor, borderColor: `${koreaderColor}66`, backgroundColor: `${koreaderColor}1a` },
+      tooltipText: 'KOReader device sync',
+      finished: koreaderBookProgress.value.canonicalPercentage >= 100,
+    })
+  }
   return rows
 })
 
@@ -595,6 +610,7 @@ async function loadSupplemental() {
     const audioProgressPromise = hasAudio ? api(`/api/v1/books/${props.book.id}/audio-progress`).catch(() => null) : Promise.resolve(null)
     const collectionsPromise = api(`/api/v1/collections?bookIds=${props.book.id}`)
     const koboPromise = canViewKobo.value ? api(`/api/v1/books/${props.book.id}/kobo-state`) : Promise.resolve(null)
+    const koreaderProgressPromise = canViewKoreader.value ? fetchKoreaderProgress(props.book.id) : Promise.resolve()
 
     const [progressRes, audioProgressRes, collectionsRes, koboRes] = await Promise.all([
       progressPromise,
@@ -602,6 +618,7 @@ async function loadSupplemental() {
       collectionsPromise,
       koboPromise,
     ])
+    await koreaderProgressPromise
 
     if (requestId !== supplementalRequestId) return
 
@@ -1386,6 +1403,13 @@ watch(
           </div>
         </div>
       </div>
+
+      <KoreaderBookSyncCard
+        v-if="canViewKoreader && koreaderBookProgress"
+        class="mt-6"
+        :book-id="props.book.id"
+        :book-progress="koreaderBookProgress"
+      />
 
       <!-- Synopsis -->
       <div class="mt-6 pt-5 border-t border-border">

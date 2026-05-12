@@ -12,6 +12,10 @@ interface Section {
   routeName: string
 }
 
+function handleNavigate(routeName: string): void {
+  router.push({ name: routeName })
+}
+
 const sections = computed<Section[]>(() => {
   const perms = userPermissions.value
   const su = isSuperuser.value
@@ -49,6 +53,9 @@ const sections = computed<Section[]>(() => {
   if (su || perms.includes('kobo_sync')) {
     result.push({ label: 'Kobo', routeName: 'settings-kobo' })
   }
+  if (su || perms.includes('koreader_sync')) {
+    result.push({ label: 'KOReader', routeName: 'settings-koreader' })
+  }
   if (su || perms.includes('manage_app_settings')) {
     result.push({ label: 'Maintenance', routeName: 'settings-admin-maintenance' })
   }
@@ -74,7 +81,7 @@ const sections = computed<Section[]>(() => {
       :key="section.routeName"
       class="px-3 h-full text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 snap-start"
       :class="route.name === section.routeName ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-      @click="router.push({ name: section.routeName })"
+      @click="handleNavigate(section.routeName)"
     >
       {{ section.label }}
     </button>
