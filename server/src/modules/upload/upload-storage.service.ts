@@ -6,6 +6,7 @@ import { dirname, join } from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { randomUUID } from 'crypto';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 // Hard ceiling applied at the multipart level. The service enforces a lower configurable limit.
 export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
@@ -61,7 +62,7 @@ export class UploadStorageService {
     await unlink(tempPath).catch((err: NodeJS.ErrnoException) => {
       if (err.code !== 'ENOENT') {
         const errorClass = err.name ?? 'Error';
-        const errorMessage = err.message.replace(/"/g, '\\"');
+        const errorMessage = sanitizeLogValue(err.message);
         this.logger.warn(`[upload.storage_cleanup] [fail] path="${tempPath}" errorClass=${errorClass} error="${errorMessage}" - file cleanup failed`);
       }
     });

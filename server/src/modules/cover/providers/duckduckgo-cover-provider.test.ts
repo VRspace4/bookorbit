@@ -115,4 +115,42 @@ describe('DuckDuckGoCoverProvider', () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  describe('determineSource', () => {
+    it.each([
+      ['https://www.amazon.com/dp/B001', 'Amazon'],
+      ['https://cdn.amazon.com/images/cover.jpg', 'Amazon'],
+      ['https://m.amazon.com/product/123', 'Amazon'],
+      ['https://www.goodreads.com/book/show/1', 'Goodreads'],
+      ['https://images.goodreads.com/cover.jpg', 'Goodreads'],
+      ['https://images.google.com/c.jpg', 'Google'],
+      ['https://www.google.com/search', 'Google'],
+    ])('%s -> %s', (url, expected) => {
+      expect((provider as any).determineSource(url)).toBe(expected);
+    });
+
+    it('returns hostname for unknown sources', () => {
+      expect((provider as any).determineSource('https://openlibrary.org/cover.jpg')).toBe('openlibrary.org');
+    });
+
+    it('strips www. prefix for unknown sources', () => {
+      expect((provider as any).determineSource('https://www.openlibrary.org/cover.jpg')).toBe('openlibrary.org');
+    });
+
+    it('does not match evil-amazon.com as Amazon', () => {
+      expect((provider as any).determineSource('https://evil-amazon.com/img.jpg')).toBe('evil-amazon.com');
+    });
+
+    it('does not match amazon.com.evil.com as Amazon', () => {
+      expect((provider as any).determineSource('https://amazon.com.evil.com/img.jpg')).toBe('amazon.com.evil.com');
+    });
+
+    it('returns Web for an invalid URL', () => {
+      expect((provider as any).determineSource('not-a-url')).toBe('Web');
+    });
+
+    it('returns Web for an empty string', () => {
+      expect((provider as any).determineSource('')).toBe('Web');
+    });
+  });
 });

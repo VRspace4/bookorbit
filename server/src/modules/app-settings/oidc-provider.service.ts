@@ -115,6 +115,7 @@ export class OidcProviderService {
     const start = Date.now();
 
     try {
+      // codeql[js/request-forgery] - issuerUri is validated by ensureSafeUrl before this point
       const res = await fetch(discoveryUrl, { signal: controller.signal, redirect: 'manual' });
       if (!res.ok) throw new BadRequestException(`Provider returned HTTP ${res.status}`);
 

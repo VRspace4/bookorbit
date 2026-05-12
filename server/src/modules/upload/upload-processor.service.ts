@@ -2,6 +2,7 @@ import { Inject, Injectable, InternalServerErrorException, Logger, Optional } fr
 import { stat } from 'fs/promises';
 import { and, eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
@@ -116,7 +117,7 @@ export class UploadProcessorService {
     const startedAt = Date.now();
     this.autoFetchOrchestrator?.scheduleIfEligible(bookId, libraryId, 'event_import').catch((err: Error) => {
       const errorClass = err.name ?? 'Error';
-      const errorMessage = err.message.replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err.message);
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId} bookId=${bookId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - metadata fetch scheduling failed`,
       );
@@ -142,7 +143,7 @@ export class UploadProcessorService {
       })
       .catch((err: Error) => {
         const errorClass = err.name ?? 'Error';
-        const errorMessage = err.message.replace(/"/g, '\\"');
+        const errorMessage = sanitizeLogValue(err.message);
         this.logger.warn(
           `[${event}] [fail] bookId=${bookId} format=${format} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - metadata extraction failed`,
         );

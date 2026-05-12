@@ -4,6 +4,7 @@ import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { stat } from 'fs/promises';
 import { dirname, sep } from 'path';
 import type { AsyncSubscription } from '@parcel/watcher';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
@@ -60,7 +61,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
         } catch (err) {
           failedWatcherCount += 1;
           const errorClass = err instanceof Error ? err.name : 'Error';
-          const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+          const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
           this.logger.warn(
             `[${event}] [skip] libraryId=${lib.id} pathCount=${folders.length} errorClass=${errorClass} error="${errorMessage}" - watcher disabled for library during startup`,
           );
@@ -70,7 +71,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.reconcileTimer = setInterval(() => {
         this.reconcile().catch((err) => {
           const errorClass = err instanceof Error ? err.name : 'Error';
-          const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+          const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
           this.logger.error(`[scanner.watcher.reconcile] [fail] errorClass=${errorClass} error="${errorMessage}" - reconcile failed`);
         });
       }, RECONCILE_MS);
@@ -79,7 +80,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       );
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - watcher bootstrap failed`,
       );
@@ -111,7 +112,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.logger.log(`[${event}] [end] durationMs=${Date.now() - startedAt} - watcher destroy completed`);
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - watcher destroy failed`,
       );
@@ -145,7 +146,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       );
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] libraryCount=${libraryIds.length} libraryIds=${libraryIdsLabel} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - reconcile failed`,
       );
@@ -174,7 +175,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
         const sub = await subscribe(path, (err, events) => {
           if (err) {
             this.logger.warn(
-              `[${event}] [fail] libraryId=${libraryId} path="${path.replace(/"/g, '\\"')}" errorClass=${err.name ?? 'Error'} error="${err.message.replace(/"/g, '\\"')}" - watcher callback error`,
+              `[${event}] [fail] libraryId=${libraryId} path="${sanitizeLogValue(path)}" errorClass=${err.name ?? 'Error'} error="${sanitizeLogValue(err.message)}" - watcher callback error`,
             );
             return;
           }
@@ -203,8 +204,8 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
         }
       }
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
-      const pathPart = currentPath ? ` path="${currentPath.replace(/"/g, '\\"')}"` : '';
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      const pathPart = currentPath ? ` path="${sanitizeLogValue(currentPath)}"` : '';
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId}${pathPart} pathCount=${paths.length} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - watcher start failed`,
       );
@@ -235,7 +236,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.logger.log(`[${event}] [end] libraryId=${libraryId} durationMs=${Date.now() - startedAt} hadWatcher=true - watcher stop completed`);
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - watcher stop failed`,
       );
@@ -300,7 +301,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
         })
         .catch((err) => {
           this.logger.warn(
-            `[scanner.watcher.cross_library_reconcile] [fail] libraryCount=${libraryIds.length} libraryIds=[${libraryIds.join(',')}] errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - cross-library reconcile failed`,
+            `[scanner.watcher.cross_library_reconcile] [fail] libraryCount=${libraryIds.length} libraryIds=[${libraryIds.join(',')}] errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - cross-library reconcile failed`,
           );
         });
     }, CROSS_LIBRARY_RESCAN_DEBOUNCE_MS);
@@ -367,7 +368,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.pendingTimers.delete(path);
       this.process(type, path, libraryId).catch((err) =>
         this.logger.error(
-          `[scanner.watcher.process_event] [fail] libraryId=${libraryId} type=${type} path="${path.replace(/"/g, '\\"')}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - file event processing failed`,
+          `[scanner.watcher.process_event] [fail] libraryId=${libraryId} type=${type} path="${sanitizeLogValue(path)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - file event processing failed`,
         ),
       );
     }, DEBOUNCE_MS);

@@ -60,7 +60,7 @@ export function fontCssFamilyGroupName(familyName: string): string {
   const safe =
     familyName
       .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/[^a-z0-9]+/g, "_") // codeql[js/polynomial-redos] - false positive: simple negated char class has no backtracking
       .replace(/^_+|_+$/g, "") || "font";
   return `__userfont_${safe}`;
 }

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { readdir, stat } from 'fs/promises';
 import { dirname, join, relative } from 'path';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { classifyFile, DEFAULT_FORMAT_PRIORITY } from './lib/classify';
 import { ScannerRepository } from './scanner.repository';
@@ -32,7 +33,7 @@ export class FileEventProcessorService {
     if (!shouldReevaluate) {
       await this.scannerRepo.deleteBookFile(file.id);
       this.logger.log(
-        `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${absolutePath.replace(/"/g, '\\"')}" action=remove_non_selected - non-selected file removed`,
+        `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${sanitizeLogValue(absolutePath)}" action=remove_non_selected - non-selected file removed`,
       );
       return { type: 'noop' };
     }
@@ -47,7 +48,7 @@ export class FileEventProcessorService {
       await this.scannerRepo.updateBookPrimaryFile(file.bookId, null);
       await this.scannerRepo.markBooksAsMissing([file.bookId]);
       this.logger.log(
-        `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${absolutePath.replace(/"/g, '\\"')}" action=mark_missing_selected_removed - selected content file removed`,
+        `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${sanitizeLogValue(absolutePath)}" action=mark_missing_selected_removed - selected content file removed`,
       );
       return { type: 'book-missing', libraryId: rowLibraryId, bookIds: [file.bookId] };
     }
@@ -60,7 +61,7 @@ export class FileEventProcessorService {
     const winner = this.pickPrimaryFile(remainingContent, formatPriority);
     await this.scannerRepo.updateBookPrimaryFile(file.bookId, winner?.id ?? null);
     this.logger.log(
-      `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${absolutePath.replace(/"/g, '\\"')}" action=reselect_primary format=${winner?.format ?? 'unknown'} - primary file re-selected`,
+      `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${sanitizeLogValue(absolutePath)}" action=reselect_primary format=${winner?.format ?? 'unknown'} - primary file re-selected`,
     );
     return { type: 'book-restored', libraryId: rowLibraryId, bookIds: [file.bookId] };
   }
@@ -75,7 +76,7 @@ export class FileEventProcessorService {
     await this.scannerRepo.markBooksAsMissing(bookIds);
 
     this.logger.log(
-      `[scanner.file_event.unlink_dir] [end] libraryId=${matchedLibraryId} path="${absolutePath.replace(/"/g, '\\"')}" missingCount=${bookIds.length} - books marked missing for removed folder`,
+      `[scanner.file_event.unlink_dir] [end] libraryId=${matchedLibraryId} path="${sanitizeLogValue(absolutePath)}" missingCount=${bookIds.length} - books marked missing for removed folder`,
     );
     return { type: 'book-missing', libraryId: matchedLibraryId, bookIds };
   }
@@ -98,7 +99,7 @@ export class FileEventProcessorService {
         await this.refreshPrimaryFile(ownBook.id, existing.libraryId);
         await this.scannerRepo.markBooksAsPresent([ownBook.id]);
         this.logger.log(
-          `[scanner.file_event.create] [end] libraryId=${existing.libraryId} bookId=${ownBook.id} path="${absolutePath.replace(/"/g, '\\"')}" action=restore_own_book - own book restored`,
+          `[scanner.file_event.create] [end] libraryId=${existing.libraryId} bookId=${ownBook.id} path="${sanitizeLogValue(absolutePath)}" action=restore_own_book - own book restored`,
         );
         return { type: 'book-restored', libraryId: existing.libraryId, bookIds: [ownBook.id] };
       }
@@ -113,7 +114,7 @@ export class FileEventProcessorService {
       await this.refreshPrimaryFile(book.id, book.libraryId);
       await this.scannerRepo.markBooksAsPresent([book.id]);
       this.logger.log(
-        `[scanner.file_event.create] [end] libraryId=${book.libraryId} bookId=${book.id} path="${absolutePath.replace(/"/g, '\\"')}" action=restore_existing_file - book restored`,
+        `[scanner.file_event.create] [end] libraryId=${book.libraryId} bookId=${book.id} path="${sanitizeLogValue(absolutePath)}" action=restore_existing_file - book restored`,
       );
       return { type: 'book-restored', libraryId: book.libraryId, bookIds: [book.id] };
     }
@@ -137,7 +138,7 @@ export class FileEventProcessorService {
       await this.refreshPrimaryFile(book.id, book.libraryId);
       await this.scannerRepo.markBooksAsPresent([book.id]);
       this.logger.log(
-        `[scanner.file_event.create] [end] libraryId=${book.libraryId} bookId=${book.id} path="${absolutePath.replace(/"/g, '\\"')}" action=restore_new_file_row - book restored`,
+        `[scanner.file_event.create] [end] libraryId=${book.libraryId} bookId=${book.id} path="${sanitizeLogValue(absolutePath)}" action=restore_new_file_row - book restored`,
       );
       return { type: 'book-restored', libraryId: book.libraryId, bookIds: [book.id] };
     }
@@ -164,7 +165,7 @@ export class FileEventProcessorService {
           await this.refreshPrimaryFile(ownBook.id, ownBook.libraryId);
           await this.scannerRepo.markBooksAsPresent([ownBook.id]);
           this.logger.log(
-            `[scanner.file_event.create] [end] libraryId=${ownBook.libraryId} bookId=${ownBook.id} path="${absolutePath.replace(/"/g, '\\"')}" action=restore_own_book_by_path - own book restored by path match`,
+            `[scanner.file_event.create] [end] libraryId=${ownBook.libraryId} bookId=${ownBook.id} path="${sanitizeLogValue(absolutePath)}" action=restore_own_book_by_path - own book restored by path match`,
           );
           return { type: 'book-restored', libraryId: ownBook.libraryId, bookIds: [ownBook.id] };
         }
@@ -215,7 +216,7 @@ export class FileEventProcessorService {
       return results;
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] libraryCount=${libraryIds.length} libraryIds=${libraryIdsLabel} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - missing book reconcile failed`,
       );
@@ -252,7 +253,7 @@ export class FileEventProcessorService {
     await this.scannerRepo.updateBookPrimaryFile(book.id, winner?.id ?? null);
     await this.scannerRepo.markBooksAsPresent([book.id]);
     this.logger.log(
-      `[scanner.file_event.restore_missing] [end] libraryId=${book.libraryId} bookId=${book.id} path="${(winner?.absolutePath ?? existingContent[0].absolutePath).replace(/"/g, '\\"')}" - missing book restored`,
+      `[scanner.file_event.restore_missing] [end] libraryId=${book.libraryId} bookId=${book.id} path="${sanitizeLogValue(winner?.absolutePath ?? existingContent[0].absolutePath)}" - missing book restored`,
     );
     return { type: 'book-restored', libraryId: book.libraryId, bookIds: [book.id] };
   }
@@ -279,7 +280,7 @@ export class FileEventProcessorService {
     );
     if (oldFileStillExists) {
       this.logger.log(
-        `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${file.absolutePath.replace(/"/g, '\\"')}" to="${newAbsolutePath.replace(/"/g, '\\"')}" action=skip_old_still_exists - old file still exists, deferring to scan`,
+        `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${sanitizeLogValue(file.absolutePath)}" to="${sanitizeLogValue(newAbsolutePath)}" action=skip_old_still_exists - old file still exists, deferring to scan`,
       );
       return { type: 'noop' };
     }
@@ -290,7 +291,7 @@ export class FileEventProcessorService {
       const hasFolderCollision = targetBooks.some((book) => book.id !== file.bookId && book.folderPath === newFolderPath);
       if (hasFolderCollision) {
         this.logger.log(
-          `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${file.absolutePath.replace(/"/g, '\\"')}" to="${newAbsolutePath.replace(/"/g, '\\"')}" action=defer_to_scan collisionFolder="${newFolderPath.replace(/"/g, '\\"')}" - moved file deferred to folder scan`,
+          `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${sanitizeLogValue(file.absolutePath)}" to="${sanitizeLogValue(newAbsolutePath)}" action=defer_to_scan collisionFolder="${sanitizeLogValue(newFolderPath)}" - moved file deferred to folder scan`,
         );
         return { type: 'noop' };
       }
@@ -308,7 +309,7 @@ export class FileEventProcessorService {
 
     await this.scannerRepo.markBooksAsPresent([file.bookId]);
     this.logger.log(
-      `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${file.absolutePath.replace(/"/g, '\\"')}" to="${newAbsolutePath.replace(/"/g, '\\"')}" - moved file detected`,
+      `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${sanitizeLogValue(file.absolutePath)}" to="${sanitizeLogValue(newAbsolutePath)}" - moved file detected`,
     );
     return { type: 'book-moved', libraryId: rowLibraryId, bookIds: [file.bookId] };
   }
@@ -340,7 +341,7 @@ export class FileEventProcessorService {
 
     if (movedBookIds.length === 0 || !detectedLibraryId) return { type: 'noop' };
     this.logger.log(
-      `[scanner.file_event.move_dir] [end] libraryId=${detectedLibraryId} dirPath="${dirPath.replace(/"/g, '\\"')}" movedCount=${movedBookIds.length} - moved books detected in directory`,
+      `[scanner.file_event.move_dir] [end] libraryId=${detectedLibraryId} dirPath="${sanitizeLogValue(dirPath)}" movedCount=${movedBookIds.length} - moved books detected in directory`,
     );
     return { type: 'book-moved', libraryId: detectedLibraryId, bookIds: movedBookIds };
   }
@@ -375,7 +376,7 @@ export class FileEventProcessorService {
 
       if (restoredIds.length > 0) {
         this.logger.log(
-          `[scanner.file_event.create_dir] [end] libraryId=${matchedLibraryId} path="${absolutePath.replace(/"/g, '\\"')}" restoredCount=${restoredIds.length} - books restored for returned folder`,
+          `[scanner.file_event.create_dir] [end] libraryId=${matchedLibraryId} path="${sanitizeLogValue(absolutePath)}" restoredCount=${restoredIds.length} - books restored for returned folder`,
         );
         return { type: 'book-restored', libraryId: matchedLibraryId, bookIds: restoredIds };
       }

@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 const KOBO_API_BASE = 'https://storeapi.kobo.com';
+const KOBO_API_HOSTNAME = 'storeapi.kobo.com';
 
 const FORWARD_HEADERS = [
   'accept',
@@ -28,7 +29,7 @@ export class KoboProxyService {
     const prefix = `/api/v1/kobo/${deviceToken}`;
     const koboPath = rawUrl.startsWith(prefix) ? rawUrl.slice(prefix.length) : rawUrl;
 
-    const targetUrl = `${KOBO_API_BASE}${koboPath}`;
+    const targetUrl = this.buildTargetUrl(koboPath);
 
     const headers: Record<string, string> = {};
     for (const key of FORWARD_HEADERS) {
@@ -61,5 +62,18 @@ export class KoboProxyService {
       this.logger.warn(`Proxy failed for ${targetUrl}: ${(err as Error).message}`);
       reply.status(502).send({ message: 'Upstream Kobo API unavailable' });
     }
+  }
+
+  private buildTargetUrl(koboPath: string): string {
+    let parsed: URL;
+    try {
+      parsed = new URL(koboPath, KOBO_API_BASE);
+    } catch {
+      throw new BadRequestException('Invalid proxy path');
+    }
+    if (parsed.hostname !== KOBO_API_HOSTNAME) {
+      throw new BadRequestException('Invalid proxy path');
+    }
+    return parsed.toString();
   }
 }

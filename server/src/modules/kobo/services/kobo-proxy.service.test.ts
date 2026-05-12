@@ -1,3 +1,5 @@
+import { BadRequestException } from '@nestjs/common';
+
 import { KoboProxyService } from './kobo-proxy.service';
 
 function makeReply() {
@@ -105,5 +107,42 @@ describe('KoboProxyService', () => {
 
     expect(reply.status).toHaveBeenCalledWith(502);
     expect(reply.send).toHaveBeenCalledWith({ message: 'Upstream Kobo API unavailable' });
+  });
+
+  describe('buildTargetUrl', () => {
+    let service: KoboProxyService;
+
+    beforeEach(() => {
+      service = new KoboProxyService();
+    });
+
+    it('builds correct URL for a standard API path', () => {
+      expect((service as any).buildTargetUrl('/v1/library/sync?since=1')).toBe('https://storeapi.kobo.com/v1/library/sync?since=1');
+    });
+
+    it('builds correct URL for a path without query string', () => {
+      expect((service as any).buildTargetUrl('/v1/affiliate')).toBe('https://storeapi.kobo.com/v1/affiliate');
+    });
+
+    it('throws for an absolute URL pointing to a different host', () => {
+      expect(() => (service as any).buildTargetUrl('https://evil.com/path')).toThrow(BadRequestException);
+    });
+
+    it('throws for a protocol-relative URL pointing to a different host', () => {
+      expect(() => (service as any).buildTargetUrl('//evil.com/path')).toThrow(BadRequestException);
+    });
+
+    it('throws for a path that introduces a scheme override', () => {
+      expect(() => (service as any).buildTargetUrl('https://storeapi.kobo.com@evil.com/path')).toThrow(BadRequestException);
+    });
+
+    it('throws for a javascript: scheme in the path', () => {
+      expect(() => (service as any).buildTargetUrl('javascript:alert()')).toThrow(BadRequestException);
+    });
+
+    it('allows a path containing @ that does not change the hostname', () => {
+      const url = (service as any).buildTargetUrl('/v1/path/with@symbol');
+      expect(url).toBe('https://storeapi.kobo.com/v1/path/with@symbol');
+    });
   });
 });

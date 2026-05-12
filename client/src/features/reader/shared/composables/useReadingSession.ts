@@ -13,7 +13,7 @@ const MIN_SESSION_MS = 10 * 1000
 function generateSessionId(): string {
   return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
-    : `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    : `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` // codeql[js/insecure-randomness] - session IDs are non-security deduplication keys
 }
 
 export function useReadingSession(bookFileId: number, getProgress: () => ProgressSnapshot) {

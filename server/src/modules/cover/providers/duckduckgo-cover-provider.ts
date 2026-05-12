@@ -129,11 +129,13 @@ export class DuckDuckGoCoverProvider implements CoverProvider {
   }
 
   private determineSource(url: string): string {
-    if (url.includes('amazon.com')) return 'Amazon';
-    if (url.includes('goodreads.com')) return 'Goodreads';
-    if (url.includes('google.com')) return 'Google';
     try {
-      return new URL(url).hostname.replace('www.', '');
+      const { hostname } = new URL(url);
+      const host = hostname.replace(/^www\./, '');
+      if (host === 'amazon.com' || host.endsWith('.amazon.com')) return 'Amazon';
+      if (host === 'goodreads.com' || host.endsWith('.goodreads.com')) return 'Goodreads';
+      if (host === 'google.com' || host.endsWith('.google.com')) return 'Google';
+      return host;
     } catch {
       return 'Web';
     }

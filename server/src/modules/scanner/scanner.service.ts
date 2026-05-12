@@ -1,5 +1,6 @@
 import { ConflictException, Injectable, Logger, NotFoundException, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { createHash } from 'crypto';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import type { BookMissingEvent, CoverRefreshedEvent, CoverRefreshProgressEvent, ScanBooksAddedEvent, ScanProgressEvent } from '@bookorbit/types';
 import { NotificationType } from '@bookorbit/types';
@@ -214,7 +215,7 @@ export class ScannerService implements OnApplicationBootstrap {
 
     this.buildAndEmitBookCards(libraryId, ids).catch((err) => {
       this.logger.warn(
-        `[scanner.emit_books_added] [fail] libraryId=${libraryId} bookCount=${ids.length} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - failed to emit added books`,
+        `[scanner.emit_books_added] [fail] libraryId=${libraryId} bookCount=${ids.length} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - failed to emit added books`,
       );
     });
   }
@@ -384,7 +385,7 @@ export class ScannerService implements OnApplicationBootstrap {
 
       this.runScan(libraryId, job.id, folders, allowedFormats, formatPriority, excludePatterns, organizationMode, forceFullScan).catch((err) => {
         const errorClass = err instanceof Error ? err.name : 'Error';
-        const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+        const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
         this.logger.error(
           `[scanner.run_scan] [fail] libraryId=${libraryId} jobId=${job.id} errorClass=${errorClass} error="${errorMessage}" - scan job crashed unexpectedly`,
         );
@@ -396,7 +397,7 @@ export class ScannerService implements OnApplicationBootstrap {
       return { jobId: job.id };
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId} triggeredBy=${triggeredBy} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - scan start failed`,
       );
@@ -448,7 +449,7 @@ export class ScannerService implements OnApplicationBootstrap {
         );
       })().catch((err) => {
         const errorClass = err instanceof Error ? err.name : 'Error';
-        const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+        const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
         this.logger.warn(
           `[${event}] [fail] libraryId=${libraryId} durationMs=${Date.now() - backgroundStartedAt} errorClass=${errorClass} error="${errorMessage}" - cover refresh crashed`,
         );
@@ -458,7 +459,7 @@ export class ScannerService implements OnApplicationBootstrap {
       return { queued: total };
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - cover refresh failed`,
       );
@@ -473,7 +474,7 @@ export class ScannerService implements OnApplicationBootstrap {
     }
     this.startScan(libraryId, 'watcher').catch((err) =>
       this.logger.error(
-        `[scanner.start_scan] [fail] libraryId=${libraryId} triggeredBy=watcher errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - auto-scan failed to start`,
+        `[scanner.start_scan] [fail] libraryId=${libraryId} triggeredBy=watcher errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - auto-scan failed to start`,
       ),
     );
   }
@@ -512,23 +513,23 @@ export class ScannerService implements OnApplicationBootstrap {
 
   private logTargetedBookScanFailure(filePath: string, libraryId: number, err: unknown): void {
     this.logger.error(
-      `[scanner.targeted_book_scan] [fail] libraryId=${libraryId} path="${filePath.replace(/"/g, '\\"')}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - targeted book scan failed`,
+      `[scanner.targeted_book_scan] [fail] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - targeted book scan failed`,
     );
   }
 
   private logTargetedDirectoryScanFailure(dirPath: string, libraryId: number, err: unknown): void {
     this.logger.error(
-      `[scanner.targeted_directory_scan] [fail] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - targeted directory scan failed`,
+      `[scanner.targeted_directory_scan] [fail] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - targeted directory scan failed`,
     );
   }
 
   private async scanBookFolder(filePath: string, libraryId: number): Promise<void> {
     const event = 'scanner.targeted_book_scan';
     const startedAt = Date.now();
-    this.logger.log(`[${event}] [start] libraryId=${libraryId} path="${filePath.replace(/"/g, '\\"')}" - targeted book scan started`);
+    this.logger.log(`[${event}] [start] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" - targeted book scan started`);
     if (this.scanJobStore.isRunning(libraryId)) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${filePath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} skippedDueToRunningFullScan=true - targeted book scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} skippedDueToRunningFullScan=true - targeted book scan completed`,
       );
       return;
     }
@@ -536,7 +537,7 @@ export class ScannerService implements OnApplicationBootstrap {
     const libraryFolder = allFolders.find((f) => filePath.startsWith(f.path + sep));
     if (!libraryFolder) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${filePath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false - targeted book scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(filePath)}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false - targeted book scan completed`,
       );
       return;
     }
@@ -564,11 +565,11 @@ export class ScannerService implements OnApplicationBootstrap {
   private async scanBookDirectory(dirPath: string, libraryId: number): Promise<void> {
     const event = 'scanner.targeted_directory_scan';
     const startedAt = Date.now();
-    this.logger.log(`[${event}] [start] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" - targeted directory scan started`);
+    this.logger.log(`[${event}] [start] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" - targeted directory scan started`);
 
     if (this.scanJobStore.isRunning(libraryId)) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} skippedDueToRunningFullScan=true - targeted directory scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} skippedDueToRunningFullScan=true - targeted directory scan completed`,
       );
       return;
     }
@@ -577,7 +578,7 @@ export class ScannerService implements OnApplicationBootstrap {
     const libraryFolder = allFolders.find((f) => dirPath === f.path || dirPath.startsWith(f.path + sep));
     if (!libraryFolder) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false - targeted directory scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} matchedLibraryFolder=false - targeted directory scan completed`,
       );
       return;
     }
@@ -592,7 +593,7 @@ export class ScannerService implements OnApplicationBootstrap {
 
     const walkLogger = (msg: string) =>
       this.logger.warn(
-        `[scanner.walk_candidates] [fail] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" error="${msg.replace(/"/g, '\\"')}" - candidate walk warning`,
+        `[scanner.walk_candidates] [fail] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" error="${sanitizeLogValue(msg)}" - candidate walk warning`,
       );
 
     let candidates: BookCandidate[];
@@ -616,14 +617,14 @@ export class ScannerService implements OnApplicationBootstrap {
       }
     } catch (err) {
       this.logger.warn(
-        `[${event}] [fail] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - cannot walk target directory`,
+        `[${event}] [fail] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - cannot walk target directory`,
       );
       return;
     }
 
     if (candidates.length === 0) {
       this.logger.log(
-        `[${event}] [end] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} candidateCount=0 skippedDirCount=${skippedDirs.size} - targeted directory scan completed`,
+        `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} candidateCount=0 skippedDirCount=${skippedDirs.size} - targeted directory scan completed`,
       );
       return;
     }
@@ -667,7 +668,7 @@ export class ScannerService implements OnApplicationBootstrap {
     totals.updated += pruneCounts.updated;
 
     this.logger.log(
-      `[${event}] [end] libraryId=${libraryId} path="${dirPath.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} candidateCount=${candidates.length} skippedDirCount=${skippedDirs.size} added=${totals.added} updated=${totals.updated} - targeted directory scan completed`,
+      `[${event}] [end] libraryId=${libraryId} path="${sanitizeLogValue(dirPath)}" durationMs=${Date.now() - startedAt} candidateCount=${candidates.length} skippedDirCount=${skippedDirs.size} added=${totals.added} updated=${totals.updated} - targeted directory scan completed`,
     );
   }
 
@@ -942,7 +943,7 @@ export class ScannerService implements OnApplicationBootstrap {
         try {
           const walkLogger = (msg: string) =>
             this.logger.warn(
-              `[scanner.walk_candidates] [fail] libraryId=${libraryId} path="${folder.path.replace(/"/g, '\\"')}" error="${msg.replace(/"/g, '\\"')}" - candidate walk warning`,
+              `[scanner.walk_candidates] [fail] libraryId=${libraryId} path="${sanitizeLogValue(folder.path)}" error="${sanitizeLogValue(msg)}" - candidate walk warning`,
             );
           const walkResult: WalkResult =
             organizationMode === 'book_per_file'
@@ -954,7 +955,7 @@ export class ScannerService implements OnApplicationBootstrap {
           dirMtimes = walkResult.dirMtimes;
         } catch (err) {
           this.logger.warn(
-            `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} path="${folder.path.replace(/"/g, '\\"')}" durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - cannot walk folder`,
+            `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} path="${sanitizeLogValue(folder.path)}" durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - cannot walk folder`,
           );
         }
 
@@ -987,7 +988,7 @@ export class ScannerService implements OnApplicationBootstrap {
             await this.scannerRepo.deleteStaleDirScanState(folder.id, new Set(dirMtimes.keys()));
           } catch (err) {
             this.logger.warn(
-              `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} libraryFolderId=${folder.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - dir scan state persistence failed`,
+              `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} libraryFolderId=${folder.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - dir scan state persistence failed`,
             );
           }
         }
@@ -1015,7 +1016,7 @@ export class ScannerService implements OnApplicationBootstrap {
         // Job row may have been cascade-deleted if library was deleted.
       });
       this.logger.error(
-        `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${message.replace(/"/g, '\\"')}" - scan job failed`,
+        `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(message)}" - scan job failed`,
       );
       this.emitFromStore(libraryId, jobId, 'failed', message);
 
@@ -1126,7 +1127,7 @@ export class ScannerService implements OnApplicationBootstrap {
       return counts;
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
-      const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[${event}] [fail] libraryId=${libraryId} jobId=${jobId} libraryFolderId=${libraryFolderId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - folder candidate scan failed`,
       );
@@ -1173,7 +1174,7 @@ export class ScannerService implements OnApplicationBootstrap {
 
       if (role === 'content' && fileStat.sizeBytes === 0) {
         this.logger.warn(
-          `[scanner.process_file] [fail] bookId=${book.id} path="${fileStat.absolutePath.replace(/"/g, '\\"')}" reason=zero_byte_content - content file skipped`,
+          `[scanner.process_file] [fail] bookId=${book.id} path="${sanitizeLogValue(fileStat.absolutePath)}" reason=zero_byte_content - content file skipped`,
         );
         continue;
       }
@@ -1196,7 +1197,7 @@ export class ScannerService implements OnApplicationBootstrap {
         );
       } catch (err) {
         this.logger.warn(
-          `[scanner.process_file] [fail] bookId=${book.id} path="${fileStat.absolutePath.replace(/"/g, '\\"')}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - file processing failed`,
+          `[scanner.process_file] [fail] bookId=${book.id} path="${sanitizeLogValue(fileStat.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - file processing failed`,
         );
         continue;
       }
@@ -1244,7 +1245,7 @@ export class ScannerService implements OnApplicationBootstrap {
         await this.metadataService.extractAndSave(book.id, winner!.absolutePath, winner!.format);
       } catch (err) {
         this.logger.warn(
-          `[scanner.extract_metadata] [fail] bookId=${book.id} path="${winner!.absolutePath.replace(/"/g, '\\"')}" format=${winner!.format} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - metadata extraction failed`,
+          `[scanner.extract_metadata] [fail] bookId=${book.id} path="${sanitizeLogValue(winner!.absolutePath)}" format=${winner!.format} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - metadata extraction failed`,
         );
       }
     }
@@ -1261,7 +1262,7 @@ export class ScannerService implements OnApplicationBootstrap {
         await this.metadataService.extractAudioChaptersAndNarrators(book.id, firstAudio.absolutePath, firstAudio.format!);
       } catch (err) {
         this.logger.warn(
-          `[scanner.extract_audio_chapters] [fail] bookId=${book.id} path="${firstAudio.absolutePath.replace(/"/g, '\\"')}" format=${firstAudio.format} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - audio chapters/narrators extraction failed`,
+          `[scanner.extract_audio_chapters] [fail] bookId=${book.id} path="${sanitizeLogValue(firstAudio.absolutePath)}" format=${firstAudio.format} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio chapters/narrators extraction failed`,
         );
       }
     }
@@ -1276,7 +1277,7 @@ export class ScannerService implements OnApplicationBootstrap {
             await this.metadataService.extractAudioFileDuration(book.id, audioFile.absolutePath);
           } catch (err) {
             this.logger.warn(
-              `[scanner.extract_audio_duration] [fail] bookId=${book.id} path="${audioFile.absolutePath.replace(/"/g, '\\"')}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - audio duration extraction failed`,
+              `[scanner.extract_audio_duration] [fail] bookId=${book.id} path="${sanitizeLogValue(audioFile.absolutePath)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio duration extraction failed`,
             );
           }
         }),
@@ -1289,7 +1290,7 @@ export class ScannerService implements OnApplicationBootstrap {
         await this.metadataService.aggregateAudioDuration(book.id);
       } catch (err) {
         this.logger.warn(
-          `[scanner.aggregate_audio_duration] [fail] bookId=${book.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${(err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"')}" - audio duration aggregation failed`,
+          `[scanner.aggregate_audio_duration] [fail] bookId=${book.id} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - audio duration aggregation failed`,
         );
       }
     }
@@ -1329,7 +1330,7 @@ export class ScannerService implements OnApplicationBootstrap {
         }
         bookByFolderPath.set(candidate.folderPath, { ...survivor, folderPath: candidate.folderPath });
         this.logger.log(
-          `[scanner.upsert_book] [end] libraryId=${libraryId} bookId=${survivor.id} folder="${candidate.folderPath.replace(/"/g, '\\"')}" mergedCount=${virtualChildren.length} action=merge_stem_split - stem-split books merged`,
+          `[scanner.upsert_book] [end] libraryId=${libraryId} bookId=${survivor.id} folder="${sanitizeLogValue(candidate.folderPath)}" mergedCount=${virtualChildren.length} action=merge_stem_split - stem-split books merged`,
         );
         return { ...survivor, folderPath: candidate.folderPath };
       }
@@ -1348,7 +1349,7 @@ export class ScannerService implements OnApplicationBootstrap {
         ?.scheduleIfEligible(book.id, libraryId, 'event_import')
         .catch((err: Error) =>
           this.logger.warn(
-            `[scanner.upsert_book] [fail] libraryId=${libraryId} bookId=${book.id} action=schedule_metadata_fetch errorClass=${err.name} error="${err.message.replace(/"/g, '\\"')}" - metadata fetch schedule failed`,
+            `[scanner.upsert_book] [fail] libraryId=${libraryId} bookId=${book.id} action=schedule_metadata_fetch errorClass=${err.name} error="${sanitizeLogValue(err.message)}" - metadata fetch schedule failed`,
           ),
         );
       bookByFolderPath.set(candidate.folderPath, { id: book.id, status: book.status, folderPath: book.folderPath });
@@ -1376,7 +1377,7 @@ export class ScannerService implements OnApplicationBootstrap {
       this.scanGateway.emitBookMissing({ libraryId, bookIds: siblingIds });
       this.bufferBooksUnavailableNotification(libraryId, siblingIds);
       this.logger.log(
-        `[scanner.upsert_book] [end] libraryId=${libraryId} bookId=${existing.id} folder="${candidate.folderPath.replace(/"/g, '\\"')}" drainedCount=${virtualSiblings.length} action=drain_virtual_siblings - virtual siblings drained`,
+        `[scanner.upsert_book] [end] libraryId=${libraryId} bookId=${existing.id} folder="${sanitizeLogValue(candidate.folderPath)}" drainedCount=${virtualSiblings.length} action=drain_virtual_siblings - virtual siblings drained`,
       );
     }
 
@@ -1455,7 +1456,7 @@ export class ScannerService implements OnApplicationBootstrap {
     const transferred = { id: moved.id, status: moved.status, folderPath: moved.folderPath };
     bookByFolderPath.set(candidate.folderPath, transferred);
     this.logger.log(
-      `[scanner.upsert_book] [end] libraryId=${libraryId} bookId=${moved.id} folder="${candidate.folderPath.replace(/"/g, '\\"')}" action=transfer_missing_book - missing book transferred into destination library`,
+      `[scanner.upsert_book] [end] libraryId=${libraryId} bookId=${moved.id} folder="${sanitizeLogValue(candidate.folderPath)}" action=transfer_missing_book - missing book transferred into destination library`,
     );
     return transferred;
   }

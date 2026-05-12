@@ -294,6 +294,7 @@ export class CoverService {
     const timeout = setTimeout(() => controller.abort(), COVER_PROXY_TIMEOUT_MS);
 
     try {
+      // codeql[js/request-forgery] - URL is validated by ensureSafeRemoteHost before reaching this method
       const response = await fetch(url.toString(), {
         signal: controller.signal,
         redirect: 'manual',

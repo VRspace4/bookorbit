@@ -4,6 +4,7 @@ import { basename, dirname, extname, join } from 'path';
 import { Readable } from 'stream';
 import { eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
@@ -219,7 +220,7 @@ export class UploadService {
 
   private parseError(err: unknown): { errorClass: string; errorMessage: string } {
     const errorClass = err instanceof Error ? err.name : 'Error';
-    const errorMessage = (err instanceof Error ? err.message : String(err)).replace(/"/g, '\\"');
+    const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
     return { errorClass, errorMessage };
   }
 

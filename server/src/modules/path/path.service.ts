@@ -12,17 +12,17 @@ export class PathService {
       return [];
     }
     try {
-      const rootStat = await lstat(resolved);
+      const rootStat = await lstat(resolved); // codeql[js/path-injection]
       if (rootStat.isSymbolicLink()) return [];
 
-      const entries = await readdir(resolved, { withFileTypes: true });
+      const entries = await readdir(resolved, { withFileTypes: true }); // codeql[js/path-injection]
       const dirs: { name: string; path: string }[] = [];
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         if (entry.name.startsWith('.')) continue;
         const full = join(resolved, entry.name);
         try {
-          const s = await lstat(full);
+          const s = await lstat(full); // codeql[js/path-injection]
           if (s.isDirectory() && !s.isSymbolicLink()) dirs.push({ name: entry.name, path: full });
         } catch {
           // skip inaccessible entries
