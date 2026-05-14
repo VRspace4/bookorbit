@@ -20,6 +20,7 @@ import ReaderSettingsPanel from './epub/components/ReaderSettingsPanel.vue'
 import SelectionPopup from './epub/components/SelectionPopup.vue'
 import ReaderSearchPanel from './epub/components/ReaderSearchPanel.vue'
 import NoteDialog from './epub/components/NoteDialog.vue'
+import DictionaryPopover from './epub/components/DictionaryPopover.vue'
 import PdfV4ReaderView from './pdf-v4/PdfV4ReaderView.vue'
 import CbzReaderView from './cbz/CbzReaderView.vue'
 import AudiobookReaderView from './audiobook/AudiobookReaderView.vue'
@@ -96,6 +97,21 @@ const { results: searchResults, isSearching, search: doSearch, clear: clearSearc
 
 const selection = useReaderSelection()
 
+const showDictionary = ref(false)
+const dictionaryWord = ref('')
+const dictionaryPosition = ref({ x: 0, y: 0, showBelow: false })
+
+function handleDefine() {
+  dictionaryWord.value = selection.text.value
+  dictionaryPosition.value = {
+    x: selection.position.value.x,
+    y: selection.position.value.y,
+    showBelow: selection.showBelow.value,
+  }
+  selection.dismiss()
+  showDictionary.value = true
+}
+
 function onRelocateHandler(detail: RelocateDetail) {
   progress.onRelocate(detail)
   onActivity()
@@ -132,6 +148,7 @@ const {
   deleteAnnotation,
   setTextSelectedHandler,
   view: foliateView,
+  bookLanguage,
 } = useFoliate(() => containerRef.value, onRelocateHandler, onApplyStylesHandler, onMiddleTapHandler)
 
 setTextSelectedHandler(selection.show)
@@ -417,9 +434,18 @@ function closeSearch() {
       @copy="selection.dismiss()"
       @highlight="handleHighlight"
       @search="() => openSearchWithText(selection.text.value)"
+      @define="handleDefine"
       @note="selection.openNoteDialog()"
       @deleteAnnotation="handleDeleteAnnotation"
       @dismiss="selection.dismiss()"
+    />
+
+    <DictionaryPopover
+      v-if="showDictionary"
+      :word="dictionaryWord"
+      :position="dictionaryPosition"
+      :lang="bookLanguage"
+      @close="showDictionary = false"
     />
   </div>
 </template>

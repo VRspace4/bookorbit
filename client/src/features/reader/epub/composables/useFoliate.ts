@@ -3,6 +3,7 @@ import { api, getAccessToken } from '@/lib/api'
 import { useFoliateAnnotations } from './useFoliateAnnotations'
 import { useFoliateSelection } from './useFoliateSelection'
 import { useFoliateInput } from './useFoliateInput'
+import type { EpubBookInfo } from '@bookorbit/types'
 
 export interface RelocateDetail {
   cfi?: string | null
@@ -31,6 +32,7 @@ export function useFoliate(
   const error = ref<string | null>(null)
   const fraction = ref(0)
   const viewRef = ref<unknown>(null)
+  const bookLanguage = ref<string>('en')
 
   const annotations = useFoliateAnnotations()
   const selection = useFoliateSelection(() => viewRef.value)
@@ -130,6 +132,8 @@ export function useFoliate(
         const infoRes = await api(`/api/v1/epub/${bookId}/info?fileId=${fileId}`)
         if (!infoRes.ok) throw new Error(`Failed to fetch EPUB info: ${infoRes.status}`)
         const bookInfo = await infoRes.json()
+        const rawLang = (bookInfo as EpubBookInfo)?.metadata?.language
+        bookLanguage.value = typeof rawLang === 'string' && rawLang ? (rawLang.split('-')[0] ?? 'en').toLowerCase() : 'en'
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const makeStreamingBook = (window as any).makeStreamingBook as
           | ((id: number, base: string, info: unknown, token: string | null, bookType: null, fileId: number) => Promise<unknown>)
@@ -187,6 +191,7 @@ export function useFoliate(
     loading,
     error,
     fraction,
+    bookLanguage,
     view: viewRef,
     open: (bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number) =>
       open(bookId, fileId, format, cfi, fallbackFraction),

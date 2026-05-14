@@ -34,3 +34,4 @@ export * from "./table-layout";
 export * from "./series-collapse";
 export * from "./entity-manager";
 export * from "./font";
+export * from "./dictionary";

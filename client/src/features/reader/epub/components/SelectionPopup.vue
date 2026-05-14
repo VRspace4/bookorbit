@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Copy, FileText, Highlighter, Search, Trash2 } from 'lucide-vue-next'
+import { BookA, Copy, FileText, Highlighter, Search, Trash2 } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 const props = defineProps<{
@@ -15,6 +15,7 @@ const emit = defineEmits<{
   copy: []
   highlight: [color: string, style: string]
   search: []
+  define: []
   note: []
   deleteAnnotation: [id: number]
   dismiss: []
@@ -112,6 +113,18 @@ function onCopy() {
                 </button>
               </TooltipTrigger>
               <TooltipContent>Search</TooltipContent>
+            </Tooltip>
+
+            <Tooltip>
+              <TooltipTrigger as-child>
+                <button
+                  class="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                  @click="emit('define')"
+                >
+                  <BookA :size="15" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Define</TooltipContent>
             </Tooltip>
 
             <Tooltip>
