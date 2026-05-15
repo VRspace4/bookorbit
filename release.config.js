@@ -2,7 +2,7 @@
 
 const { spawnSync } = require("child_process");
 
-const DOCKER_IMAGE = "ghcr.io/neonsolstice/bookorbit";
+const DOCKER_IMAGE = "ghcr.io/bookorbit/bookorbit";
 
 // Maps local git author names to GitHub usernames for @-mentions in release notes.
 const AUTHOR_MAP = {
@@ -18,9 +18,8 @@ const TYPES = [
   { type: "style", section: "Visual Changes" },
 ];
 
-// Commit partial: standard conventional-changelog layout with an optional
-// author @-mention inserted before the hash link.
-// Based on conventional-changelog-conventionalcommits@8 commit.hbs.
+// Uses {{commitUrl}} (pre-computed per-commit in finalizeContext) instead of
+// {{commitUrlFormat}} which does not resolve inside Handlebars partials.
 const commitPartial = `\
 *{{#if scope}} **{{scope}}:**
 {{~/if}} {{#if subject}}
@@ -28,12 +27,12 @@ const commitPartial = `\
 {{~else}}
   {{~header}}
 {{~/if}}
-{{~#if githubUser}} by @{{githubUser}}{{/if}}
-{{~!-- commit link --}}{{~#if hash}} {{#if @root.linkReferences~}}
-  ([{{shortHash}}]({{commitUrlFormat}}))
+{{~!-- commit link --}}{{~#if hash}} {{#if commitUrl~}}
+  ([{{shortHash}}]({{commitUrl}}))
 {{~else}}
   {{~shortHash}}
 {{~/if}}{{~/if}}
+{{~#if githubUser}} by @{{githubUser}}{{/if}}
 
 {{~!-- commit references --}}
 {{~#if references~}}
@@ -50,7 +49,8 @@ const commitPartial = `\
     {{~/if}}
     {{~this.repository}}{{this.prefix}}{{this.issue}}
   {{~/if}}{{/each}}
-{{~/if}}`;
+{{~/if}}
+`;
 
 // Main template: removes the version header (GitHub Release already shows it),
 // strips the warning emoji from breaking-changes headings, and appends a
@@ -74,6 +74,7 @@ const mainTemplate = [
   "{{/if}}",
   "{{#each commits}}",
   "{{> commit root=@root}}",
+  "",
   "{{/each}}",
   "",
   "{{/each}}",
@@ -115,6 +116,11 @@ function finalizeContext(ctx) {
           const githubUser = shaToGithubUser.get(commit.shortHash);
           if (githubUser) commit.githubUser = githubUser;
         }
+        // Pre-compute commit URL — {{commitUrlFormat}} does not resolve inside
+        // Handlebars partials because partials don't walk the parent context chain.
+        if (commit.hash && ctx.host && ctx.owner && ctx.repository) {
+          commit.commitUrl = `${ctx.host}/${ctx.owner}/${ctx.repository}/commit/${commit.hash}`;
+        }
       }
     }
   } catch {
@@ -125,6 +131,7 @@ function finalizeContext(ctx) {
 
 module.exports = {
   branches: ["main"],
+  repositoryUrl: "https://github.com/bookorbit/bookorbit",
   tagFormat: "v${version}",
   plugins: [
     [
@@ -146,6 +153,7 @@ module.exports = {
       "@semantic-release/release-notes-generator",
       {
         preset: "conventionalcommits",
+        linkReferences: true,
         presetConfig: { types: TYPES },
         writerOpts: {
           commitPartial,

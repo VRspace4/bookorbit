@@ -267,8 +267,6 @@ jobs:
               echo "[Full diff](https://github.com/${GH_REPO}/compare/${PREV_TAG}...${TAG})"
               echo ""
             fi
-            echo "### Release Artifact"
-            echo "- Image tags: \`${IMAGE}:${VERSION}\`, \`${IMAGE}:latest\`"
           } >> "${BODY_FILE}"
 
           gh release edit "${TAG}" --repo "${GH_REPO}" --notes-file "${BODY_FILE}"
