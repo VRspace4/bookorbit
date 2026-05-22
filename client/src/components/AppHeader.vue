@@ -44,6 +44,8 @@ import { useAuth } from '@/features/auth/composables/useAuth'
 import { useChangePasswordDialog } from '@/composables/useChangePasswordDialog'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import BookUploadModal from '@/features/library/components/BookUploadModal.vue'
+import ZlibSearchModal from '@/features/zlib/components/ZlibSearchModal.vue'
+import { api } from '@/lib/api'
 import { useLibraryUploadEvents } from '@/features/library/composables/useLibraryUploadEvents'
 import { useBookDockSummary } from '@/features/book-dock/composables/useBookDockSummary'
 import NotificationSheet from '@/features/notifications/components/NotificationSheet.vue'
@@ -99,6 +101,25 @@ async function installApp() {
 }
 
 const uploadOpen = ref(false)
+const zlibOpen = ref(false)
+const zlibQueueCount = ref(0)
+
+async function fetchZlibQueueCount() {
+  try {
+    const res = await api('/api/v1/zlib/queue')
+    if (res.ok) {
+      const items: { status: string }[] = await res.json()
+      zlibQueueCount.value = items.filter((i) => i.status === 'pending' || i.status === 'processing').length
+    }
+  } catch {
+    // non-critical
+  }
+}
+
+function onZlibClose() {
+  zlibOpen.value = false
+  fetchZlibQueueCount()
+}
 
 const searchFocused = ref(false)
 const mobileSearchOpen = ref(false)
@@ -187,6 +208,9 @@ onMounted(() => {
   }
   if (canAccessNotifications.value) {
     subscribeNotifications()
+  }
+  if (hasPermission('library_upload')) {
+    fetchZlibQueueCount()
   }
 })
 
@@ -511,6 +535,10 @@ function formatBadgeClass(fmt: string): string {
               <Upload :size="15" class="mr-2 text-muted-foreground" />
               Upload books
             </DropdownMenuItem>
+            <DropdownMenuItem v-if="hasPermission('library_upload')" @click="zlibOpen = true">
+              <Search :size="15" class="mr-2 text-muted-foreground" />
+              Search Z-Library
+            </DropdownMenuItem>
 
             <DropdownMenuSeparator />
 
@@ -622,6 +650,29 @@ function formatBadgeClass(fmt: string): string {
               </Button>
             </TooltipTrigger>
             <TooltipContent>Achievements</TooltipContent>
+          </Tooltip>
+
+          <Tooltip v-if="hasPermission('library_upload')">
+            <TooltipTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon"
+                :class="[
+                  'relative h-8 w-8 border border-primary/35 text-foreground/70 hover:border-primary/70 hover:text-foreground transition-colors',
+                  iconRadiusClass,
+                ]"
+                @click="zlibOpen = true"
+              >
+                <Search :size="15" />
+                <span
+                  v-if="zlibQueueCount > 0"
+                  class="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold text-primary-foreground tabular-nums leading-none"
+                >
+                  {{ zlibQueueCount > 99 ? '99+' : zlibQueueCount }}
+                </span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Search Z-Library{{ zlibQueueCount > 0 ? ` · ${zlibQueueCount} queued` : '' }}</TooltipContent>
           </Tooltip>
 
           <!-- Upload button -->
@@ -751,4 +802,5 @@ function formatBadgeClass(fmt: string): string {
   </header>
 
   <BookUploadModal v-if="uploadOpen" @close="uploadOpen = false" @uploaded="uploadOpen = false" />
+  <ZlibSearchModal v-if="zlibOpen" @close="onZlibClose" />
 </template>

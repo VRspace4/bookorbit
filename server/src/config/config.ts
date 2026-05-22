@@ -35,6 +35,10 @@ export const migrationConfig = registerAs('migration', () => ({
   encryptionKey: process.env.MIGRATION_ENCRYPTION_KEY ?? '',
 }));
 
+export const zlibConfig = registerAs('zlib', () => ({
+  encryptionKey: process.env.ZLIB_ENCRYPTION_KEY ?? process.env.MIGRATION_ENCRYPTION_KEY ?? '',
+}));
+
 export const oidcRuntimeConfig = registerAs('oidcRuntime', () => ({
   stateTtlMs: parsePositiveInteger(process.env.OIDC_STATE_TTL_SECS, 300) * 1000,
   discoveryCacheTtlMs: parsePositiveInteger(process.env.OIDC_DISCOVERY_CACHE_TTL_SECS, 3600) * 1000,

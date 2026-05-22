@@ -48,6 +48,6 @@ import { BookDockRepository } from './book-dock.repository';
     BookDockWatcherService,
     BookDockGateway,
   ],
-  exports: [BookDockService, BookDockRepository],
+  exports: [BookDockService, BookDockRepository, BookDockIngestService],
 })
 export class BookDockModule {}

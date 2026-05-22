@@ -12,6 +12,8 @@ import { MAX_PROFILE_AVATAR_BYTES, useProfileAvatar } from '@/features/auth/comp
 import { useChangePasswordDialog } from '@/composables/useChangePasswordDialog'
 import SettingsPageHeader from './SettingsPageHeader.vue'
 import NativeAppSettings from './NativeAppSettings.vue'
+import ZlibConnectCard from '@/features/zlib/components/ZlibConnectCard.vue'
+import ZlibQueuePanel from '@/features/zlib/components/ZlibQueuePanel.vue'
 import { useMediaQuery } from '@vueuse/core'
 import { useOnboardingTour } from '@/features/onboarding/composables/useOnboardingTour'
 
@@ -432,6 +434,13 @@ function closeUnlinkDialog() {
     </section>
 
     <NativeAppSettings />
+
+    <div class="space-y-4">
+      <ZlibConnectCard />
+      <section class="rounded-lg border border-border bg-card p-4 md:p-5 shadow-xs">
+        <ZlibQueuePanel />
+      </section>
+    </div>
 
     <section class="rounded-lg border border-border bg-card p-4 md:p-5 space-y-4 shadow-xs">
       <button class="md:hidden w-full flex items-center justify-between gap-2 text-left" @click="avatarCardOpen = !avatarCardOpen">
