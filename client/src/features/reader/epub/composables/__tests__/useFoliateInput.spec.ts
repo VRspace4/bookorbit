@@ -48,9 +48,9 @@ function makeViewHost(view: ViewLike, doc?: DocTarget) {
   })
   if (doc) {
     view.renderer = {
-      getAttribute: view.renderer?.getAttribute,
+      getAttribute: view.renderer?.getAttribute ?? (() => null),
       getContents: () => [{ doc: doc as unknown as Document }],
-    }
+    } as typeof view.renderer
   }
   return host
 }

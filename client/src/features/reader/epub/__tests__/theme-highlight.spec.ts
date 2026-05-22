@@ -5,7 +5,7 @@ import {
   buildThemeSwitchHighlightPatch,
   migrateLegacyThemeHighlightColors,
   resolveThemeHighlightColors,
-} from './theme-highlight'
+} from '../theme-highlight'
 
 describe('theme-highlight', () => {
   const baseSettings: EpubReaderSettings = {

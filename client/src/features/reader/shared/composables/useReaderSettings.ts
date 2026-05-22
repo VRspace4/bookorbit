@@ -169,7 +169,7 @@ function sanitizeDefaultSettings(group: ReaderFormatGroup, raw: unknown): Reader
   if (group !== 'cbx') {
     if (!isRecord(raw)) return null
     if (group === 'epub') {
-      const migrated = migrateLegacyThemeHighlightColors(raw as EpubReaderSettings)
+      const migrated = migrateLegacyThemeHighlightColors(raw as unknown as EpubReaderSettings)
       return migrated as ReaderSettings
     }
     return raw as unknown as ReaderSettings

@@ -29,6 +29,7 @@ function mockViewport(width: number) {
   window.matchMedia = vi.fn<(query: string) => MediaQueryList>().mockImplementation((query: string) => ({
     matches: query === '(min-width: 768px)' ? width >= 768 : false,
     media: query,
+    onchange: null,
     addEventListener: vi.fn<() => void>(),
     removeEventListener: vi.fn<() => void>(),
     addListener: vi.fn<() => void>(),
