@@ -28,7 +28,7 @@ function mountControls(overrides: Partial<TtsControlsProps> = {}) {
 }
 
 function pickerOptions(_wrapper: ReturnType<typeof mountControls>) {
-  return document.body.querySelectorAll('button[role="option"]')
+  return document.body.querySelectorAll<HTMLElement>('button[role="option"]')
 }
 
 describe('TtsControls', () => {
