@@ -127,10 +127,10 @@ export function useAuth() {
     startSessionRefresh()
 
     if (data.user.isDefaultPassword) {
-      router.push('/')
+      router.replace('/')
     } else {
       const redirect = router.currentRoute.value.query.redirect as string | undefined
-      router.push(redirect ?? '/')
+      router.replace(redirect ?? '/')
     }
   }
 

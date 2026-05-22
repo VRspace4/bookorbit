@@ -1,5 +1,13 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { READER_GROUP_DEFAULTS, getFormatGroup, type ReaderFormatGroup } from '@bookorbit/types';
+import {
+  EPUB_DEVICE_SETTING_KEYS,
+  EPUB_SHARED_DEFAULT_KEYS,
+  READER_GROUP_DEFAULTS,
+  getFormatGroup,
+  isEpubDefaultsStorageV2,
+  migrateFlatEpubDefaultsToV2,
+  type ReaderFormatGroup,
+} from '@bookorbit/types';
 import { z } from 'zod';
 
 import type { RequestUser } from '../../common/types/request-user';
@@ -97,6 +105,28 @@ const PARTIAL_SETTINGS_SCHEMA_BY_GROUP = {
   audio: AUDIO_SETTINGS_SCHEMA.partial(),
 } satisfies Record<ReaderFormatGroup, z.ZodTypeAny>;
 
+const EPUB_PARTIAL_SETTINGS_SCHEMA = EPUB_SETTINGS_SCHEMA.partial();
+
+const EPUB_DEVICE_SETTINGS_SCHEMA = EPUB_PARTIAL_SETTINGS_SCHEMA.pick(
+  Object.fromEntries(EPUB_DEVICE_SETTING_KEYS.map((key) => [key, true])) as Record<(typeof EPUB_DEVICE_SETTING_KEYS)[number], true>,
+);
+
+const EPUB_SHARED_SETTINGS_SCHEMA = EPUB_PARTIAL_SETTINGS_SCHEMA.pick(
+  Object.fromEntries(EPUB_SHARED_DEFAULT_KEYS.map((key) => [key, true])) as Record<(typeof EPUB_SHARED_DEFAULT_KEYS)[number], true>,
+);
+
+const EPUB_V2_DEFAULTS_SCHEMA = z
+  .object({
+    v: z.literal(2),
+    shared: EPUB_SHARED_SETTINGS_SCHEMA,
+    devices: z.object({
+      mobile: EPUB_DEVICE_SETTINGS_SCHEMA,
+      tablet: EPUB_DEVICE_SETTINGS_SCHEMA,
+      desktop: EPUB_DEVICE_SETTINGS_SCHEMA,
+    }),
+  })
+  .strict();
+
 function normalizeFormatGroup(formatGroup: string): ReaderFormatGroup {
   const normalized = formatGroup.trim().toLowerCase();
   if (!VALID_FORMAT_GROUPS_SET.has(normalized as ReaderFormatGroup)) {
@@ -124,6 +154,22 @@ export class ReaderPreferencesService {
     return result.data as Record<string, unknown>;
   }
 
+  private validateEpubDefaults(settings: Record<string, unknown>): Record<string, unknown> {
+    if (isEpubDefaultsStorageV2(settings)) {
+      const result = EPUB_V2_DEFAULTS_SCHEMA.safeParse(settings);
+      if (!result.success) {
+        const firstIssue = result.error.issues[0];
+        const issuePath = firstIssue?.path.length ? firstIssue.path.join('.') : 'settings';
+        const issueMessage = firstIssue?.message ?? 'Invalid settings payload';
+        throw new BadRequestException(`Invalid epub reader settings at "${issuePath}": ${issueMessage}`);
+      }
+      return result.data as Record<string, unknown>;
+    }
+
+    const legacy = this.validateSettings('epub', settings, false);
+    return migrateFlatEpubDefaultsToV2(legacy as Parameters<typeof migrateFlatEpubDefaultsToV2>[0]) as unknown as Record<string, unknown>;
+  }
+
   async getPreference(user: RequestUser, bookFileId: number) {
     await this.bookService.verifyFileAccess(bookFileId, user);
     return this.repo.findPreference(user.id, bookFileId);
@@ -147,7 +193,8 @@ export class ReaderPreferencesService {
 
   async upsertDefault(userId: number, formatGroup: string, settings: Record<string, unknown>) {
     const normalizedGroup = normalizeFormatGroup(formatGroup);
-    const validatedSettings = this.validateSettings(normalizedGroup, settings, false);
+    const validatedSettings =
+      normalizedGroup === 'epub' ? this.validateEpubDefaults(settings) : this.validateSettings(normalizedGroup, settings, false);
     await this.repo.upsertDefault(userId, normalizedGroup, validatedSettings);
   }
 

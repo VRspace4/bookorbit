@@ -285,12 +285,41 @@ describe('ReaderPreferencesService', () => {
         1,
         'epub',
         expect.objectContaining({
-          themeHighlightColors: {
-            sepia: {
-              ttsSentenceHighlightColor: '#aa0000',
-              ttsWordHighlightColor: '#bb0000',
+          v: 2,
+          shared: expect.objectContaining({
+            themeHighlightColors: {
+              sepia: {
+                ttsSentenceHighlightColor: '#aa0000',
+                ttsWordHighlightColor: '#bb0000',
+              },
             },
-          },
+          }),
+        }),
+      );
+    });
+
+    it('accepts versioned epub defaults with per-device appearance settings', async () => {
+      await service.upsertDefault(1, 'epub', {
+        v: 2,
+        shared: {
+          ttsProvider: 'kokoro',
+          ttsRate: 1,
+        },
+        devices: {
+          mobile: { fontSize: 18, maxColumnCount: 1 },
+          tablet: { fontSize: 16, maxColumnCount: 2 },
+          desktop: { fontSize: 14, maxColumnCount: 2 },
+        },
+      });
+
+      expect(mockRepo.upsertDefault).toHaveBeenCalledWith(
+        1,
+        'epub',
+        expect.objectContaining({
+          v: 2,
+          devices: expect.objectContaining({
+            mobile: { fontSize: 18, maxColumnCount: 1 },
+          }),
         }),
       );
     });

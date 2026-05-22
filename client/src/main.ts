@@ -1,3 +1,4 @@
+import './features/pwa/lib/pwa-bootstrap'
 import './assets/main.css'
 import './lib/echarts'
 

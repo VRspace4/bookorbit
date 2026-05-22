@@ -255,9 +255,151 @@ export function highlightWord(root: HTMLElement, entries: WordEntry[], sentences
       }
     })
   }
+}
 
-  const activeEl = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)
-  activeEl?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'smooth' })
+export function getActiveHighlightElement(root: HTMLElement): HTMLElement | null {
+  return root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)
+}
+
+export interface FoliateScrollRenderer {
+  scrolled?: boolean
+  size?: number
+  /** Foliate paginator scroll offset on the primary reading axis. */
+  start?: number
+  scrollBy?: (dx: number, dy: number) => void
+}
+
+function getActiveWordViewportMetrics(rect: DOMRect, foliate: FoliateScrollRenderer) {
+  const start = foliate.start ?? 0
+  const viewportSize = foliate.size ?? 0
+
+  if (foliate.scrolled) {
+    const top = rect.top - start
+    const bottom = rect.bottom - start
+    return {
+      viewportSize,
+      center: top + rect.height / 2,
+      visible: bottom > 0 && top < viewportSize,
+    }
+  }
+
+  const left = rect.left - start
+  const right = rect.right - start
+  return {
+    viewportSize,
+    center: left + rect.width / 2,
+    visible: right > 0 && left < viewportSize,
+  }
+}
+
+const foliateScrollAnimations = new WeakMap<object, number>()
+
+function scrollFoliateBy(foliate: FoliateScrollRenderer, delta: number, behavior: ScrollBehavior) {
+  if (Math.abs(delta) < 2 || typeof foliate.scrollBy !== 'function') return
+
+  const animationKey = foliate as object
+  const existingFrame = foliateScrollAnimations.get(animationKey)
+  if (existingFrame !== undefined) cancelAnimationFrame(existingFrame)
+
+  if (behavior !== 'smooth') {
+    foliate.scrollBy(delta, 0)
+    foliateScrollAnimations.delete(animationKey)
+    return
+  }
+
+  const durationMs = 180
+  const startedAt = performance.now()
+  let appliedDelta = 0
+
+  const tick = (now: number) => {
+    const t = Math.min(1, (now - startedAt) / durationMs)
+    const eased = 1 - Math.pow(1 - t, 3)
+    const targetDelta = delta * eased
+    foliate.scrollBy?.(targetDelta - appliedDelta, 0)
+    appliedDelta = targetDelta
+
+    if (t < 1) {
+      foliateScrollAnimations.set(animationKey, requestAnimationFrame(tick))
+    } else {
+      foliateScrollAnimations.delete(animationKey)
+    }
+  }
+
+  foliateScrollAnimations.set(animationKey, requestAnimationFrame(tick))
+}
+
+export function scrollActiveWordIntoView(root: HTMLElement, behavior: ScrollBehavior = 'smooth', foliate?: FoliateScrollRenderer | null) {
+  const activeEl = getActiveHighlightElement(root)
+  if (!activeEl) return
+
+  if (foliate && typeof foliate.scrollBy === 'function' && typeof foliate.size === 'number' && foliate.size > 0) {
+    const rect = activeEl.getBoundingClientRect()
+    const { center, viewportSize } = getActiveWordViewportMetrics(rect, foliate)
+    const centerDelta = center - viewportSize / 2
+    // Foliate uses the first scrollBy argument for the primary visible axis in this reader.
+    scrollFoliateBy(foliate, centerDelta, behavior)
+    return
+  }
+
+  activeEl.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior })
+}
+
+/** True when the active word sits in the middle band of the viewport (sticky follow zone). */
+export function isActiveWordInStickyViewport(root: HTMLElement, stickyBandRatio = 0.42, foliate?: FoliateScrollRenderer | null): boolean {
+  const activeEl = getActiveHighlightElement(root)
+  if (!activeEl) return true
+
+  const rect = activeEl.getBoundingClientRect()
+
+  if (foliate && typeof foliate.size === 'number' && foliate.size > 0) {
+    const { center, viewportSize, visible } = getActiveWordViewportMetrics(rect, foliate)
+    if (!visible) return false
+
+    const margin = (viewportSize * (1 - stickyBandRatio)) / 2
+    return center >= margin && center <= viewportSize - margin
+  }
+
+  const win = root.ownerDocument.defaultView
+  if (!win) return true
+
+  const viewportHeight = win.innerHeight
+  if (viewportHeight <= 0) return true
+
+  const visible = rect.bottom > 0 && rect.top < viewportHeight
+  if (!visible) return false
+
+  const margin = (viewportHeight * (1 - stickyBandRatio)) / 2
+  const centerY = rect.top + rect.height / 2
+  return centerY >= margin && centerY <= viewportHeight - margin
+}
+
+export function collectScrollTargets(doc: Document): Array<Window | HTMLElement> {
+  const targets: Array<Window | HTMLElement> = []
+  const seen = new Set<EventTarget>()
+
+  const add = (target: Window | HTMLElement | null | undefined) => {
+    if (!target || seen.has(target)) return
+    seen.add(target)
+    targets.push(target)
+  }
+
+  add(doc.defaultView ?? undefined)
+  add(doc.scrollingElement as HTMLElement | null)
+
+  const candidates = [doc.documentElement, doc.body, ...doc.querySelectorAll('main, [role="doc-main"]')]
+  for (const candidate of candidates) {
+    if (!(candidate instanceof HTMLElement)) continue
+    const overflowY = winGetComputedStyle(candidate, doc).overflowY
+    const scrollable =
+      candidate.scrollHeight > candidate.clientHeight + 2 && (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay')
+    if (scrollable) add(candidate)
+  }
+
+  return targets
+}
+
+function winGetComputedStyle(element: HTMLElement, doc: Document) {
+  return doc.defaultView?.getComputedStyle(element) ?? { overflowY: 'visible' as const }
 }
 
 export function injectTtsHighlightStyles(doc: Document, sentenceColor: string, wordColor: string) {
@@ -281,6 +423,7 @@ export function injectTtsHighlightStyles(doc: Document, sentenceColor: string, w
       outline: 1px solid ${wordColor} !important;
       outline-color: color-mix(in srgb, ${wordColor} 70%, transparent) !important;
       outline-offset: 1px;
+      scroll-margin-block: 18vh;
     }
   `
   if (existing) {

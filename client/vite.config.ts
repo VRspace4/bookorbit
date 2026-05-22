@@ -9,12 +9,13 @@ import { VitePWA } from 'vite-plugin-pwa'
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:3000'
 const hmrHost = process.env.VITE_HMR_HOST
 const enableDevPwa = process.env.VITE_PWA_DEV === 'true' || Boolean(hmrHost)
+const enableVueDevTools = process.env.VITE_VUE_DEVTOOLS === 'true'
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
     vue(),
-    vueDevTools(),
+    ...(enableVueDevTools ? [vueDevTools()] : []),
     tailwindcss(),
     VitePWA({
       registerType: 'prompt',
@@ -41,22 +42,25 @@ export default defineConfig({
         orientation: 'any',
         icons: [
           {
-            src: 'pwa-64x64.png',
+            src: '/pwa-64x64.png',
             sizes: '64x64',
             type: 'image/png',
+            purpose: 'any',
           },
           {
-            src: 'pwa-192x192.png',
+            src: '/pwa-192x192.png',
             sizes: '192x192',
             type: 'image/png',
+            purpose: 'any',
           },
           {
-            src: 'pwa-512x512.png',
+            src: '/pwa-512x512.png',
             sizes: '512x512',
             type: 'image/png',
+            purpose: 'any',
           },
           {
-            src: 'maskable-icon-512x512.png',
+            src: '/maskable-icon-512x512.png',
             sizes: '512x512',
             type: 'image/png',
             purpose: 'maskable',
@@ -224,7 +228,6 @@ export default defineConfig({
       devOptions: {
         enabled: enableDevPwa,
         type: 'module',
-        navigateFallbackAllowlist: [/^\/$/],
       },
     }),
   ],

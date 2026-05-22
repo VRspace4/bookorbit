@@ -1,16 +1,9 @@
 import { computed, ref } from 'vue'
-import { isStandaloneDisplay } from '../lib/native-app'
-
-interface BeforeInstallPromptEvent extends Event {
-  prompt(): Promise<void>
-  readonly userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
-}
+import { deferredInstallPrompt, isInstalledDisplay, _resetInstallPromptCaptureForTest } from '../lib/install-prompt-init'
 
 const DISMISS_STORAGE_KEY = 'bookorbit:pwa:install-dismissed-until'
 const DISMISS_MS = 1000 * 60 * 60 * 24 * 7
 
-const _deferredPrompt = ref<BeforeInstallPromptEvent | null>(null)
-const _isInstalled = ref(typeof window !== 'undefined' ? isStandaloneDisplay() : false)
 const _dismissedUntil = ref(readDismissedUntil())
 
 function readDismissedUntil(): number {
@@ -36,29 +29,9 @@ function detectSafari(): boolean {
   return ua.includes('safari') && !ua.includes('crios') && !ua.includes('fxios') && !ua.includes('edgios')
 }
 
-function _onBeforeInstallPrompt(e: Event) {
-  e.preventDefault()
-  _deferredPrompt.value = e as BeforeInstallPromptEvent
-}
-
-function _onAppInstalled() {
-  _deferredPrompt.value = null
-  _isInstalled.value = true
-  _dismissedUntil.value = 0
-}
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('beforeinstallprompt', _onBeforeInstallPrompt)
-  window.addEventListener('appinstalled', _onAppInstalled)
-  const standaloneQuery = window.matchMedia?.('(display-mode: standalone)')
-  standaloneQuery?.addEventListener?.('change', () => {
-    _isInstalled.value = isStandaloneDisplay()
-  })
-}
-
 export function useInstallPrompt() {
-  const isInstallable = computed(() => _deferredPrompt.value !== null)
-  const isInstalled = computed(() => _isInstalled.value)
+  const isInstallable = computed(() => deferredInstallPrompt.value !== null)
+  const isInstalled = computed(() => isInstalledDisplay.value)
   const isIosInstallCandidate = computed(() => detectIosDevice() && detectSafari() && !isInstalled.value)
   const isDismissed = computed(() => Date.now() < _dismissedUntil.value)
   const canShowInstallPrompt = computed(() => !isInstalled.value && !isDismissed.value && (isInstallable.value || isIosInstallCandidate.value))
@@ -67,14 +40,15 @@ export function useInstallPrompt() {
   )
 
   async function installApp(): Promise<void> {
-    const prompt = _deferredPrompt.value
+    const prompt = deferredInstallPrompt.value
     if (!prompt) return
 
     await prompt.prompt()
 
     const { outcome } = await prompt.userChoice
     if (outcome === 'accepted') {
-      _deferredPrompt.value = null
+      deferredInstallPrompt.value = null
+      delete window.__bookorbitDeferredInstall
     }
   }
 
@@ -102,12 +76,6 @@ export function useInstallPrompt() {
 
 /** Resets module-level singleton state. For use in tests only. */
 export function _resetInstallPromptForTest() {
-  _deferredPrompt.value = null
-  _isInstalled.value = typeof window !== 'undefined' ? isStandaloneDisplay() : false
+  _resetInstallPromptCaptureForTest()
   _dismissedUntil.value = 0
-  try {
-    window.localStorage.removeItem(DISMISS_STORAGE_KEY)
-  } catch {
-    // Ignore storage cleanup in tests without localStorage.
-  }
 }

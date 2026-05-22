@@ -24,6 +24,7 @@ import ReaderFooter from './epub/components/ReaderFooter.vue'
 import ReaderSidebar from './epub/components/ReaderSidebar.vue'
 import ReaderSettingsPanel from './epub/components/ReaderSettingsPanel.vue'
 import TtsControls from './epub/components/TtsControls.vue'
+import TtsFollowAlongButton from './epub/components/TtsFollowAlongButton.vue'
 import TtsSettingsPanel from './epub/components/TtsSettingsPanel.vue'
 import SelectionPopup from './epub/components/SelectionPopup.vue'
 import ReaderSearchPanel from './epub/components/ReaderSearchPanel.vue'
@@ -42,7 +43,7 @@ import type { EpubReaderSettings } from '@bookorbit/types'
 import { getFormatGroup } from '@bookorbit/types'
 import { buildThemeHighlightPatch, buildThemeSwitchHighlightPatch } from './epub/theme-highlight'
 import { readCachedReaderProgress } from './shared/lib/reader-progress-cache'
-import { readTtsPlaybackSession } from './epub/tts/tts-session-cache'
+import { readTtsPlaybackSession, writeTtsPlaybackSession } from './epub/tts/tts-session-cache'
 
 const route = useRoute()
 const router = useRouter()
@@ -131,6 +132,19 @@ watch([headerVisible, footerVisible], ([header, footer]) => {
     clearBookmark()
   }
 })
+
+watch(
+  () => bookSettings.deviceFormFactor.value,
+  () => {
+    if (isAudioFormat || isPdfFormat || isComicFormat) return
+    if (!shouldApplyStyles.value && !bookSettings.isCustomized.value) return
+
+    const effective = bookSettings.effective.value as EpubReaderSettings
+    seedState(effective)
+    const renderer = getRenderer()
+    if (renderer) applyToRenderer(renderer)
+  },
+)
 
 useWakeLock()
 
@@ -225,6 +239,7 @@ function handleTranslate() {
 
 function onRelocateHandler(detail: RelocateDetail) {
   progress.onRelocate(detail)
+  if (tts.isActive.value) tts.evaluateScrollFollow()
   onActivity()
   bookmarks.setCfi(detail?.cfi ?? null)
   toc.setActiveHref(detail?.tocItem?.href ?? '')
@@ -268,7 +283,47 @@ const {
   setTextSelectedHandler,
   view: foliateView,
   bookLanguage,
+  waitForInitialRestore,
 } = useFoliate(() => containerRef.value, onRelocateHandler, onApplyStylesHandler, onMiddleTapHandler, onDocumentLoadHandler)
+
+function alignTtsSessionWithProgress() {
+  const saved = progress.getTtsPosition()
+  if (!saved) return
+  const session = readTtsPlaybackSession(fileId)
+  if (!session?.enabled) return
+  writeTtsPlaybackSession(fileId, {
+    enabled: true,
+    wasPlaying: false,
+    sectionIndex: saved.sectionIndex,
+    wordIndex: saved.wordIndex,
+  })
+}
+
+async function waitForActiveSection(targetSection: number, timeoutMs = 12_000): Promise<boolean> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const doc = getActiveDocument()
+    if (sectionIndex.value === targetSection && doc?.body) {
+      await nextTick()
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 0)
+      })
+      return true
+    }
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, 50)
+    })
+  }
+  return sectionIndex.value === targetSection && Boolean(getActiveDocument()?.body)
+}
+
+async function ensureReaderAtTtsPosition(saved: { sectionIndex: number; wordIndex: number }) {
+  if (sectionIndex.value !== saved.sectionIndex) {
+    await goToSection(saved.sectionIndex)
+  }
+  await waitForActiveSection(saved.sectionIndex)
+  alignTtsSessionWithProgress()
+}
 
 const tts = useEpubTts({
   fileId,
@@ -286,6 +341,15 @@ const tts = useEpubTts({
   onSectionComplete: () => {
     void handleTtsSectionComplete()
   },
+  getFoliateRenderer: () => {
+    const renderer = getRenderer() as {
+      scrolled?: boolean
+      size?: number
+      start?: number
+      scrollBy?: (dx: number, dy: number) => void
+    } | null
+    return renderer
+  },
 })
 handleLoadedDocument = tts.handleDocumentLoad
 
@@ -294,7 +358,12 @@ const ttsProgress = computed(() => tts.progress.value)
 const ttsActiveIndex = computed(() => tts.activeIndex.value)
 const ttsWordCount = computed(() => tts.wordCount.value)
 const ttsCurrentProvider = computed(() => tts.currentProvider.value)
-const ttsIsActive = computed(() => tts.isActive.value)
+const isLeavingReader = ref(false)
+const ttsIsActive = computed(() => tts.isActive.value && !isLeavingReader.value)
+const ttsScrollFollowEnabled = computed(() => tts.scrollFollowEnabled.value)
+const showTtsFollowAlong = computed(
+  () => ttsIsActive.value && !ttsScrollFollowEnabled.value && ttsStatus.value !== 'idle' && ttsStatus.value !== 'done' && ttsStatus.value !== 'error',
+)
 
 setTextSelectedHandler(selection.show)
 
@@ -312,8 +381,10 @@ onMounted(async () => {
   setFontFaceCSS(customFonts.generateFontFaceCSS())
 
   await progress.load()
+  alignTtsSessionWithProgress()
 
   await bookSettings.load()
+  void tts.warmUp()
   const effective = bookSettings.effective.value as EpubReaderSettings
   if (effective.footerDisplayMode !== undefined) {
     footerMode.value = effective.footerDisplayMode
@@ -330,29 +401,42 @@ onMounted(async () => {
 
   const cachedProgress = readCachedReaderProgress(fileId)
   const hadProgress = progress.percentage.value > 0 || cachedProgress !== null
-  const pendingTtsSession = readTtsPlaybackSession(fileId)
   await open(bookId, fileId, fileFormat, progress.cfi.value, hadProgress ? progress.percentage.value / 100 : undefined, {
     hasCachedProgress: hadProgress,
   })
   setChapters(getChapters())
   sectionFractions.value = getSectionFractions()
 
-  if (pendingTtsSession?.wasPlaying && pendingTtsSession.sectionIndex !== sectionIndex.value) {
-    await goToSection(pendingTtsSession.sectionIndex)
-    await nextTick()
+  await waitForInitialRestore()
+
+  const ttsSession = readTtsPlaybackSession(fileId)
+  const savedTts = progress.getTtsPosition()
+  if (ttsSession?.enabled && savedTts) {
+    alignTtsSessionWithProgress()
+    await ensureReaderAtTtsPosition(savedTts)
   }
-  const resumedTts = await tts.tryAutoResumeAfterReload()
-  if (resumedTts) {
+
+  const ttsRestoreResult = await tts.restoreTtsAfterReload()
+  if (ttsRestoreResult === 'resumed') {
     toast.info('Resumed read aloud', { duration: 2500 })
+  }
+
+  if (tts.isActive.value) {
+    await nextTick()
+    tts.refreshTtsHighlight()
   }
 
   await bookmarks.load(bookId)
   await annotations.load(bookId)
   if (annotations.annotations.value.length > 0) {
     addAnnotations(annotations.annotations.value.map((a) => ({ cfi: a.cfi, color: a.color, style: a.style })))
+    if (tts.isActive.value) {
+      await nextTick()
+      tts.refreshTtsHighlight()
+    }
   }
 
-  if (hadProgress && !pendingTtsSession?.wasPlaying) {
+  if (hadProgress && !readTtsPlaybackSession(fileId)?.enabled) {
     const pct = Math.round(progress.percentage.value)
     const label = chapterTitle.value || `Chapter ${sectionIndex.value + 1}`
     toast.info(`Resumed at ${pct}% - ${label}`, { duration: 2500 })
@@ -432,6 +516,19 @@ watch(
   },
 )
 
+const TTS_SETTINGS_PATCH_KEYS = [
+  'ttsProvider',
+  'ttsVoice',
+  'ttsRate',
+  'ttsPitch',
+  'ttsVolume',
+  'ttsGcpChirp3Voice',
+  'ttsAzureVoice',
+  'ttsXaiVoice',
+  'ttsKokoroVoice',
+  'ttsGpt4oMiniVoice',
+] as const satisfies readonly (keyof EpubReaderSettings)[]
+
 function applyTtsUpdate(patch: Partial<EpubReaderSettings>) {
   if ('ttsSentenceHighlightColor' in patch || 'ttsWordHighlightColor' in patch) {
     bookSettings.updateGlobalSettings(buildThemeHighlightPatch(effectiveEpubSettings.value, patch) as Partial<EpubReaderSettings>)
@@ -439,15 +536,10 @@ function applyTtsUpdate(patch: Partial<EpubReaderSettings>) {
   }
 
   bookSettings.updateGlobalSettings(patch)
-}
 
-const ttsRatePresets = [0.8, 1, 1.2, 1.5, 1.75, 2]
-
-function cycleTtsRate() {
-  const current = effectiveEpubSettings.value.ttsRate
-  const currentIdx = ttsRatePresets.findIndex((rate) => Math.abs(rate - current) < 0.01)
-  const next = ttsRatePresets[(currentIdx + 1) % ttsRatePresets.length] ?? 1
-  applyTtsUpdate({ ttsRate: next })
+  if (TTS_SETTINGS_PATCH_KEYS.some((key) => key in patch)) {
+    tts.applyTtsSettingsChange()
+  }
 }
 
 async function handleTtsSectionComplete() {
@@ -489,10 +581,7 @@ async function resumeTtsAtSavedPosition() {
   pendingTtsResume.value = null
   if (!saved) return
 
-  if (saved.sectionIndex !== sectionIndex.value) {
-    await goToSection(saved.sectionIndex)
-    await nextTick()
-  }
+  await ensureReaderAtTtsPosition(saved)
   await tts.start(saved.wordIndex)
 }
 
@@ -503,19 +592,35 @@ async function startTtsFromCurrentSection() {
   await tts.start(0)
 }
 
-async function startTtsPlayback() {
+async function startTtsFromSavedProgress() {
+  try {
+    await progress.flush()
+  } catch {
+    // Continue with the last known snapshot if the flush fails.
+  }
+  await progress.refreshFromServer()
+
   const saved = progress.getTtsPosition()
-  if (saved && saved.sectionIndex === sectionIndex.value) {
-    await tts.start()
+  if (saved) {
+    await ensureReaderAtTtsPosition(saved)
+    await tts.start(saved.wordIndex)
     return
   }
-  if (saved && saved.sectionIndex !== sectionIndex.value) {
-    pendingTtsResume.value = saved
-    showTtsResumeDialog.value = true
-    return
-  }
-  progress.updateTtsPosition(sectionIndex.value, 0)
+
   await tts.start(0)
+}
+
+async function startTtsPlayback() {
+  if (tts.status.value === 'paused') {
+    tts.resume()
+    return
+  }
+
+  if (tts.status.value === 'loading') {
+    tts.stop({ checkpoint: false })
+  }
+
+  await startTtsFromSavedProgress()
 }
 
 function toggleTts() {
@@ -600,15 +705,20 @@ function navigateSearch(cfiTarget: string) {
 
 async function handleBack() {
   if (!isAudioFormat && !isPdfFormat && !isComicFormat) {
-    tts.stop()
-    await progress.flush()
+    isLeavingReader.value = true
   }
+  await progress.flush()
   await exitReader(router)
 }
 
 onBeforeRouteLeave(async () => {
   if (isAudioFormat || isPdfFormat || isComicFormat) return true
-  tts.stop()
+  isLeavingReader.value = true
+  const savedTts = progress.getTtsPosition()
+  tts.persistForNavigation({
+    sectionIndex: sectionIndex.value,
+    wordIndex: savedTts?.sectionIndex === sectionIndex.value ? savedTts.wordIndex : undefined,
+  })
   await progress.flush()
   return true
 })
@@ -661,7 +771,7 @@ function closeSearch() {
     </Transition>
 
     <div class="absolute inset-0">
-      <div v-if="loading" class="absolute inset-0 flex items-center justify-center z-10 bg-background">
+      <div v-if="loading || restoring" class="absolute inset-0 flex items-center justify-center z-10 bg-background">
         <div class="flex flex-col items-center gap-3">
           <div class="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
           <p class="text-sm text-muted-foreground">{{ restoring ? 'Restoring reader…' : 'Loading book…' }}</p>
@@ -696,6 +806,8 @@ function closeSearch() {
       @seekBookmarkTap="handleSeekBookmarkTap"
     />
 
+    <TtsFollowAlongButton :visible="showTtsFollowAlong" @resume="tts.resumeScrollFollow" />
+
     <TtsControls
       v-if="ttsIsActive"
       :status="ttsStatus"
@@ -705,14 +817,15 @@ function closeSearch() {
       :provider="ttsCurrentProvider"
       :settings="effectiveEpubSettings"
       @start="startTtsPlayback"
+      @prefetch="void tts.prefetchPlaybackAhead()"
       @pause="tts.pause"
       @resume="tts.resume"
-      @stop="tts.stop"
       @replay="tts.replay"
       @skipBack="tts.skipBackward"
       @skipForward="tts.skipForward"
       @toggleSettings="showTtsSettings = true"
-      @cycleRate="cycleTtsRate"
+      @updateProvider="(provider) => applyTtsUpdate({ ttsProvider: provider })"
+      @updateRate="(rate) => applyTtsUpdate({ ttsRate: rate })"
     />
 
     <TtsSettingsPanel v-if="showTtsSettings" :settings="effectiveEpubSettings" @update="applyTtsUpdate" @close="showTtsSettings = false" />

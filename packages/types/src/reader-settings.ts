@@ -1,6 +1,21 @@
 export type ReaderFormatGroup = "epub" | "pdf" | "cbx" | "audio";
 export type TtsProvider = "browser" | "azure" | "gcp-chirp3" | "xai" | "kokoro" | "gpt-4o-mini-tts";
 
+/** Device form factor for per-device reader appearance/text/layout defaults. */
+export type ReaderDeviceFormFactor = "mobile" | "tablet" | "desktop";
+
+export const READER_DEVICE_FORM_FACTORS = ["mobile", "tablet", "desktop"] as const satisfies readonly ReaderDeviceFormFactor[];
+
+/** Breakpoints aligned with reader chrome visibility (768px) and tablet/desktop split. */
+export const READER_MOBILE_MAX_WIDTH = 767;
+export const READER_TABLET_MAX_WIDTH = 1023;
+
+export function getReaderDeviceFormFactor(width = typeof window !== "undefined" ? window.innerWidth : READER_TABLET_MAX_WIDTH + 1): ReaderDeviceFormFactor {
+  if (width <= READER_MOBILE_MAX_WIDTH) return "mobile";
+  if (width <= READER_TABLET_MAX_WIDTH) return "tablet";
+  return "desktop";
+}
+
 // Formats the reader can actually open. Used to show/hide Read/Open buttons.
 export const READER_OPENABLE_FORMATS = new Set([
   // epub reader (foliate)
@@ -191,3 +206,109 @@ export const READER_GROUP_DEFAULTS: ReaderSettingsMap = {
   cbx: CBX_READER_DEFAULTS,
   audio: AUDIO_READER_DEFAULTS,
 };
+
+/** Appearance, text, and layout keys stored per device form factor. */
+export const EPUB_DEVICE_SETTING_KEYS = [
+  "themeName",
+  "isDark",
+  "fontFamily",
+  "fontSize",
+  "lineHeight",
+  "maxColumnCount",
+  "gap",
+  "maxInlineSize",
+  "justify",
+  "hyphenate",
+  "flow",
+] as const satisfies readonly (keyof EpubReaderSettings)[];
+
+export type EpubDeviceSettingKey = (typeof EPUB_DEVICE_SETTING_KEYS)[number];
+
+/** Account-wide EPUB defaults (TTS and other non device-specific fields). */
+export const EPUB_SHARED_DEFAULT_KEYS = [
+  "overrideBookFormatting",
+  "maxBlockSize",
+  "footerDisplayMode",
+  "ttsProvider",
+  "ttsVoice",
+  "ttsRate",
+  "ttsPitch",
+  "ttsVolume",
+  "ttsGcpChirp3Voice",
+  "ttsAzureVoice",
+  "ttsXaiVoice",
+  "ttsKokoroVoice",
+  "ttsGpt4oMiniVoice",
+  "ttsSkipBackSeconds",
+  "ttsSkipForwardSeconds",
+  "themeHighlightColors",
+  "ttsSentenceHighlightColor",
+  "ttsWordHighlightColor",
+] as const satisfies readonly (keyof EpubReaderSettings)[];
+
+export type EpubSharedDefaultKey = (typeof EPUB_SHARED_DEFAULT_KEYS)[number];
+
+export type EpubDeviceSettings = Partial<Pick<EpubReaderSettings, EpubDeviceSettingKey>>;
+export type EpubSharedSettings = Partial<Pick<EpubReaderSettings, EpubSharedDefaultKey>>;
+
+export type EpubDeviceSettingsMap = Record<ReaderDeviceFormFactor, EpubDeviceSettings>;
+
+/** Versioned EPUB defaults payload stored in localStorage and synced to the backend. */
+export interface EpubReaderDefaultsStorageV2 {
+  v: 2;
+  shared: EpubSharedSettings;
+  devices: EpubDeviceSettingsMap;
+}
+
+export function isEpubDefaultsStorageV2(value: unknown): value is EpubReaderDefaultsStorageV2 {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return record.v === 2 && typeof record.shared === "object" && record.shared !== null && typeof record.devices === "object" && record.devices !== null;
+}
+
+export function pickEpubDeviceSettings(settings: Partial<EpubReaderSettings>): EpubDeviceSettings {
+  const out: Record<string, unknown> = {};
+  for (const key of EPUB_DEVICE_SETTING_KEYS) {
+    if (key in settings) {
+      out[key] = settings[key];
+    }
+  }
+  return out as EpubDeviceSettings;
+}
+
+export function pickEpubSharedSettings(settings: Partial<EpubReaderSettings>): EpubSharedSettings {
+  const out: Record<string, unknown> = {};
+  for (const key of EPUB_SHARED_DEFAULT_KEYS) {
+    if (key in settings) {
+      out[key] = settings[key];
+    }
+  }
+  return out as EpubSharedSettings;
+}
+
+export function createEmptyEpubDeviceSettingsMap(): EpubDeviceSettingsMap {
+  return { mobile: {}, tablet: {}, desktop: {} };
+}
+
+export function migrateFlatEpubDefaultsToV2(flat: Partial<EpubReaderSettings>): EpubReaderDefaultsStorageV2 {
+  const deviceSettings = pickEpubDeviceSettings(flat);
+  return {
+    v: 2,
+    shared: pickEpubSharedSettings(flat),
+    devices: {
+      mobile: { ...deviceSettings },
+      tablet: { ...deviceSettings },
+      desktop: { ...deviceSettings },
+    },
+  };
+}
+
+export function mergeEpubDefaultsForDevice(
+  storage: EpubReaderDefaultsStorageV2,
+  device: ReaderDeviceFormFactor,
+): Partial<EpubReaderSettings> {
+  return {
+    ...storage.shared,
+    ...storage.devices[device],
+  };
+}

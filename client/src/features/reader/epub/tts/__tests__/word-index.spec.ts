@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   TTS_ACTIVE_CLASS,
   TTS_SENTENCE_CLASS,
@@ -7,6 +7,8 @@ import {
   findWordIndexAtPoint,
   highlightWord,
   injectTtsHighlightStyles,
+  isActiveWordInStickyViewport,
+  scrollActiveWordIntoView,
   splitIntoSentences,
 } from '../word-index'
 
@@ -54,6 +56,138 @@ describe('TTS word indexing', () => {
     expect(style?.textContent).toContain('background-color: #fde68a !important')
     expect(active?.namespaceURI).toBe(xhtmlNs)
     expect(active?.textContent).toBe('world.')
+  })
+
+  it('detects when the active word leaves the sticky follow band', () => {
+    const root = document.createElement('main')
+    root.innerHTML = '<p>Hello world. Another sentence.</p>'
+    const words = buildWordIndex(root)
+    const sentences = splitIntoSentences(words, 0)
+    highlightWord(root, words, sentences, 1)
+
+    const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
+    active.getBoundingClientRect = () =>
+      ({
+        top: 10,
+        bottom: 24,
+        left: 0,
+        right: 40,
+        width: 40,
+        height: 14,
+        x: 0,
+        y: 10,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    expect(isActiveWordInStickyViewport(root, 0.42)).toBe(true)
+
+    active.getBoundingClientRect = () =>
+      ({
+        top: -40,
+        bottom: -20,
+        left: 0,
+        right: 40,
+        width: 40,
+        height: 14,
+        x: 0,
+        y: -40,
+        toJSON: () => ({}),
+      }) as DOMRect
+    expect(isActiveWordInStickyViewport(root, 0.42)).toBe(false)
+  })
+
+  it('scrolls the active highlight into view when requested', () => {
+    const root = document.createElement('main')
+    root.innerHTML = '<p>Hello world.</p>'
+    const words = buildWordIndex(root)
+    const sentences = splitIntoSentences(words, 0)
+    highlightWord(root, words, sentences, 0)
+
+    const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
+    const scrollIntoView = vi.fn()
+    active.scrollIntoView = scrollIntoView
+
+    scrollActiveWordIntoView(root, 'instant', null)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center', inline: 'nearest', behavior: 'instant' })
+  })
+
+  it('centers via foliate scrollBy when a scrolled paginator is available', () => {
+    const root = document.createElement('main')
+    root.innerHTML = '<p>Hello world.</p>'
+    const words = buildWordIndex(root)
+    const sentences = splitIntoSentences(words, 0)
+    highlightWord(root, words, sentences, 0)
+
+    const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
+    active.getBoundingClientRect = () =>
+      ({
+        top: 400,
+        bottom: 416,
+        left: 0,
+        right: 40,
+        width: 40,
+        height: 16,
+        x: 0,
+        y: 400,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    const scrollBy = vi.fn()
+    scrollActiveWordIntoView(root, 'instant', { scrolled: true, size: 800, scrollBy })
+    expect(scrollBy).toHaveBeenCalledWith(8, 0)
+  })
+
+  it('accounts for foliate scroll offset in scrolled mode', () => {
+    const root = document.createElement('main')
+    root.innerHTML = '<p>Hello world.</p>'
+    const words = buildWordIndex(root)
+    const sentences = splitIntoSentences(words, 0)
+    highlightWord(root, words, sentences, 0)
+
+    const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
+    active.getBoundingClientRect = () =>
+      ({
+        top: 1415,
+        bottom: 1439,
+        left: 0,
+        right: 40,
+        width: 40,
+        height: 24,
+        x: 0,
+        y: 1415,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    const scrollBy = vi.fn()
+    scrollActiveWordIntoView(root, 'instant', { scrolled: true, size: 1268, start: 1415, scrollBy })
+    expect(scrollBy).toHaveBeenCalledWith(-622, 0)
+  })
+
+  it('uses foliate viewport metrics for sticky follow detection', () => {
+    const root = document.createElement('main')
+    root.innerHTML = '<p>Hello world.</p>'
+    const words = buildWordIndex(root)
+    const sentences = splitIntoSentences(words, 0)
+    highlightWord(root, words, sentences, 0)
+
+    const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
+    active.getBoundingClientRect = () =>
+      ({
+        top: 1415,
+        bottom: 1439,
+        left: 0,
+        right: 40,
+        width: 40,
+        height: 24,
+        x: 0,
+        y: 1415,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 18000 })
+    expect(isActiveWordInStickyViewport(root, 0.42, { scrolled: true, size: 1268, start: 2683 })).toBe(false)
+    expect(isActiveWordInStickyViewport(root, 0.42, { scrolled: true, size: 1268, start: 793 })).toBe(true)
   })
 
   it('finds a word index from a caret point inside text', () => {

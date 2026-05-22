@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import { Download, RefreshCcw, Smartphone, X } from 'lucide-vue-next'
 import { useInstallPrompt } from '../composables/useInstallPrompt'
 import { usePwaServiceWorker } from '../composables/usePwaServiceWorker'
@@ -9,10 +9,6 @@ const serviceWorker = usePwaServiceWorker()
 
 const showInstall = computed(() => installPrompt.canShowInstallPrompt.value && !installPrompt.isInstalled.value)
 const showServiceWorkerPrompt = computed(() => serviceWorker.needRefresh.value || serviceWorker.restartReady.value)
-
-onMounted(() => {
-  void serviceWorker.register()
-})
 
 async function installApp() {
   await installPrompt.installApp()

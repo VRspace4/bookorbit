@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
-import { EPUB_READER_DEFAULTS, type EpubReaderSettings } from '@bookorbit/types'
+import { EPUB_READER_DEFAULTS, migrateFlatEpubDefaultsToV2, type EpubReaderDefaultsStorageV2, type EpubReaderSettings } from '@bookorbit/types'
 import { isReaderSyncEnabled, useReaderSettings } from '../useReaderSettings'
 
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>())
@@ -13,9 +13,22 @@ const userRef = vi.hoisted(() =>
   }),
 )
 
+const deviceFormFactorRef = vi.hoisted(() => ref<'mobile' | 'tablet' | 'desktop'>('desktop'))
+
 vi.mock('@/features/auth/composables/useAuth', () => ({
   useAuth: () => ({ user: userRef }),
 }))
+
+vi.mock('@/features/reader/shared/lib/device-form-factor', () => ({
+  useReaderDeviceFormFactor: () => ({ deviceFormFactor: deviceFormFactorRef }),
+  getReaderDeviceFormFactor: () => deviceFormFactorRef.value,
+}))
+
+function readEpubDefaults(): EpubReaderDefaultsStorageV2 {
+  const raw = localStorage.getItem('reader:default:epub')
+  expect(raw).toBeTruthy()
+  return JSON.parse(raw!) as EpubReaderDefaultsStorageV2
+}
 
 describe('isReaderSyncEnabled', () => {
   it('defaults to enabled when syncReaderPreferences is unset', () => {
@@ -37,6 +50,7 @@ describe('useReaderSettings', () => {
     vi.clearAllMocks()
     localStorage.clear()
     userRef.value = { settings: { syncReaderPreferences: true } }
+    deviceFormFactorRef.value = 'desktop'
     apiMock.mockResolvedValue({ ok: true })
   })
 
@@ -77,7 +91,12 @@ describe('useReaderSettings', () => {
     expect(epubEffective.fontSize).toBe(20)
     expect(epubEffective.ttsRate).toBe(1.5)
     expect(epubEffective.ttsProvider).toBe('azure')
-    expect(localStorage.getItem('reader:default:epub')).toContain('"fontSize":20')
+
+    const stored = readEpubDefaults()
+    expect(stored.v).toBe(2)
+    expect(stored.devices.desktop.fontSize).toBe(20)
+    expect(stored.shared.ttsRate).toBe(1.5)
+    expect(stored.shared.ttsProvider).toBe('azure')
     expect(localStorage.getItem('reader:book:4')).toBeNull()
     expect(apiMock).not.toHaveBeenCalled()
 
@@ -88,13 +107,30 @@ describe('useReaderSettings', () => {
     )
     expect(defaultPutCalls).toHaveLength(1)
     expect(JSON.parse((defaultPutCalls[0]![1] as { body: string }).body)).toEqual({
-      settings: {
-        ...EPUB_READER_DEFAULTS,
-        fontSize: 20,
-        ttsRate: 1.5,
-        ttsProvider: 'azure',
-      },
+      settings: stored,
     })
+  })
+
+  it('stores appearance, text, and layout settings per device form factor', () => {
+    const { updateGlobalSettings, effective } = useReaderSettings(4, 'epub')
+
+    deviceFormFactorRef.value = 'mobile'
+    updateGlobalSettings({ fontSize: 18, maxColumnCount: 1 } as Partial<EpubReaderSettings>)
+    expect((effective.value as EpubReaderSettings).fontSize).toBe(18)
+
+    deviceFormFactorRef.value = 'desktop'
+    updateGlobalSettings({ fontSize: 22, maxColumnCount: 2 } as Partial<EpubReaderSettings>)
+    expect((effective.value as EpubReaderSettings).fontSize).toBe(22)
+
+    const stored = readEpubDefaults()
+    expect(stored.devices.mobile.fontSize).toBe(18)
+    expect(stored.devices.mobile.maxColumnCount).toBe(1)
+    expect(stored.devices.desktop.fontSize).toBe(22)
+    expect(stored.devices.desktop.maxColumnCount).toBe(2)
+
+    deviceFormFactorRef.value = 'mobile'
+    expect((effective.value as EpubReaderSettings).fontSize).toBe(18)
+    expect((effective.value as EpubReaderSettings).maxColumnCount).toBe(1)
   })
 
   it('does not sync when reader preference sync is disabled', async () => {
@@ -130,21 +166,30 @@ describe('useReaderSettings', () => {
     })
     expect(epubEffective.ttsSentenceHighlightColor).toBe('#aa0000')
     expect(epubEffective.ttsWordHighlightColor).toBe('#bb0000')
+
+    const stored = readEpubDefaults()
+    expect(stored.devices.desktop.themeName).toBe('sepia')
+    expect(stored.shared.themeHighlightColors?.sepia).toEqual({
+      ttsSentenceHighlightColor: '#aa0000',
+      ttsWordHighlightColor: '#bb0000',
+    })
   })
 
   it('resolves highlight colors from the active theme overrides', async () => {
     localStorage.setItem(
       'reader:default:epub',
-      JSON.stringify({
-        ...EPUB_READER_DEFAULTS,
-        themeName: 'sepia',
-        themeHighlightColors: {
-          sepia: {
-            ttsSentenceHighlightColor: '#aa0000',
-            ttsWordHighlightColor: '#bb0000',
+      JSON.stringify(
+        migrateFlatEpubDefaultsToV2({
+          ...EPUB_READER_DEFAULTS,
+          themeName: 'sepia',
+          themeHighlightColors: {
+            sepia: {
+              ttsSentenceHighlightColor: '#aa0000',
+              ttsWordHighlightColor: '#bb0000',
+            },
           },
-        },
-      }),
+        }),
+      ),
     )
 
     const { load, effective } = useReaderSettings(4, 'epub')
@@ -153,5 +198,26 @@ describe('useReaderSettings', () => {
     const epubEffective = effective.value as EpubReaderSettings
     expect(epubEffective.ttsSentenceHighlightColor).toBe('#aa0000')
     expect(epubEffective.ttsWordHighlightColor).toBe('#bb0000')
+  })
+
+  it('migrates legacy flat defaults to per-device storage on load', async () => {
+    localStorage.setItem(
+      'reader:default:epub',
+      JSON.stringify({
+        ...EPUB_READER_DEFAULTS,
+        fontSize: 20,
+        maxColumnCount: 1,
+      }),
+    )
+
+    const { load, effective } = useReaderSettings(4, 'epub')
+    await load()
+
+    const stored = readEpubDefaults()
+    expect(stored.v).toBe(2)
+    expect(stored.devices.mobile.fontSize).toBe(20)
+    expect(stored.devices.tablet.fontSize).toBe(20)
+    expect(stored.devices.desktop.fontSize).toBe(20)
+    expect((effective.value as EpubReaderSettings).fontSize).toBe(20)
   })
 })

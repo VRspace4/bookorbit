@@ -59,4 +59,14 @@ describe('reader navigation', () => {
     expect(router.back).not.toHaveBeenCalled()
     expect(router.replace).toHaveBeenCalledWith({ name: 'dashboard' })
   })
+
+  it('falls back to Dashboard instead of backing into login with redirect query', async () => {
+    window.history.replaceState({ back: '/login?redirect=/read/1/2?format=epub' }, '', '/read/1/2?format=epub')
+    const router = makeRouter()
+
+    await exitReader(router)
+
+    expect(router.back).not.toHaveBeenCalled()
+    expect(router.replace).toHaveBeenCalledWith({ name: 'dashboard' })
+  })
 })

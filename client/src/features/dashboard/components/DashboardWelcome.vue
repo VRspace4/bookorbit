@@ -26,10 +26,7 @@ async function handleSaved(library: Library) {
 
 <template>
   <div class="flex items-center justify-center py-16 px-4">
-    <div
-      data-tour="welcome-card"
-      class="relative w-full max-w-md overflow-hidden rounded-2xl border border-primary/40 bg-card/30 shadow-sm backdrop-blur-[1px]"
-    >
+    <div data-tour="welcome-card" class="dashboard-panel relative w-full max-w-md">
       <!-- Glow backdrop -->
       <div
         class="pointer-events-none absolute inset-0"

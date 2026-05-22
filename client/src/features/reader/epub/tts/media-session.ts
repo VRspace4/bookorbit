@@ -21,6 +21,10 @@ let initialized = false
 let actionHandlersRegistered = false
 let lastMediaKeyAt = 0
 let mediaSessionSuppressed = false
+/** Ignore keepalive play/pause events fired by our own start/stop sync (not headset buttons). */
+let keepaliveSyncDepth = 0
+let lastKeepaliveSyncAt = 0
+const KEEPALIVE_EVENT_IGNORE_MS = 750
 
 const MEDIA_KEY_DEBOUNCE_MS = 350
 const TTS_MEDIA_SESSION_DURATION_SEC = 3600
@@ -35,6 +39,31 @@ function resolveAssetUrl(path: string): string {
   return new URL(path, window.location.origin).href
 }
 
+function onKeepalivePlaybackEvent(event: Event) {
+  if (keepaliveSyncDepth > 0) return
+  if (Date.now() - lastKeepaliveSyncAt < KEEPALIVE_EVENT_IGNORE_MS) return
+  if (mediaSessionSuppressed) return
+  if (!isControllablePlaybackStatus(controller?.getStatus())) return
+
+  const audio = keepaliveAudio
+  if (!audio) return
+
+  const status = controller?.getStatus()
+  // Only mirror headset events once real speech audio is active — not during startup prefetch.
+  if (status === 'loading') return
+
+  const shouldPlayKeepalive = status === 'speaking'
+
+  // Ignore programmatic keepalive sync (e.g. stopKeepalive after the UI pause button).
+  const isExternalHeadsetToggle =
+    (event.type === 'pause' && shouldPlayKeepalive && audio.paused) || (event.type === 'play' && !shouldPlayKeepalive && !audio.paused)
+  if (!isExternalHeadsetToggle) return
+
+  // Some browsers route headset play/pause to the keepalive <audio> element instead of
+  // MediaSession action handlers. Mirror that into TTS playback with the same debounce.
+  togglePlaybackFromMediaKey()
+}
+
 function getKeepaliveAudio(): HTMLAudioElement {
   if (!keepaliveAudio) {
     const audio = new Audio(resolveAssetUrl('/tts-keepalive.wav'))
@@ -43,6 +72,8 @@ function getKeepaliveAudio(): HTMLAudioElement {
     audio.preload = 'auto'
     audio.setAttribute('aria-hidden', 'true')
     audio.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;top:0;left:0;'
+    audio.addEventListener('pause', onKeepalivePlaybackEvent)
+    audio.addEventListener('play', onKeepalivePlaybackEvent)
     document.body.appendChild(audio)
     keepaliveAudio = audio
   }
@@ -57,34 +88,72 @@ function startKeepalive() {
 
   const audio = getKeepaliveAudio()
   if (!audio.paused) return
-  void audio.play().catch(() => {
-    // Autoplay may be blocked until primed by a user gesture.
-  })
+  keepaliveSyncDepth++
+  lastKeepaliveSyncAt = Date.now()
+  void audio
+    .play()
+    .catch(() => {
+      // Autoplay may be blocked until primed by a user gesture.
+    })
+    .finally(() => {
+      keepaliveSyncDepth = Math.max(0, keepaliveSyncDepth - 1)
+      lastKeepaliveSyncAt = Date.now()
+    })
 }
 
 function stopKeepalive() {
   if (!keepaliveAudio || keepaliveAudio.paused) return
-  keepaliveAudio.pause()
-  keepaliveAudio.currentTime = 0
+  keepaliveSyncDepth++
+  lastKeepaliveSyncAt = Date.now()
+  try {
+    keepaliveAudio.pause()
+    keepaliveAudio.currentTime = 0
+  } finally {
+    keepaliveSyncDepth = Math.max(0, keepaliveSyncDepth - 1)
+    lastKeepaliveSyncAt = Date.now()
+  }
 }
 
 function primeOnFirstGesture() {
   let primed = false
 
-  function onGesture() {
+  function onGesture(event: Event) {
     if (primed) return
+    const target = event.target
+    if (
+      target instanceof Element &&
+      target.closest('[aria-label*="TTS"], .tts-toolbar-play, .tts-toolbar-btn, .tts-toolbar-chip, .tts-toolbar-speed')
+    ) {
+      primed = true
+      document.removeEventListener('click', onGesture, true)
+      document.removeEventListener('touchstart', onGesture, true)
+      return
+    }
     primed = true
     document.removeEventListener('click', onGesture, true)
     document.removeEventListener('touchstart', onGesture, true)
 
     const audio = getKeepaliveAudio()
+    keepaliveSyncDepth++
+    lastKeepaliveSyncAt = Date.now()
     void audio
       .play()
       .then(() => {
-        audio.pause()
+        keepaliveSyncDepth++
+        lastKeepaliveSyncAt = Date.now()
+        try {
+          audio.pause()
+        } finally {
+          keepaliveSyncDepth = Math.max(0, keepaliveSyncDepth - 1)
+          lastKeepaliveSyncAt = Date.now()
+        }
       })
       .catch(() => {
         // Ignore — TTS start will retry play().
+      })
+      .finally(() => {
+        keepaliveSyncDepth = Math.max(0, keepaliveSyncDepth - 1)
+        lastKeepaliveSyncAt = Date.now()
       })
   }
 
@@ -104,32 +173,19 @@ function togglePlaybackFromMediaKey() {
 
   const st = controller?.getStatus()
   if (!isControllablePlaybackStatus(st)) return
+  if (st === 'loading') return
   if (st === 'paused') controller?.resume()
   else controller?.pause()
 }
 
 function smartPlay() {
   if (shouldIgnoreMediaKeyAction()) return
-  if (isCapacitorNative()) {
-    togglePlaybackFromMediaKey()
-    return
-  }
-
-  const st = controller?.getStatus()
-  if (st === 'paused') controller?.resume()
-  else controller?.pause()
+  togglePlaybackFromMediaKey()
 }
 
 function smartPause() {
   if (shouldIgnoreMediaKeyAction()) return
-  if (isCapacitorNative()) {
-    togglePlaybackFromMediaKey()
-    return
-  }
-
-  const st = controller?.getStatus()
-  if (st === 'speaking' || st === 'loading') controller?.pause()
-  else controller?.resume()
+  togglePlaybackFromMediaKey()
 }
 
 function runSkipFromMediaKey(skip: () => void) {
@@ -199,8 +255,20 @@ async function applyMediaSessionState(status: TtsMediaPlaybackStatus, chapterTit
   }
 
   switch (status) {
-    case 'speaking':
     case 'loading':
+      await MediaSession.setMetadata({
+        title: 'Read Aloud',
+        artist: 'BookOrbit',
+        album: chapterTitle || 'Reading',
+        artwork: [
+          { src: resolveAssetUrl('/pwa-192x192.png'), sizes: '192x192', type: 'image/png' },
+          { src: resolveAssetUrl('/pwa-512x512.png'), sizes: '512x512', type: 'image/png' },
+        ],
+      })
+      await MediaSession.setPlaybackState({ playbackState: 'playing' })
+      await MediaSession.setPositionState(getPositionState())
+      break
+    case 'speaking':
       await MediaSession.setMetadata({
         title: 'Read Aloud',
         artist: 'BookOrbit',
@@ -226,6 +294,7 @@ async function applyMediaSessionState(status: TtsMediaPlaybackStatus, chapterTit
       })
       await MediaSession.setPlaybackState({ playbackState: 'paused' })
       await MediaSession.setPositionState(getPositionState())
+      stopKeepalive()
       break
     case 'idle':
     case 'done':
@@ -270,6 +339,8 @@ export function resetTtsMediaSessionForTests() {
   controller = null
   lastMediaKeyAt = 0
   mediaSessionSuppressed = false
+  keepaliveSyncDepth = 0
+  lastKeepaliveSyncAt = 0
   stopKeepalive()
   if (keepaliveAudio) {
     keepaliveAudio.remove()

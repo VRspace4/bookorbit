@@ -172,8 +172,8 @@ export function useReaderState() {
       }`
           : ''
       }
-      p, li, blockquote, dd {
-          line-height: ${lh};
+      p, li, blockquote, dd, h1, h2, h3, h4, h5, h6 {
+          line-height: ${lh} !important;
           text-align: ${j ? 'justify' : 'start'} !important;
           hyphens: ${h ? 'auto' : 'none'};
       }

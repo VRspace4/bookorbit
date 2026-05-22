@@ -42,7 +42,7 @@ export function useTtsCredentials() {
           applyRuntimeConfig((await res.json()) as TtsRuntimeConfig)
         }
       } catch {
-        // ignore network failures; reader falls back to device voice
+        // ignore network failures; playback will surface a not-configured error for the selected engine
       } finally {
         loaded.value = true
         inflight = null

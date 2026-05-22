@@ -139,29 +139,29 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
 
   async function load() {
     const cached = readCachedReaderProgress(fileId)
-    if (cached) {
-      applyProgressSnapshot(cached)
-    }
-
     const res = await api(`/api/v1/books/files/${fileId}/progress`)
-    if (!res.ok) return
-    const data = await res.json()
-    const remoteUpdatedAt = typeof data.updatedAt === 'string' ? Date.parse(data.updatedAt) : 0
-    const cachedUpdatedAt = cached ? Date.parse(cached.updatedAt) : 0
-
-    if (cached && cachedUpdatedAt > remoteUpdatedAt) {
-      applyProgressSnapshot(cached)
-      void save().catch(() => {
-        dirty = true
-      })
+    if (!res.ok) {
+      if (cached) applyProgressSnapshot(cached)
       return
     }
 
+    const data = await res.json()
     applyProgressSnapshot(data)
     cacheCurrentProgress(typeof data.updatedAt === 'string' ? data.updatedAt : undefined)
+    dirty = false
   }
 
-  function onRelocate(detail: RelocateDetail) {
+  /** Fetch the latest server progress and apply it (used before TTS play). */
+  async function refreshFromServer() {
+    const res = await api(`/api/v1/books/files/${fileId}/progress`)
+    if (!res.ok) return
+    const data = await res.json()
+    applyProgressSnapshot(data)
+    cacheCurrentProgress(typeof data.updatedAt === 'string' ? data.updatedAt : undefined)
+    dirty = false
+  }
+
+  function onRelocate(detail: RelocateDetail, options?: { persist?: boolean }) {
     cfi.value = detail?.cfi ?? null
     fraction.value = detail?.fraction ?? 0
     percentage.value = fraction.value * 100
@@ -176,6 +176,7 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     timeSection.value = detail?.time?.section ?? 0
     timeTotal.value = detail?.time?.total ?? 0
 
+    if (options?.persist === false) return
     cacheCurrentProgress()
     scheduleSave()
   }
@@ -323,6 +324,7 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     ttsSectionIndex,
     ttsWordIndex,
     load,
+    refreshFromServer,
     onRelocate,
     save,
     scheduleSave,

@@ -76,7 +76,7 @@ function handleBookAction(book: BookCard, action: BookActionType) {
 </script>
 
 <template>
-  <section v-bind="attrs" class="group/scroller overflow-hidden rounded-2xl border border-primary/40 bg-card/30 shadow-sm backdrop-blur-[1px]">
+  <section v-bind="attrs" class="dashboard-panel group/scroller">
     <!-- Header -->
     <div class="mb-2 flex items-center justify-between px-5 pt-4">
       <div class="flex items-center gap-2.5">

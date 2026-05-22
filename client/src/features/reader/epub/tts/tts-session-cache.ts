@@ -1,4 +1,7 @@
 export interface TtsPlaybackSession {
+  /** Whether TTS mode is active (toolbar visible, ready to play). */
+  enabled: boolean
+  /** Whether audio was actively playing (speaking/loading) when saved. */
   wasPlaying: boolean
   sectionIndex: number
   wordIndex: number
@@ -21,7 +24,9 @@ function sanitizeSession(value: unknown): TtsPlaybackSession | null {
   if (typeof raw.wordIndex !== 'number' || !Number.isInteger(raw.wordIndex) || raw.wordIndex < 0) return null
   if (typeof raw.savedAt !== 'number' || !Number.isFinite(raw.savedAt)) return null
   if (Date.now() - raw.savedAt > MAX_AGE_MS) return null
+  const enabled = typeof raw.enabled === 'boolean' ? raw.enabled : raw.wasPlaying
   return {
+    enabled,
     wasPlaying: raw.wasPlaying,
     sectionIndex: raw.sectionIndex,
     wordIndex: raw.wordIndex,
@@ -44,7 +49,10 @@ export function readTtsPlaybackSession(fileId: number): TtsPlaybackSession | nul
   }
 }
 
-export function writeTtsPlaybackSession(fileId: number, session: Pick<TtsPlaybackSession, 'wasPlaying' | 'sectionIndex' | 'wordIndex'>): void {
+export function writeTtsPlaybackSession(
+  fileId: number,
+  session: Pick<TtsPlaybackSession, 'enabled' | 'wasPlaying' | 'sectionIndex' | 'wordIndex'>,
+): void {
   try {
     const next: TtsPlaybackSession = { ...session, savedAt: Date.now() }
     window.localStorage.setItem(storageKey(fileId), JSON.stringify(next))
@@ -78,7 +86,7 @@ function stoppedStorageKey(fileId: number) {
 
 export function markTtsUserStopped(fileId: number): void {
   try {
-    window.sessionStorage.setItem(stoppedStorageKey(fileId), '1')
+    window.localStorage.setItem(stoppedStorageKey(fileId), '1')
   } catch {
     // Ignore storage failures.
   }
@@ -86,7 +94,7 @@ export function markTtsUserStopped(fileId: number): void {
 
 export function clearTtsUserStopped(fileId: number): void {
   try {
-    window.sessionStorage.removeItem(stoppedStorageKey(fileId))
+    window.localStorage.removeItem(stoppedStorageKey(fileId))
   } catch {
     // Ignore storage failures.
   }
@@ -94,7 +102,7 @@ export function clearTtsUserStopped(fileId: number): void {
 
 export function readTtsUserStopped(fileId: number): boolean {
   try {
-    return window.sessionStorage.getItem(stoppedStorageKey(fileId)) === '1'
+    return window.localStorage.getItem(stoppedStorageKey(fileId)) === '1'
   } catch {
     return false
   }

@@ -94,7 +94,8 @@ describe('useReaderState', () => {
     const css = state.generateCSS()
 
     expect(css).toContain('font-family: serif !important;')
-    expect(css).toContain('line-height: 1.8;')
+    expect(css).toContain('line-height: 1.8 !important;')
+    expect(css).toContain('h1, h2, h3, h4, h5, h6')
     expect(css).toContain('font-size: 20px;')
     expect(css).toContain('text-align: start !important;')
     expect(css).toContain('hyphens: none;')

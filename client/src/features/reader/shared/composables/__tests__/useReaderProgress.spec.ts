@@ -220,7 +220,47 @@ describe('useReaderProgress', () => {
     vi.useRealTimers()
   })
 
-  it('loads cached progress before server progress is available', async () => {
+  it('prefers server progress over a newer local cache on load', async () => {
+    localStorage.setItem(
+      'reader:progress:12',
+      JSON.stringify({
+        cfi: 'epubcfi(/6/10)',
+        pageNumber: 4,
+        positionSeconds: null,
+        percentage: 44,
+        ttsSectionIndex: 1,
+        ttsWordIndex: 2,
+        updatedAt: new Date('2026-05-22T12:00:00.000Z').toISOString(),
+      }),
+    )
+    apiMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        cfi: 'epubcfi(/6/2)',
+        pageNumber: 1,
+        positionSeconds: null,
+        percentage: 10,
+        ttsSectionIndex: 5,
+        ttsWordIndex: 88,
+        updatedAt: new Date('2026-05-21T11:00:00.000Z').toISOString(),
+      }),
+    })
+
+    const progress = useReaderProgress(1, 12, elapsedMinutes)
+    await progress.load()
+
+    expect(progress.cfi.value).toBe('epubcfi(/6/2)')
+    expect(progress.percentage.value).toBe(10)
+    expect(progress.getTtsPosition()).toEqual({ sectionIndex: 5, wordIndex: 88 })
+    expect(apiMock).not.toHaveBeenCalledWith(
+      '/api/v1/books/files/12/progress',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+  })
+
+  it('falls back to cached progress when the server request fails', async () => {
     localStorage.setItem(
       'reader:progress:12',
       JSON.stringify({
@@ -231,28 +271,13 @@ describe('useReaderProgress', () => {
         updatedAt: new Date('2026-05-21T12:00:00.000Z').toISOString(),
       }),
     )
-    apiMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        cfi: 'epubcfi(/6/2)',
-        pageNumber: 1,
-        positionSeconds: null,
-        percentage: 10,
-        updatedAt: new Date('2026-05-21T11:00:00.000Z').toISOString(),
-      }),
-    })
+    apiMock.mockResolvedValue({ ok: false })
 
     const progress = useReaderProgress(1, 12, elapsedMinutes)
     await progress.load()
 
     expect(progress.cfi.value).toBe('epubcfi(/6/10)')
     expect(progress.percentage.value).toBe(44)
-    expect(apiMock).toHaveBeenCalledWith(
-      '/api/v1/books/files/12/progress',
-      expect.objectContaining({
-        method: 'POST',
-      }),
-    )
   })
 
   it('writes relocated progress to localStorage immediately', () => {
@@ -269,6 +294,16 @@ describe('useReaderProgress', () => {
     })
 
     vi.useRealTimers()
+  })
+
+  it('can update relocate UI without writing to localStorage during restore', () => {
+    const progress = useReaderProgress(1, 17, elapsedMinutes)
+
+    progress.onRelocate(makeDetail({ cfi: 'epubcfi(/6/12)', fraction: 0.62 }), { persist: false })
+
+    expect(progress.cfi.value).toBe('epubcfi(/6/12)')
+    expect(progress.percentage.value).toBe(62)
+    expect(localStorage.getItem('reader:progress:17')).toBeNull()
   })
 
   it('persists TTS position in debounced progress saves', async () => {
@@ -292,6 +327,29 @@ describe('useReaderProgress', () => {
     expect(cached).toMatchObject({ ttsSectionIndex: 3, ttsWordIndex: 42 })
 
     vi.useRealTimers()
+  })
+
+  it('refreshFromServer applies the latest server snapshot', async () => {
+    const progress = useReaderProgress(1, 16, elapsedMinutes)
+    progress.updateTtsPosition(1, 10)
+
+    apiMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        cfi: 'epubcfi(/6/4)',
+        pageNumber: null,
+        positionSeconds: null,
+        percentage: 42,
+        ttsSectionIndex: 7,
+        ttsWordIndex: 21,
+        updatedAt: new Date('2026-05-22T12:00:00.000Z').toISOString(),
+      }),
+    })
+
+    await progress.refreshFromServer()
+
+    expect(progress.getTtsPosition()).toEqual({ sectionIndex: 7, wordIndex: 21 })
+    expect(progress.percentage.value).toBe(42)
   })
 
   it('loads persisted TTS position from the server', async () => {

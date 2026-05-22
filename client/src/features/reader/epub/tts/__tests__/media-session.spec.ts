@@ -126,6 +126,50 @@ describe('tts media session', () => {
     vi.useRealTimers()
   })
 
+  it('debounces duplicate play/pause events on web', async () => {
+    vi.useFakeTimers()
+
+    initTtsMediaSession()
+    await Promise.resolve()
+
+    let status: 'idle' | 'speaking' | 'paused' = 'speaking'
+    registerTtsMediaSessionController({
+      getStatus: () => status,
+      getChapterTitle: () => 'Chapter 1',
+      pause: () => {
+        status = 'paused'
+      },
+      resume: () => {
+        status = 'speaking'
+      },
+      stop: () => {
+        status = 'idle'
+      },
+      replay: () => {
+        status = 'speaking'
+      },
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
+    })
+
+    const handlers = new Map<string, () => void>()
+    for (const call of mediaSessionMock.setActionHandler.mock.calls) {
+      const [options, handler] = call as unknown as [{ action: string }, () => void]
+      handlers.set(options.action, handler)
+    }
+
+    handlers.get('pause')?.()
+    handlers.get('play')?.()
+    expect(status).toBe('paused')
+
+    vi.advanceTimersByTime(400)
+    handlers.get('play')?.()
+    handlers.get('pause')?.()
+    expect(status).toBe('speaking')
+
+    vi.useRealTimers()
+  })
+
   it('ignores play, pause, and skip media keys when playback is idle', async () => {
     initTtsMediaSession()
     await Promise.resolve()
@@ -289,6 +333,153 @@ describe('tts media session', () => {
 
     expect(skipBackward).not.toHaveBeenCalled()
     expect(skipForward).not.toHaveBeenCalled()
+  })
+
+  it('does not prime keepalive audio when the first gesture is on TTS controls', async () => {
+    const play = vi.fn<() => Promise<void>>(async () => {})
+    vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
+      const audio = document.createElement('audio')
+      if (src) audio.src = src
+      audio.play = play as typeof audio.play
+      audio.pause = vi.fn<() => void>() as typeof audio.pause
+      Object.defineProperty(audio, 'paused', { configurable: true, value: true })
+      return audio
+    } as unknown as typeof Audio)
+
+    initTtsMediaSession()
+
+    const ttsButton = document.createElement('button')
+    ttsButton.className = 'tts-toolbar-play'
+    ttsButton.setAttribute('aria-label', 'Start TTS')
+    document.body.appendChild(ttsButton)
+    ttsButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('primes keepalive audio on the first non-TTS gesture', async () => {
+    const play = vi.fn<() => Promise<void>>(async () => {})
+    const pause = vi.fn<() => void>()
+    vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
+      const audio = document.createElement('audio')
+      if (src) audio.src = src
+      audio.play = play as typeof audio.play
+      audio.pause = pause as typeof audio.pause
+      Object.defineProperty(audio, 'paused', { configurable: true, value: false })
+      return audio
+    } as unknown as typeof Audio)
+
+    initTtsMediaSession()
+
+    const button = document.createElement('button')
+    button.setAttribute('aria-label', 'Open menu')
+    document.body.appendChild(button)
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(play).toHaveBeenCalled()
+    expect(pause).toHaveBeenCalled()
+  })
+
+  it('does not start keepalive while status is loading', async () => {
+    initTtsMediaSession()
+    registerTtsMediaSessionController({
+      getStatus: () => 'loading',
+      getChapterTitle: () => 'Chapter 1',
+      pause: vi.fn<() => void>(),
+      resume: vi.fn<() => void>(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
+    })
+
+    syncTtsMediaSession()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const audio = document.querySelector('audio')
+    expect(audio?.paused).not.toBe(false)
+  })
+
+  it('does not pause TTS when keepalive play fails while loading', async () => {
+    initTtsMediaSession()
+    await Promise.resolve()
+
+    let status: 'idle' | 'loading' | 'speaking' | 'paused' = 'loading'
+    const pause = vi.fn<() => void>(() => {
+      status = 'paused'
+    })
+
+    vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
+      const audio = document.createElement('audio')
+      if (src) audio.src = src
+      audio.play = vi.fn<() => Promise<void>>(async () => {
+        Object.defineProperty(audio, 'paused', { configurable: true, value: true })
+        audio.dispatchEvent(new Event('pause'))
+        throw new DOMException('Autoplay blocked', 'NotAllowedError')
+      }) as typeof audio.play
+      audio.pause = vi.fn<() => void>(() => {
+        Object.defineProperty(audio, 'paused', { configurable: true, value: true })
+      }) as typeof audio.pause
+      Object.defineProperty(audio, 'paused', { configurable: true, value: true })
+      return audio
+    } as unknown as typeof Audio)
+
+    registerTtsMediaSessionController({
+      getStatus: () => status,
+      getChapterTitle: () => 'Chapter 1',
+      pause,
+      resume: vi.fn<() => void>(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
+    })
+
+    syncTtsMediaSession()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(status).toBe('loading')
+    expect(pause).not.toHaveBeenCalled()
+  })
+
+  it('does not resume when keepalive stops after UI pause', async () => {
+    initTtsMediaSession()
+    await Promise.resolve()
+
+    let status: 'idle' | 'speaking' | 'paused' = 'speaking'
+    const pause = vi.fn<() => void>(() => {
+      status = 'paused'
+    })
+    const resume = vi.fn<() => void>(() => {
+      status = 'speaking'
+    })
+
+    registerTtsMediaSessionController({
+      getStatus: () => status,
+      getChapterTitle: () => 'Chapter 1',
+      pause,
+      resume,
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
+    })
+
+    syncTtsMediaSession()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    pause()
+    syncTtsMediaSession()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(status).toBe('paused')
+    expect(resume).not.toHaveBeenCalled()
   })
 
   it('starts native media session playback while speaking', async () => {

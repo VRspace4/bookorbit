@@ -58,7 +58,8 @@ vi.mock('microsoft-cognitiveservices-speech-sdk', () => {
 import { api } from '@/lib/api'
 import { useEpubTts } from '../useEpubTts'
 import { useTtsCredentials } from '../../tts/credentials'
-import { writeTtsPlaybackSession, readTtsPlaybackSession } from '../../tts/tts-session-cache'
+import { TTS_ACTIVE_CLASS, TTS_SENTENCE_CLASS } from '../../tts/word-index'
+import { writeTtsPlaybackSession, readTtsPlaybackSession, readTtsUserStopped } from '../../tts/tts-session-cache'
 
 class FakeGainNode {
   gain = { value: 1 }
@@ -331,7 +332,7 @@ describe('useEpubTts cloud playback', () => {
     expect(tts.status.value).toBe('done')
   })
 
-  it('queues device TTS utterances up front instead of submitting them sentence by sentence', async () => {
+  it('does not fall back to device TTS when browser is selected', async () => {
     const doc = document.implementation.createHTMLDocument('Book')
     doc.body.innerHTML = '<p>This is first. This is second. This is third.</p>'
     const tts = useEpubTts({
@@ -341,18 +342,57 @@ describe('useEpubTts cloud playback', () => {
       bookLanguage: ref('en'),
     })
 
-    const playback = tts.start(0)
+    void tts.start(0)
 
-    await vi.waitFor(() => expect(speechSynthesisMock.speak).toHaveBeenCalledTimes(3))
-    expect(speechSynthesisMock.utterances.map((utterance) => utterance.text)).toEqual(['This is first.', 'This is second.', 'This is third.'])
+    await vi.waitFor(() => expect(tts.status.value).toBe('error'))
+    expect(speechSynthesisMock.speak).not.toHaveBeenCalled()
+    expect(tts.error.value).toContain('Device text-to-speech is not available')
+  })
 
-    for (const utterance of speechSynthesisMock.utterances) {
-      utterance.onstart?.()
-      utterance.onend?.()
-    }
+  it('fails when the selected engine is not configured instead of falling back', async () => {
+    useTtsCredentials().updateCredentials({
+      azureKey: '',
+      gcpChirp3Configured: false,
+      xaiConfigured: false,
+      kokoroConfigured: false,
+    })
+
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence.</p>'
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: () => ({ ...makeSettings(), ttsProvider: 'kokoro' }),
+      bookLanguage: ref('en'),
+    })
+
+    void tts.start(0)
+
+    await vi.waitFor(() => expect(tts.status.value).toBe('error'))
+    expect(api).not.toHaveBeenCalled()
+    expect(tts.error.value).toContain('Kokoro is not configured')
+  })
+
+  it('prefers persisted backend TTS position over local storage for the same section', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    localStorage.setItem('reader:epub-tts:book-1:0', '0')
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: makeSettings,
+      bookLanguage: ref('en'),
+      getResumeKey: () => 'book-1:0',
+      getCurrentSectionIndex: () => 0,
+      getPersistedTtsPosition: () => ({ sectionIndex: 0, wordIndex: 5 }),
+    })
+
+    const playback = tts.start()
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    FakeAudioContext.sources[0]?.onended?.()
     await playback
 
-    expect(tts.status.value).toBe('done')
+    expect(apiTexts()).toEqual(['This is the second sentence.'])
   })
 
   it('resumes from persisted backend TTS position when local storage is empty', async () => {
@@ -449,6 +489,28 @@ describe('useEpubTts cloud playback', () => {
     )
   })
 
+  it('prefetches Kokoro audio when the section document loads', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence.</p>'
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: () => ({ ...makeSettings(), ttsProvider: 'kokoro' }),
+      bookLanguage: ref('en'),
+    })
+
+    tts.handleDocumentLoad(doc)
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith('/api/v1/tts/kokoro', expect.any(Object)))
+
+    vi.mocked(api).mockClear()
+    const playback = tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    FakeAudioContext.sources[0]?.onended?.()
+    await playback
+
+    expect(api).not.toHaveBeenCalled()
+  })
+
   it('restarts active playback with the newly selected engine', async () => {
     const doc = document.implementation.createHTMLDocument('Book')
     doc.body.innerHTML = '<p>This is the first sentence.</p>'
@@ -462,6 +524,7 @@ describe('useEpubTts cloud playback', () => {
     })
 
     settingsRef.value = { ...settingsRef.value, ttsProvider: 'kokoro' }
+    tts.applyTtsSettingsChange()
 
     await vi.waitFor(() => {
       expect(FakeAudioContext.sources).toHaveLength(2)
@@ -470,6 +533,71 @@ describe('useEpubTts cloud playback', () => {
 
     expect(FakeAudioContext.sources[0]?.stop).toHaveBeenCalled()
     expect(tts.currentProvider.value).toBe('kokoro')
+  })
+
+  it('restarts idle TTS with saved position when settings change', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence.</p>'
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: false, sectionIndex: 0, wordIndex: 0 })
+    const settingsRef = ref(makeSettings())
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: () => settingsRef.value,
+      bookLanguage: ref('en'),
+      getCurrentSectionIndex: () => 0,
+    })
+
+    tts.handleDocumentLoad(doc)
+    await tts.restoreTtsAfterReload()
+    expect(tts.status.value).toBe('idle')
+
+    vi.mocked(api).mockClear()
+    settingsRef.value = { ...settingsRef.value, ttsProvider: 'kokoro' }
+    tts.applyTtsSettingsChange()
+
+    await vi.waitFor(() => expect(api).toHaveBeenCalledWith('/api/v1/tts/kokoro', expect.any(Object)))
+    expect(tts.currentProvider.value).toBe('kokoro')
+  })
+
+  it('restarts immediately when settings change while paused', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence.</p>'
+    const settingsRef = ref(makeSettings())
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: () => settingsRef.value, bookLanguage: ref('en') })
+
+    void tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    tts.pause()
+
+    vi.mocked(api).mockClear()
+    settingsRef.value = { ...settingsRef.value, ttsProvider: 'kokoro' }
+    tts.applyTtsSettingsChange()
+
+    await vi.waitFor(() => {
+      expect(api).toHaveBeenCalledWith('/api/v1/tts/kokoro', expect.any(Object))
+      expect(FakeAudioContext.sources.length).toBeGreaterThanOrEqual(2)
+    })
+    expect(FakeAudioContext.sources[0]?.stop).toHaveBeenCalled()
+    expect(tts.currentProvider.value).toBe('kokoro')
+  })
+
+  it('restarts immediately when playback rate changes while speaking', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const settingsRef = ref(makeSettings())
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: () => settingsRef.value, bookLanguage: ref('en') })
+
+    void tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    const callsBefore = vi.mocked(api).mock.calls.length
+
+    settingsRef.value = { ...settingsRef.value, ttsRate: 1.8 }
+    tts.applyTtsSettingsChange()
+
+    await vi.waitFor(() => expect(FakeAudioContext.sources.length).toBeGreaterThanOrEqual(2))
+    expect(vi.mocked(api).mock.calls.length).toBeGreaterThan(callsBefore)
+    expect(FakeAudioContext.sources[0]?.stop).toHaveBeenCalled()
   })
 
   it('calls onSectionComplete when playback finishes naturally', async () => {
@@ -486,6 +614,114 @@ describe('useEpubTts cloud playback', () => {
 
     expect(onSectionComplete).toHaveBeenCalledTimes(1)
     expect(tts.status.value).toBe('done')
+  })
+
+  it('checkpoints pause at the first word of the current sentence', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const onTtsWordIndexChange = vi.fn<(wordIndex: number) => void>()
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: makeSettings,
+      bookLanguage: ref('en'),
+      onTtsWordIndexChange,
+    })
+
+    void tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    onTtsWordIndexChange.mockClear()
+    FakeAudioContext.sources[0]?.onended?.()
+    await vi.waitFor(() => expect(FakeAudioContext.sources.length).toBeGreaterThanOrEqual(2))
+
+    onTtsWordIndexChange.mockClear()
+    tts.pause()
+
+    expect(onTtsWordIndexChange).toHaveBeenCalledTimes(1)
+    expect(onTtsWordIndexChange).toHaveBeenCalledWith(5)
+    expect(readTtsPlaybackSession(1)?.wordIndex).toBe(5)
+  })
+
+  it('checkpoints skip forward at the first word of the target sentence', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const onTtsWordIndexChange = vi.fn<(wordIndex: number) => void>()
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: makeSettings,
+      bookLanguage: ref('en'),
+      onTtsWordIndexChange,
+    })
+
+    void tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    onTtsWordIndexChange.mockClear()
+
+    tts.skipForward()
+    await vi.waitFor(() => expect(onTtsWordIndexChange).toHaveBeenCalled())
+
+    expect(onTtsWordIndexChange).toHaveBeenLastCalledWith(5)
+    expect(readTtsPlaybackSession(1)?.wordIndex).toBe(5)
+  })
+
+  it('checkpoints skip backward at the first word of the target sentence', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const onTtsWordIndexChange = vi.fn<(wordIndex: number) => void>()
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: makeSettings,
+      bookLanguage: ref('en'),
+      onTtsWordIndexChange,
+    })
+
+    void tts.start(5)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    onTtsWordIndexChange.mockClear()
+
+    tts.skipBackward()
+    await vi.waitFor(() => expect(onTtsWordIndexChange).toHaveBeenCalled())
+
+    expect(onTtsWordIndexChange).toHaveBeenLastCalledWith(0)
+    expect(readTtsPlaybackSession(1)?.wordIndex).toBe(0)
+  })
+
+  it('persists TTS position at sentence boundaries, not on every word', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const onTtsWordIndexChange = vi.fn<(wordIndex: number) => void>()
+    const onTtsCheckpoint = vi.fn()
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: makeSettings,
+      bookLanguage: ref('en'),
+      onTtsWordIndexChange,
+      onTtsCheckpoint,
+    })
+
+    const playback = tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    expect(onTtsWordIndexChange).toHaveBeenCalledTimes(1)
+    expect(onTtsWordIndexChange).toHaveBeenLastCalledWith(0)
+    expect(onTtsCheckpoint).toHaveBeenCalledTimes(1)
+
+    onTtsWordIndexChange.mockClear()
+    onTtsCheckpoint.mockClear()
+    FakeAudioContext.sources[0]?.onended?.()
+    await vi.waitFor(() => expect(FakeAudioContext.sources.length).toBeGreaterThanOrEqual(2))
+    expect(onTtsWordIndexChange).toHaveBeenCalledTimes(1)
+    expect(onTtsWordIndexChange.mock.calls[0]?.[0]).toBeGreaterThan(0)
+    expect(onTtsCheckpoint).toHaveBeenCalledTimes(1)
+
+    onTtsWordIndexChange.mockClear()
+    onTtsCheckpoint.mockClear()
+    FakeAudioContext.sources[1]?.onended?.()
+    await playback
+    expect(onTtsWordIndexChange).not.toHaveBeenCalled()
+    expect(onTtsCheckpoint).not.toHaveBeenCalled()
   })
 
   it('does not resume from a stale word index after switching sections', async () => {
@@ -545,12 +781,179 @@ describe('useEpubTts cloud playback', () => {
   it('auto-resumes playback after reload when a session was active', async () => {
     const doc = document.implementation.createHTMLDocument('Book')
     doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
-    writeTtsPlaybackSession(1, { wasPlaying: true, sectionIndex: 0, wordIndex: 3 })
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: true, sectionIndex: 0, wordIndex: 3 })
     const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
 
     const resumed = await tts.tryAutoResumeAfterReload()
     expect(resumed).toBe(true)
     await vi.waitFor(() => expect(FakeAudioContext.sources.length).toBeGreaterThan(0))
+  })
+
+  it('restores enabled TTS in idle state without auto-playing', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: false, sectionIndex: 0, wordIndex: 3 })
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
+
+    const restored = await tts.restoreTtsAfterReload()
+    expect(restored).toBe('ready')
+    expect(tts.status.value).toBe('idle')
+    expect(tts.isActive.value).toBe(true)
+    expect(FakeAudioContext.sources).toHaveLength(0)
+  })
+
+  it('restores sentence and word highlights after reload when TTS mode is enabled', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: false, sectionIndex: 0, wordIndex: 3 })
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
+
+    tts.handleDocumentLoad(doc)
+    await tts.restoreTtsAfterReload()
+    tts.refreshTtsHighlight()
+
+    await vi.waitFor(() => {
+      expect(doc.body.querySelector(`.${TTS_SENTENCE_CLASS}`)).not.toBeNull()
+      expect(doc.body.querySelector(`.${TTS_ACTIVE_CLASS}`)).not.toBeNull()
+    })
+  })
+
+  it('keeps centering the restored TTS highlight while launch layout settles', async () => {
+    vi.useFakeTimers()
+    const scrollBy = vi.fn<(dx: number, dy: number) => void>()
+    const frameCallbacks = new Map<number, FrameRequestCallback>()
+    let frameId = 0
+    const flushAnimationFrames = () => {
+      const callbacks = Array.from(frameCallbacks.values())
+      frameCallbacks.clear()
+      callbacks.forEach((callback) => callback(performance.now()))
+    }
+    const getBoundingClientRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains(TTS_ACTIVE_CLASS)) {
+        return {
+          top: 300,
+          bottom: 320,
+          left: 0,
+          right: 50,
+          width: 50,
+          height: 20,
+          x: 0,
+          y: 300,
+          toJSON: () => ({}),
+        } as DOMRect
+      }
+      return {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+        width: 0,
+        height: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect
+    })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        frameId += 1
+        frameCallbacks.set(frameId, callback)
+        return frameId
+      }),
+    )
+    vi.stubGlobal(
+      'cancelAnimationFrame',
+      vi.fn((id: number) => {
+        frameCallbacks.delete(id)
+      }),
+    )
+
+    try {
+      const doc = document.implementation.createHTMLDocument('Book')
+      doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+      writeTtsPlaybackSession(1, { enabled: true, wasPlaying: false, sectionIndex: 0, wordIndex: 3 })
+      const tts = useEpubTts({
+        fileId: 1,
+        getDocument: () => doc,
+        getSettings: makeSettings,
+        bookLanguage: ref('en'),
+        getCurrentSectionIndex: () => 0,
+        getFoliateRenderer: () => ({ scrolled: true, size: 800, scrollBy }),
+      })
+
+      await expect(tts.restoreTtsAfterReload()).resolves.toBe('ready')
+
+      const totalDelta = () => scrollBy.mock.calls.reduce((sum, [dx]) => sum + dx, 0)
+      for (let i = 0; i < 8 && Math.abs(totalDelta() + 90) > 1; i += 1) {
+        flushAnimationFrames()
+      }
+      expect(totalDelta()).toBeCloseTo(-90, 0)
+      const firstCenteringCount = scrollBy.mock.calls.length
+
+      await vi.advanceTimersByTimeAsync(90)
+      for (let i = 0; i < 4 && scrollBy.mock.calls.length === firstCenteringCount; i += 1) {
+        flushAnimationFrames()
+      }
+      expect(scrollBy.mock.calls.length).toBeGreaterThan(firstCenteringCount)
+    } finally {
+      getBoundingClientRect.mockRestore()
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it('starts playback when resume is requested without suspended audio', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: false, sectionIndex: 0, wordIndex: 0 })
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
+
+    await tts.restoreTtsAfterReload()
+    expect(tts.status.value).toBe('idle')
+
+    tts.resume()
+    await vi.waitFor(() => expect(FakeAudioContext.sources.length).toBeGreaterThan(0))
+    expect(tts.status.value).toBe('speaking')
+  })
+
+  it('persists enabled-but-paused state when playback is paused', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
+
+    void tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    tts.pause()
+
+    expect(readTtsPlaybackSession(1)).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        wasPlaying: false,
+      }),
+    )
+  })
+
+  it('persistForNavigation keeps TTS enabled in storage without tearing down playback', async () => {
+    const doc = document.implementation.createHTMLDocument('Book')
+    doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
+
+    void tts.start(0)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    tts.pause()
+    tts.persistForNavigation()
+
+    expect(tts.isActive.value).toBe(true)
+    expect(tts.status.value).toBe('paused')
+    expect(readTtsPlaybackSession(1)).toEqual(
+      expect.objectContaining({
+        enabled: true,
+        wasPlaying: false,
+      }),
+    )
+    expect(readTtsUserStopped(1)).toBe(false)
   })
 
   it('does not auto-resume after the user stops playback', async () => {
@@ -562,7 +965,7 @@ describe('useEpubTts cloud playback', () => {
     await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
     tts.stop()
 
-    writeTtsPlaybackSession(1, { wasPlaying: true, sectionIndex: 0, wordIndex: 3 })
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: true, sectionIndex: 0, wordIndex: 3 })
     const resumed = await tts.tryAutoResumeAfterReload()
     expect(resumed).toBe(false)
     expect(readTtsPlaybackSession(1)?.wasPlaying).toBe(true)
@@ -572,7 +975,7 @@ describe('useEpubTts cloud playback', () => {
   it('does not restart playback when auto-resume begins before the user stops', async () => {
     const doc = document.implementation.createHTMLDocument('Book')
     doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
-    writeTtsPlaybackSession(1, { wasPlaying: true, sectionIndex: 0, wordIndex: 3 })
+    writeTtsPlaybackSession(1, { enabled: true, wasPlaying: true, sectionIndex: 0, wordIndex: 3 })
     const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en'), getCurrentSectionIndex: () => 0 })
 
     const resumePromise = tts.tryAutoResumeAfterReload()
@@ -598,28 +1001,6 @@ describe('useEpubTts cloud playback', () => {
 
     expect(speechSynthesisMock.pause).not.toHaveBeenCalled()
     expect(tts.status.value).toBe('paused')
-  })
-
-  it('cancels browser speech when audio output changes after stop', async () => {
-    const doc = document.implementation.createHTMLDocument('Book')
-    doc.body.innerHTML = '<p>This is the first sentence.</p>'
-    const tts = useEpubTts({
-      fileId: 1,
-      getDocument: () => doc,
-      getSettings: () => ({ ...makeSettings(), ttsProvider: 'browser' }),
-      bookLanguage: ref('en'),
-      getCurrentSectionIndex: () => 0,
-    })
-
-    void tts.start(0)
-    await vi.waitFor(() => expect(speechSynthesisMock.speak).toHaveBeenCalled())
-    tts.stop()
-    speechSynthesisMock.cancel.mockClear()
-
-    navigator.mediaDevices?.dispatchEvent(new Event('devicechange'))
-
-    expect(speechSynthesisMock.cancel).toHaveBeenCalled()
-    expect(tts.status.value).toBe('idle')
   })
 
   it('reuses cached Azure audio when skipping backward', async () => {

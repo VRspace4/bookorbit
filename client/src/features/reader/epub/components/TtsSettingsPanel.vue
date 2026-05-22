@@ -4,9 +4,8 @@ import type { EpubReaderSettings, TtsProvider } from '@bookorbit/types'
 import { useTtsCredentials } from '../tts/credentials'
 import { formatTtsCharacterCount } from '../tts/format-character-count'
 import { useTtsUsage } from '../tts/tts-usage'
+import { CLOUD_TTS_PROVIDERS, ttsProviderLabel } from '../tts/tts-provider-display'
 import { AZURE_VOICES, GCP_CHIRP3_VOICES, GPT_4O_MINI_TTS_VOICES, KOKORO_VOICES, XAI_VOICES, regionSupportsAzureHd } from '../tts/voices'
-
-const CLOUD_TTS_PROVIDERS = ['azure', 'gcp-chirp3', 'xai', 'kokoro', 'gpt-4o-mini-tts'] as const satisfies readonly TtsProvider[]
 
 defineProps<{
   settings: EpubReaderSettings
@@ -27,15 +26,6 @@ function refreshBrowserVoices() {
   browserVoices.value = window.speechSynthesis?.getVoices?.() ?? []
 }
 
-function providerLabel(provider: TtsProvider) {
-  if (provider === 'browser') return 'Device'
-  if (provider === 'gcp-chirp3') return 'Google'
-  if (provider === 'azure') return 'Azure'
-  if (provider === 'kokoro') return 'Kokoro'
-  if (provider === 'gpt-4o-mini-tts') return 'GPT'
-  return 'xAI'
-}
-
 function providerUsageLabel(provider: TtsProvider) {
   return formatTtsCharacterCount(usage[provider])
 }
@@ -43,7 +33,8 @@ function providerUsageLabel(provider: TtsProvider) {
 function providerConfigured(provider: TtsProvider) {
   if (provider === 'azure') return !!credentials.azureKey
   if (provider === 'gcp-chirp3') return credentials.gcpChirp3Configured
-  if (provider === 'xai' || provider === 'gpt-4o-mini-tts') return credentials.kokoroConfigured
+  if (provider === 'xai') return credentials.xaiConfigured
+  if (provider === 'gpt-4o-mini-tts') return credentials.kokoroConfigured
   if (provider === 'kokoro') return credentials.kokoroConfigured
   return true
 }
@@ -89,7 +80,7 @@ onUnmounted(() => {
               :class="settings.ttsProvider === provider ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
               @click="emit('update', { ttsProvider: provider })"
             >
-              <span>{{ providerLabel(provider) }}</span>
+              <span>{{ ttsProviderLabel(provider) }}</span>
               <span
                 class="rounded-full border border-border/80 bg-muted/80 px-1.5 py-0 text-[10px] font-medium leading-4 text-muted-foreground"
                 :title="`${providerUsageLabel(provider)} characters this month`"

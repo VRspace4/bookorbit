@@ -13,20 +13,25 @@ export function isReaderPath(path: string | null | undefined): boolean {
   return typeof path === 'string' && (path === READER_PATH_PREFIX || path.startsWith(`${READER_PATH_PREFIX}/`))
 }
 
+function backPathname(backPath: string): string {
+  return backPath.split(/[?#]/, 1)[0] ?? backPath
+}
+
 function canExitWithRouterBack(backPath: string | null): boolean {
   if (!backPath) return false
+  const pathname = backPathname(backPath)
   return (
-    backPath.startsWith('/') &&
-    !backPath.startsWith('//') &&
-    !isReaderPath(backPath) &&
-    !NON_APP_EXIT_PREFIXES.some((prefix) => backPath === prefix || backPath.startsWith(`${prefix}/`))
+    pathname.startsWith('/') &&
+    !pathname.startsWith('//') &&
+    !isReaderPath(pathname) &&
+    !NON_APP_EXIT_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
   )
 }
 
 export async function exitReader(router: Router): Promise<void> {
   const backPath = browserHistoryBackPath()
   if (canExitWithRouterBack(backPath)) {
-    router.back()
+    await router.back()
     return
   }
 

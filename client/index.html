@@ -6,6 +6,14 @@
     <link rel="icon" href="/pwa-icon-source.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1e1e18" />
+    <script>
+      window.__bookorbitDeferredInstall = undefined
+      window.addEventListener('beforeinstallprompt', function (event) {
+        event.preventDefault()
+        window.__bookorbitDeferredInstall = event
+      })
+    </script>
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />

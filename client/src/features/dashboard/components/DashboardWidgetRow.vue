@@ -111,7 +111,7 @@ const widgetSizeClass: Record<DashboardWidgetSize, string> = {
       <div
         v-for="(widget, index) in localWidgets"
         :key="widget.id"
-        class="group/card relative h-55 shrink-0 overflow-hidden rounded-2xl border border-primary/40 bg-card/30 shadow-sm backdrop-blur-[1px]"
+        class="dashboard-panel group/card relative h-55 shrink-0"
         :class="widgetSizeClass[widgetLayout[widget.type].size]"
         style="animation: dashboardWidgetFadeUp 0.35s ease both"
         :style="{ animationDelay: `${index * 80}ms` }"

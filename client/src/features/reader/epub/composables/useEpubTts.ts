@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref, watch, type Ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
 import { toast } from 'vue-sonner'
 import type { EpubReaderSettings, TtsProvider } from '@bookorbit/types'
 import { api } from '@/lib/api'
@@ -14,15 +14,21 @@ import {
   readTtsPlaybackSession,
   readTtsUserStopped,
   writeTtsPlaybackSession,
+  type TtsPlaybackSession,
 } from '../tts/tts-session-cache'
 import { useTtsUsage } from '../tts/tts-usage'
+import { resolveCloudTtsProvider } from '../tts/tts-provider-display'
 import {
   buildWordIndex,
   clearTtsHighlight,
   findSentenceForWord,
   findWordIndexAtPoint,
+  collectScrollTargets,
   highlightWord,
   injectTtsHighlightStyles,
+  isActiveWordInStickyViewport,
+  scrollActiveWordIntoView,
+  type FoliateScrollRenderer,
   splitIntoSentences,
   type SentenceInfo,
   type WordEntry,
@@ -51,6 +57,7 @@ interface UseEpubTtsOptions {
   onTtsWordIndexChange?: (wordIndex: number) => void
   onTtsCheckpoint?: () => void
   onSectionComplete?: () => void
+  getFoliateRenderer?: () => FoliateScrollRenderer | null
 }
 
 interface SpeechRuntime {
@@ -171,8 +178,8 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   const error = ref<string | null>(null)
   const activeIndex = ref(-1)
   const wordCount = ref(0)
-  const currentProvider = ref<TtsProvider | null>(null)
   const currentSentenceText = ref('')
+  const scrollFollowEnabled = ref(true)
 
   let root: HTMLElement | null = null
   let words: WordEntry[] = []
@@ -181,13 +188,24 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   let missingConfigWarned = false
   let savedWordIndex: number | null = null
   let savedResumeKey: string | null = null
+  let lastPersistedSentenceStart: number | null = null
   let loadedDocumentSectionIndex: number | null = null
   let autoResumeAttempted = false
   let userStoppedPlayback = readTtsUserStopped(options.fileId)
   let playbackGeneration = 0
+  let playbackStartDepth = 0
+  let highlightRestoreTimer: ReturnType<typeof setTimeout> | null = null
+  let highlightRestoreFrame = 0
+  let programmaticScrollUntil = 0
+  let scrollFollowEvalTimer: ReturnType<typeof setTimeout> | null = null
+  const scrollListenerCleanupByDoc = new WeakMap<Document, () => void>()
+  let foliateShellScrollCleanup: (() => void) | null = null
+  let touchScrollStartY: number | null = null
   const tappedDocs = new WeakSet<Document>()
+  const initialSession = readTtsPlaybackSession(options.fileId)
+  const ttsEnabled = ref(Boolean(initialSession?.enabled && !userStoppedPlayback))
 
-  const isActive = computed(() => status.value !== 'idle')
+  const isActive = computed(() => ttsEnabled.value)
   const isPlaying = computed(() => status.value === 'speaking' || status.value === 'loading')
   const progress = computed(() => {
     if (wordCount.value <= 0 || activeIndex.value < 0) return 0
@@ -197,6 +215,8 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   function settings() {
     return options.getSettings()
   }
+
+  const currentProvider = ref<TtsProvider | null>(ttsEnabled.value ? resolveCloudTtsProvider(null, settings().ttsProvider) : null)
 
   function activeRoot(): HTMLElement | null {
     const doc = options.getDocument()
@@ -221,6 +241,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     words = buildWordIndex(currentRoot)
     sentences = splitIntoSentences(words, 0)
     wordCount.value = words.length
+    lastPersistedSentenceStart = null
     return words.length > 0
   }
 
@@ -242,35 +263,235 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     return warmUpPromise
   }
 
-  async function prefetchInitialSentences() {
+  function isCloudPrefetchProvider(provider: TtsProvider): boolean {
+    return provider === 'xai' || provider === 'gcp-chirp3' || provider === 'kokoro' || provider === 'gpt-4o-mini-tts'
+  }
+
+  function resolvePrefetchWordIndex(fromWordIndex?: number): number | null {
+    if (!rebuildIndex() || !sentences.length) return null
+    const restored = fromWordIndex ?? restoreWordIndex() ?? (activeIndex.value >= 0 ? activeIndex.value : 0)
+    return Math.min(Math.max(0, restored), Math.max(0, words.length - 1))
+  }
+
+  async function prefetchPlaybackAhead(fromWordIndex?: number) {
     await warmUp()
     const provider = resolveProvider(settings().ttsProvider)
-    if (provider !== 'azure' || !credentials.azureKey) return
-    if (!rebuildIndex() || !sentences.length) return
+    if (!isProviderConfigured(provider)) return
+    if (provider === 'browser') return
 
-    const sdk = await getAzureSdk()
+    const wordIndex = resolvePrefetchWordIndex(fromWordIndex)
+    if (wordIndex === null) return
+
+    const startSentenceIdx = Math.max(
+      0,
+      sentences.findIndex((sentence) => wordIndex >= sentence.wordStartIdx && wordIndex < sentence.wordEndIdxExclusive),
+    )
+    const playbackQueue = buildPlaybackQueue(startSentenceIdx, wordIndex)
+    const toPrefetch = playbackQueue.slice(0, Math.min(AUDIO_PREFETCH_SENTENCE_COUNT + 1, playbackQueue.length))
+    if (!toPrefetch.length) return
+
     const ctx = new AudioContext({ latencyHint: 'interactive' })
     await ctx.resume().catch(() => {})
     try {
-      const prefetchCount = Math.min(AUDIO_PREFETCH_SENTENCE_COUNT + 1, sentences.length)
-      await Promise.all(
-        sentences
-          .slice(0, prefetchCount)
-          .map((sentence) => getOrCreatePreparedAudio(preparedAudioCacheKey(sentence, provider), () => synthesizeAzureSentence(sentence, ctx, sdk))),
-      )
-    } catch {
-      // prefetch is best-effort
+      if (provider === 'azure' && credentials.azureKey) {
+        const sdk = await getAzureSdk()
+        for (const sentence of toPrefetch) {
+          void getOrCreatePreparedAudio(preparedAudioCacheKey(sentence, provider), () => synthesizeAzureSentence(sentence, ctx, sdk)).catch(() => {})
+        }
+        return
+      }
+
+      if (isCloudPrefetchProvider(provider)) {
+        const fetchAudio = cloudAudioFetcher(provider)
+        const stubRuntime = DEFAULT_RUNTIME()
+        for (const sentence of toPrefetch) {
+          void getOrCreatePreparedAudio(preparedAudioCacheKey(sentence, provider), () =>
+            prepareCloudAudioSentence(sentence, stubRuntime, ctx, fetchAudio, provider),
+          ).catch(() => {})
+        }
+      }
     } finally {
       await ctx.close().catch(() => {})
     }
+  }
+
+  function sentenceStartForWord(wordIndex: number): number | null {
+    if (!sentences.length && !rebuildIndex()) return null
+    return findSentenceForWord(sentences, wordIndex)?.wordStartIdx ?? null
+  }
+
+  function trackActiveWordIndex(index: number) {
+    savedWordIndex = index
+    savedResumeKey = resumeStorageKey()
+  }
+
+  function persistTtsPosition(wordIndex: number) {
+    if (!Number.isInteger(wordIndex) || wordIndex < 0) return
+    const key = resumeStorageKey()
+    if (key) localStorage.setItem(key, String(wordIndex))
+    options.onTtsWordIndexChange?.(wordIndex)
+    if (!userStoppedPlayback && status.value !== 'idle') {
+      const wasPlaying = status.value === 'speaking' || status.value === 'loading'
+      syncPlaybackSession(wasPlaying, wordIndex, true)
+    }
+  }
+
+  function persistAtSentenceBoundary(wordIndex: number) {
+    const sentenceStart = sentenceStartForWord(wordIndex)
+    if (sentenceStart === null || sentenceStart === lastPersistedSentenceStart) return
+    lastPersistedSentenceStart = sentenceStart
+    persistTtsPosition(sentenceStart)
+    options.onTtsCheckpoint?.()
+  }
+
+  function markProgrammaticScroll(durationMs = 700) {
+    programmaticScrollUntil = performance.now() + durationMs
+  }
+
+  function scrollToActiveWord(behavior: ScrollBehavior = 'smooth') {
+    const currentRoot = root ?? activeRoot()
+    if (!currentRoot) return
+    markProgrammaticScroll(behavior === 'instant' ? 120 : 700)
+    scrollActiveWordIntoView(currentRoot, behavior, options.getFoliateRenderer?.() ?? null)
+  }
+
+  function detachScrollFollow() {
+    scrollFollowEnabled.value = false
+  }
+
+  function onUserScrollIntent() {
+    if (!scrollFollowEnabled.value || !isActive.value) return
+    detachScrollFollow()
+  }
+
+  function evaluateScrollFollow() {
+    scrollFollowEvalTimer = null
+    if (!scrollFollowEnabled.value || !isActive.value) return
+    if (status.value !== 'speaking' && status.value !== 'loading' && status.value !== 'paused') return
+    if (performance.now() < programmaticScrollUntil) return
+
+    const currentRoot = root ?? activeRoot()
+    if (!currentRoot) return
+    if (!isActiveWordInStickyViewport(currentRoot, 0.42, options.getFoliateRenderer?.() ?? null)) {
+      detachScrollFollow()
+    }
+  }
+
+  function scheduleScrollFollowEvaluation() {
+    if (scrollFollowEvalTimer !== null) clearTimeout(scrollFollowEvalTimer)
+    scrollFollowEvalTimer = setTimeout(evaluateScrollFollow, 120)
+  }
+
+  function onReaderWheel(event: WheelEvent) {
+    const delta = Math.max(Math.abs(event.deltaY), Math.abs(event.deltaX))
+    if (delta > 0) onUserScrollIntent()
+  }
+
+  function onReaderTouchStart(event: TouchEvent) {
+    if (event.touches.length !== 1) {
+      touchScrollStartY = null
+      return
+    }
+    touchScrollStartY = event.touches[0]?.clientY ?? null
+  }
+
+  function onReaderTouchMove(event: TouchEvent) {
+    if (touchScrollStartY === null || event.touches.length !== 1) return
+    const y = event.touches[0]?.clientY
+    if (y == null) return
+    if (Math.abs(y - touchScrollStartY) >= 6) onUserScrollIntent()
+  }
+
+  function onReaderTouchEnd() {
+    touchScrollStartY = null
+  }
+
+  function onFoliateScroll() {
+    if (performance.now() < programmaticScrollUntil) return
+    scheduleScrollFollowEvaluation()
+  }
+
+  function detachScrollFollowListeners(doc: Document) {
+    scrollListenerCleanupByDoc.get(doc)?.()
+    scrollListenerCleanupByDoc.delete(doc)
+  }
+
+  function attachScrollFollowListeners(doc: Document) {
+    if (scrollListenerCleanupByDoc.has(doc)) return
+    const win = doc.defaultView
+    if (!win) return
+
+    const scrollTargets = collectScrollTargets(doc)
+    for (const target of scrollTargets) {
+      target.addEventListener('scroll', onFoliateScroll, { passive: true, capture: true })
+    }
+    win.addEventListener('wheel', onReaderWheel, { passive: true, capture: true })
+    win.addEventListener('touchstart', onReaderTouchStart, { passive: true, capture: true })
+    win.addEventListener('touchmove', onReaderTouchMove, { passive: true, capture: true })
+    win.addEventListener('touchend', onReaderTouchEnd, { passive: true, capture: true })
+    win.addEventListener('touchcancel', onReaderTouchEnd, { passive: true, capture: true })
+
+    scrollListenerCleanupByDoc.set(doc, () => {
+      for (const target of scrollTargets) {
+        target.removeEventListener('scroll', onFoliateScroll, true)
+      }
+      win.removeEventListener('wheel', onReaderWheel, true)
+      win.removeEventListener('touchstart', onReaderTouchStart, true)
+      win.removeEventListener('touchmove', onReaderTouchMove, true)
+      win.removeEventListener('touchend', onReaderTouchEnd, true)
+      win.removeEventListener('touchcancel', onReaderTouchEnd, true)
+    })
+  }
+
+  /** Foliate scrolls a shadow paginator; user wheels hit the shell document instead. */
+  function attachFoliateShellScrollListeners() {
+    if (foliateShellScrollCleanup) return
+
+    const onRelocate = () => scheduleScrollFollowEvaluation()
+
+    const view = document.querySelector('foliate-view')
+    view?.addEventListener('scroll', onFoliateScroll, { passive: true })
+    view?.addEventListener('relocate', onRelocate, { passive: true })
+    document.addEventListener('wheel', onReaderWheel, { passive: true, capture: true })
+    document.addEventListener('touchstart', onReaderTouchStart, { passive: true, capture: true })
+    document.addEventListener('touchmove', onReaderTouchMove, { passive: true, capture: true })
+    document.addEventListener('touchend', onReaderTouchEnd, { passive: true, capture: true })
+    document.addEventListener('touchcancel', onReaderTouchEnd, { passive: true, capture: true })
+
+    foliateShellScrollCleanup = () => {
+      view?.removeEventListener('scroll', onFoliateScroll)
+      view?.removeEventListener('relocate', onRelocate)
+      document.removeEventListener('wheel', onReaderWheel, true)
+      document.removeEventListener('touchstart', onReaderTouchStart, true)
+      document.removeEventListener('touchmove', onReaderTouchMove, true)
+      document.removeEventListener('touchend', onReaderTouchEnd, true)
+      document.removeEventListener('touchcancel', onReaderTouchEnd, true)
+      foliateShellScrollCleanup = null
+    }
+  }
+
+  function resetScrollFollow() {
+    scrollFollowEnabled.value = true
+  }
+
+  function resumeScrollFollow() {
+    scrollFollowEnabled.value = true
+    const currentRoot = root ?? activeRoot()
+    if (!currentRoot || activeIndex.value < 0) return
+    scrollToActiveWord('instant')
   }
 
   function setActiveWord(index: number) {
     const currentRoot = root ?? activeRoot()
     if (!currentRoot || !words[index]) return
     activeIndex.value = index
-    rememberWordIndex(index)
+    trackActiveWordIndex(index)
+    persistAtSentenceBoundary(index)
     highlightWord(currentRoot, words, sentences, index)
+    if (scrollFollowEnabled.value) {
+      const behavior = status.value === 'speaking' || status.value === 'loading' ? 'instant' : 'smooth'
+      scrollToActiveWord(behavior)
+    }
   }
 
   function resumeStorageKey(): string | null {
@@ -282,29 +503,50 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     return options.getCurrentSectionIndex?.()
   }
 
-  function syncPlaybackSession(wasPlaying: boolean, wordIndex = activeIndex.value) {
+  function syncPlaybackSession(wasPlaying: boolean, wordIndex = activeIndex.value, enabled = true) {
     const sectionIndex = currentSectionIndex()
-    if (sectionIndex === undefined || wordIndex < 0) return
+    if (sectionIndex === undefined) return
+    const effectiveWordIndex = wordIndex >= 0 ? wordIndex : (restoreWordIndex() ?? 0)
     writeTtsPlaybackSession(options.fileId, {
+      enabled,
       wasPlaying,
       sectionIndex,
-      wordIndex,
+      wordIndex: effectiveWordIndex,
     })
+    if (enabled) {
+      ttsEnabled.value = true
+      syncDisplayedProvider()
+    }
   }
 
-  function rememberWordIndex(index: number) {
-    savedWordIndex = index
-    savedResumeKey = resumeStorageKey()
-    if (savedResumeKey) localStorage.setItem(savedResumeKey, String(index))
-    options.onTtsWordIndexChange?.(index)
-    if (!userStoppedPlayback && (status.value === 'speaking' || status.value === 'loading' || status.value === 'paused')) {
-      syncPlaybackSession(true, index)
+  function persistEnabledSession(context?: { sectionIndex?: number; wordIndex?: number; wasPlaying?: boolean }) {
+    const existing = readTtsPlaybackSession(options.fileId)
+    const section = context?.sectionIndex ?? currentSectionIndex() ?? existing?.sectionIndex
+    if (section === undefined) return false
+
+    const wordIndex = context?.wordIndex ?? (activeIndex.value >= 0 ? activeIndex.value : undefined) ?? restoreWordIndex() ?? existing?.wordIndex ?? 0
+
+    let wasPlaying = context?.wasPlaying
+    if (wasPlaying === undefined) {
+      wasPlaying = status.value === 'speaking' || status.value === 'loading'
     }
+
+    writeTtsPlaybackSession(options.fileId, {
+      enabled: true,
+      wasPlaying,
+      sectionIndex: section,
+      wordIndex: Math.max(0, wordIndex),
+    })
+    clearTtsUserStopped(options.fileId)
+    ttsEnabled.value = true
+    syncDisplayedProvider()
+    return true
   }
 
   function resetResumeState() {
     savedWordIndex = null
     savedResumeKey = null
+    lastPersistedSentenceStart = null
   }
 
   function clearPlaybackSession() {
@@ -317,6 +559,15 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   function restoreWordIndex(): number | null {
     const key = resumeStorageKey()
+    const persisted = options.getPersistedTtsPosition?.()
+    const currentSection = options.getCurrentSectionIndex?.()
+    if (persisted && currentSection !== undefined && persisted.sectionIndex === currentSection) {
+      savedWordIndex = persisted.wordIndex
+      savedResumeKey = key ?? null
+      if (key) localStorage.setItem(key, String(persisted.wordIndex))
+      return savedWordIndex
+    }
+
     if (key) {
       if (savedResumeKey === key && savedWordIndex !== null) return savedWordIndex
       savedResumeKey = key
@@ -327,15 +578,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
         return savedWordIndex
       }
       savedWordIndex = null
-    }
-
-    const persisted = options.getPersistedTtsPosition?.()
-    const currentSection = options.getCurrentSectionIndex?.()
-    if (persisted && currentSection !== undefined && persisted.sectionIndex === currentSection) {
-      savedWordIndex = persisted.wordIndex
-      savedResumeKey = key ?? null
-      if (key) localStorage.setItem(key, String(persisted.wordIndex))
-      return savedWordIndex
     }
 
     return null
@@ -390,43 +632,96 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     if (clearHighlight && root) clearTtsHighlight(root)
   }
 
-  async function start(fromIndex?: number, startOptions: TtsStartOptions = { userInitiated: true }) {
-    if (userStoppedPlayback && !startOptions.userInitiated) return
+  /** Re-apply engine/voice/speed immediately whenever TTS settings change. */
+  function applyTtsSettingsChange() {
+    currentProvider.value = resolveCloudTtsProvider(null, settings().ttsProvider)
+    if (!isActive.value) return
 
-    if (startOptions.userInitiated) {
-      userStoppedPlayback = false
-      clearTtsUserStopped(options.fileId)
-      autoResumeAttempted = false
-      unsuppressTtsMediaSession()
-      playbackGeneration++
-    }
-
-    const runId = playbackGeneration
+    playbackGeneration++
     cleanupRuntime(false)
-    error.value = null
-    missingConfigWarned = false
-    if (fromIndex === 0) {
-      resetResumeState()
-      clearPlaybackSession()
-      const key = resumeStorageKey()
-      if (key) localStorage.removeItem(key)
-    }
-    await ensureLoaded()
-    if (playbackRunIsStale(runId)) return
-    await warmUp()
-    if (!rebuildIndex()) {
-      error.value = 'No readable text found in the current section.'
-      status.value = 'error'
+
+    const hasPlaybackPosition = activeIndex.value >= 0 || restoreWordIndex() !== null
+    if (!hasPlaybackPosition && status.value === 'idle') {
+      void prefetchPlaybackAhead()
       return
     }
 
-    const restoredIndex = fromIndex ?? restoreWordIndex()
-    const startIndex = Math.min(Math.max(0, restoredIndex ?? 0), Math.max(0, words.length - 1))
-    const sentence = findSentenceForWord(sentences, startIndex)
-    syncPlaybackSession(true, startIndex)
-    await playFromSentence(sentence ? startIndex : (restoredIndex ?? startIndex), runId)
-    if (playbackRunIsStale(runId)) return
-    syncMediaSession()
+    void restartFromCurrentWord()
+  }
+
+  function playFromToolbar() {
+    if (status.value === 'paused') {
+      resume()
+      return
+    }
+    if (status.value === 'loading') {
+      void restartFromCurrentWord()
+      return
+    }
+    void start(undefined, { userInitiated: true })
+  }
+
+  async function start(fromIndex?: number, startOptions: TtsStartOptions = { userInitiated: true }) {
+    if (userStoppedPlayback && !startOptions.userInitiated) return
+
+    playbackStartDepth++
+    try {
+      if (startOptions.userInitiated) {
+        userStoppedPlayback = false
+        clearTtsUserStopped(options.fileId)
+        autoResumeAttempted = false
+        resetScrollFollow()
+        ttsEnabled.value = true
+        syncDisplayedProvider()
+        unsuppressTtsMediaSession()
+        playbackGeneration++
+        const sectionIndex = currentSectionIndex()
+        if (sectionIndex !== undefined) {
+          const initialWordIndex = fromIndex ?? restoreWordIndex() ?? 0
+          writeTtsPlaybackSession(options.fileId, {
+            enabled: true,
+            wasPlaying: true,
+            sectionIndex,
+            wordIndex: Math.max(0, initialWordIndex),
+          })
+        }
+      }
+
+      const runId = playbackGeneration
+      cleanupRuntime(false)
+      error.value = null
+      missingConfigWarned = false
+      if (fromIndex === 0) {
+        resetResumeState()
+        clearPlaybackSession()
+        const key = resumeStorageKey()
+        if (key) localStorage.removeItem(key)
+      }
+      await warmUp()
+      if (playbackRunIsStale(runId)) {
+        if (startOptions.userInitiated && status.value === 'loading') status.value = 'idle'
+        return
+      }
+      if (!rebuildIndex()) {
+        error.value = 'No readable text found in the current section.'
+        status.value = 'error'
+        return
+      }
+
+      if (startOptions.userInitiated) {
+        status.value = 'loading'
+      }
+
+      const restoredIndex = fromIndex ?? restoreWordIndex()
+      const startIndex = Math.min(Math.max(0, restoredIndex ?? 0), Math.max(0, words.length - 1))
+      const sentence = findSentenceForWord(sentences, startIndex)
+      syncPlaybackSession(true, startIndex)
+      await playFromSentence(sentence ? startIndex : (restoredIndex ?? startIndex), runId)
+      if (playbackRunIsStale(runId)) return
+      syncMediaSession()
+    } finally {
+      playbackStartDepth = Math.max(0, playbackStartDepth - 1)
+    }
   }
 
   async function playFromSentence(wordIndex: number, runId = playbackGeneration) {
@@ -436,15 +731,13 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     )
     const activeRuntime = DEFAULT_RUNTIME()
     runtime = activeRuntime
-    const effectiveProvider = resolveProvider(settings().ttsProvider)
+    const effectiveProvider = requireConfiguredProvider(settings().ttsProvider)
     currentProvider.value = effectiveProvider
     const playbackQueue = buildPlaybackQueue(startSentenceIdx, wordIndex)
     setActiveWord(wordIndex)
 
     try {
-      if (effectiveProvider === 'browser') {
-        await playBrowserQueue(playbackQueue, activeRuntime)
-      } else if (effectiveProvider === 'azure') {
+      if (effectiveProvider === 'azure') {
         await playAzureAudioQueue(playbackQueue, activeRuntime)
       } else if (
         effectiveProvider === 'xai' ||
@@ -473,7 +766,10 @@ export function useEpubTts(options: UseEpubTtsOptions) {
         options.onSectionComplete?.()
       }
     } catch (err) {
-      if (runtime !== activeRuntime || activeRuntime.stopped || activeRuntime.abort.signal.aborted) return
+      if (runtime !== activeRuntime || activeRuntime.stopped || activeRuntime.abort.signal.aborted) {
+        if (status.value === 'loading') status.value = 'idle'
+        return
+      }
       error.value = err instanceof Error ? err.message : 'TTS playback failed'
       status.value = 'error'
       syncMediaSession()
@@ -483,7 +779,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   async function speakSentence(
     sentence: SentenceInfo,
     activeRuntime: SpeechRuntime,
-    effectiveProvider = resolveProvider(settings().ttsProvider),
+    effectiveProvider = requireConfiguredProvider(settings().ttsProvider),
   ): Promise<void> {
     currentProvider.value = effectiveProvider
     if (effectiveProvider === 'azure') return speakAzureSentence(sentence, activeRuntime)
@@ -491,7 +787,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     if (effectiveProvider === 'gcp-chirp3') return speakCloudAudioSentence(sentence, activeRuntime, fetchGcpAudio)
     if (effectiveProvider === 'kokoro') return speakCloudAudioSentence(sentence, activeRuntime, fetchKokoroAudio)
     if (effectiveProvider === 'gpt-4o-mini-tts') return speakCloudAudioSentence(sentence, activeRuntime, fetchGpt4oMiniTtsAudio)
-    return speakBrowserSentence(sentence, activeRuntime)
+    throw new Error(`${providerDisplayName(effectiveProvider)} is not supported for text-to-speech.`)
   }
 
   function cloudAudioFetcher(provider: TtsProvider): CloudAudioFetcher {
@@ -501,28 +797,43 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     return fetchXaiAudio
   }
 
+  function providerDisplayName(provider: TtsProvider): string {
+    const cloud = resolveCloudTtsProvider(provider, settings().ttsProvider)
+    if (cloud === 'gcp-chirp3') return 'Google Chirp 3'
+    if (cloud === 'azure') return 'Azure'
+    if (cloud === 'kokoro') return 'Kokoro'
+    if (cloud === 'gpt-4o-mini-tts') return 'GPT'
+    if (cloud === 'xai') return 'xAI'
+    return 'Kokoro'
+  }
+
+  function syncDisplayedProvider() {
+    currentProvider.value = resolveCloudTtsProvider(currentProvider.value, settings().ttsProvider)
+  }
+
+  function isProviderConfigured(provider: TtsProvider): boolean {
+    if (provider === 'browser') return false
+    if (provider === 'azure') return !!credentials.azureKey
+    if (provider === 'gcp-chirp3') return credentials.gcpChirp3Configured
+    if (provider === 'xai') return credentials.xaiConfigured
+    if (provider === 'kokoro' || provider === 'gpt-4o-mini-tts') return credentials.kokoroConfigured
+    return false
+  }
+
   function resolveProvider(provider: TtsProvider): TtsProvider {
-    if (provider === 'azure' && !credentials.azureKey) {
-      warnMissingConfig('Azure is not configured. Falling back to the device voice.')
-      return 'browser'
-    }
-    if (provider === 'xai' && !credentials.kokoroConfigured) {
-      warnMissingConfig('xAI is not configured. Falling back to the device voice.')
-      return 'browser'
-    }
-    if (provider === 'gcp-chirp3' && !credentials.gcpChirp3Configured) {
-      warnMissingConfig('Google Chirp 3 is not configured. Falling back to the device voice.')
-      return 'browser'
-    }
-    if (provider === 'kokoro' && !credentials.kokoroConfigured) {
-      warnMissingConfig('Kokoro is not configured. Falling back to the device voice.')
-      return 'browser'
-    }
-    if (provider === 'gpt-4o-mini-tts' && !credentials.kokoroConfigured) {
-      warnMissingConfig('GPT is not configured. Falling back to the device voice.')
-      return 'browser'
-    }
     return provider
+  }
+
+  function requireConfiguredProvider(provider: TtsProvider): TtsProvider {
+    if (isProviderConfigured(provider)) return provider
+
+    const adminHint = 'Ask an admin to configure API keys in Settings → System → Text-to-Speech.'
+    const message =
+      provider === 'browser'
+        ? `Device text-to-speech is not available. Choose a cloud engine in TTS settings. ${adminHint}`
+        : `${providerDisplayName(provider)} is not configured. ${adminHint}`
+    warnMissingConfig(message)
+    throw new Error(message)
   }
 
   function warnMissingConfig(message: string) {
@@ -702,7 +1013,15 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     try {
       for (let i = 0; i < playbackQueue.length; i++) {
         const preparedAudio = pending.get(i)
-        if (runtimeIsInactive(activeRuntime) || !preparedAudio) return
+        if (runtimeIsInactive(activeRuntime) || playbackRunIsStale(playbackGeneration)) {
+          if (status.value === 'loading') status.value = 'idle'
+          return
+        }
+        if (!preparedAudio) {
+          error.value = 'TTS playback was interrupted.'
+          status.value = 'error'
+          return
+        }
         const sentence = playbackQueue[i]!
         currentSentenceText.value = sentence.text
         setActiveWord(sentence.wordStartIdx)
@@ -1004,32 +1323,57 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     return response.arrayBuffer()
   }
 
-  function checkpointTtsPosition() {
-    if (activeIndex.value >= 0) rememberWordIndex(activeIndex.value)
+  function resolveSentenceStartWordIndex(wordIndex: number): number {
+    return sentenceStartForWord(wordIndex) ?? wordIndex
+  }
+
+  /** Persist and return the first word index of the sentence containing `wordIndex`. */
+  function checkpointAtSentenceStart(wordIndex = activeIndex.value): number | null {
+    if (!Number.isInteger(wordIndex) || wordIndex < 0) return null
+    const sentenceStart = resolveSentenceStartWordIndex(wordIndex)
+    lastPersistedSentenceStart = sentenceStart
+    persistTtsPosition(sentenceStart)
     options.onTtsCheckpoint?.()
+    return sentenceStart
+  }
+
+  function checkpointTtsPosition() {
+    checkpointAtSentenceStart()
+  }
+
+  function hasResumablePlayback(): boolean {
+    if (!runtime || runtime.stopped) return false
+    if (currentProvider.value === 'browser') return Boolean(window.speechSynthesis?.paused)
+    return runtime.audioContext?.state === 'suspended' && runtime.source != null
   }
 
   function pause() {
     if (status.value !== 'speaking' && status.value !== 'loading') return
+    if (status.value === 'loading' && !hasResumablePlayback()) return
     if (currentProvider.value === 'browser') window.speechSynthesis.pause()
     runtime?.audioContext?.suspend().catch(() => {})
     status.value = 'paused'
-    checkpointTtsPosition()
-    syncPlaybackSession(true)
+    const sentenceStart = checkpointAtSentenceStart() ?? activeIndex.value
+    syncPlaybackSession(false, sentenceStart, true)
     syncMediaSession()
   }
 
   function resume() {
     if (userStoppedPlayback || status.value !== 'paused') return
+    if (!hasResumablePlayback()) {
+      restartFromCurrentWord()
+      return
+    }
     if (currentProvider.value === 'browser') window.speechSynthesis.resume()
     runtime?.audioContext?.resume().catch(() => {})
     status.value = 'speaking'
-    syncPlaybackSession(true)
+    syncPlaybackSession(true, activeIndex.value, true)
     syncMediaSession()
   }
 
   function stop(stopOptions?: { checkpoint?: boolean }) {
     userStoppedPlayback = true
+    ttsEnabled.value = false
     markTtsUserStopped(options.fileId)
     playbackGeneration++
     autoResumeAttempted = true
@@ -1043,6 +1387,38 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     currentSentenceText.value = ''
     error.value = null
     syncMediaSession()
+  }
+
+  /** Persist TTS enabled state when navigating away without tearing down playback UI. */
+  function persistForNavigation(context?: { sectionIndex?: number; wordIndex?: number }) {
+    const existing = readTtsPlaybackSession(options.fileId)
+    const shouldPersist = ttsEnabled.value || status.value !== 'idle' || existing?.enabled
+    if (!shouldPersist) return
+
+    persistEnabledSession({
+      sectionIndex: context?.sectionIndex,
+      wordIndex: context?.wordIndex,
+      wasPlaying: false,
+    })
+  }
+
+  /** @deprecated Use persistForNavigation(). */
+  function leaveReader(context?: { sectionIndex?: number; wordIndex?: number }) {
+    persistForNavigation(context)
+  }
+
+  /** @deprecated Use persistForNavigation(). */
+  function suspend() {
+    persistForNavigation()
+  }
+
+  function persistTtsSessionOnExit() {
+    if (userStoppedPlayback || (!ttsEnabled.value && status.value === 'idle')) return
+    if (status.value !== 'idle') {
+      checkpointTtsPosition()
+    }
+    const wasPlaying = status.value === 'speaking' || status.value === 'loading'
+    persistEnabledSession({ wasPlaying })
   }
 
   function replay() {
@@ -1071,45 +1447,114 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     }
 
     const startIndex = Math.min(Math.max(0, wordIndex), Math.max(0, words.length - 1))
-    syncPlaybackSession(true, startIndex)
+    const sentenceStart = resolveSentenceStartWordIndex(startIndex)
+    lastPersistedSentenceStart = sentenceStart
+    persistTtsPosition(sentenceStart)
+    options.onTtsCheckpoint?.()
+    syncPlaybackSession(true, sentenceStart)
     await playFromSentence(startIndex, runId)
     if (playbackRunIsStale(runId)) return
     syncMediaSession()
   }
 
   function skipBackward() {
-    if (!sentences.length) return
+    if (!sentences.length && !rebuildIndex()) return
     const target = sentences[Math.max(0, currentSentenceIndex() - 1)]
     if (target) void seekToWord(target.wordStartIdx)
   }
 
   function skipForward() {
-    if (!sentences.length) return
+    if (!sentences.length && !rebuildIndex()) return
     const target = sentences[Math.min(sentences.length - 1, currentSentenceIndex() + 1)]
     if (target) void seekToWord(target.wordStartIdx)
   }
 
+  function resolveRestoreWordIndex(): number | null {
+    if (activeIndex.value >= 0) return activeIndex.value
+    const restored = restoreWordIndex()
+    if (restored !== null) return restored
+    const session = readTtsPlaybackSession(options.fileId)
+    if (!session?.enabled) return null
+    const section = currentSectionIndex()
+    if (section === undefined || session.sectionIndex !== section) return null
+    return session.wordIndex
+  }
+
+  function cancelScheduledHighlightRestore() {
+    if (highlightRestoreTimer !== null) {
+      clearTimeout(highlightRestoreTimer)
+      highlightRestoreTimer = null
+    }
+    if (highlightRestoreFrame !== 0) {
+      cancelAnimationFrame(highlightRestoreFrame)
+      highlightRestoreFrame = 0
+    }
+  }
+
+  function restoreHighlightFromSession(): boolean {
+    if (!ttsEnabled.value) return false
+    if (!rebuildIndex(true)) return false
+    const wordIndex = resolveRestoreWordIndex()
+    if (wordIndex === null || wordIndex < 0) return false
+    setActiveWord(wordIndex)
+    if (scrollFollowEnabled.value) {
+      requestAnimationFrame(() => scrollToActiveWord('instant'))
+    }
+    return true
+  }
+
+  function scheduleTtsHighlightRestore() {
+    if (!ttsEnabled.value) return
+    cancelScheduledHighlightRestore()
+
+    let attemptsLeft = 24
+
+    const tryRestore = () => {
+      highlightRestoreTimer = null
+      if (!ttsEnabled.value) return
+      if (restoreHighlightFromSession()) return
+      attemptsLeft -= 1
+      if (attemptsLeft <= 0) return
+      highlightRestoreTimer = setTimeout(tryRestore, 50)
+    }
+
+    highlightRestoreFrame = requestAnimationFrame(() => {
+      highlightRestoreFrame = requestAnimationFrame(() => {
+        highlightRestoreFrame = 0
+        tryRestore()
+      })
+    })
+  }
+
   function restoreHighlightForActiveWord() {
-    if (activeIndex.value < 0) return
-    if (!rebuildIndex(true)) return
-    setActiveWord(activeIndex.value)
+    scheduleTtsHighlightRestore()
+  }
+
+  function refreshTtsHighlight() {
+    if (!ttsEnabled.value) return
+    scheduleTtsHighlightRestore()
   }
 
   function handleDocumentLoad(doc: Document) {
     injectTtsHighlightStyles(doc, settings().ttsSentenceHighlightColor, settings().ttsWordHighlightColor)
     attachTapToRead(doc)
+    attachScrollFollowListeners(doc)
+    attachFoliateShellScrollListeners()
 
     const sectionIndex = currentSectionIndex()
     const isSameSectionReload = sectionIndex !== undefined && sectionIndex === loadedDocumentSectionIndex
     loadedDocumentSectionIndex = sectionIndex ?? null
 
     if (isSameSectionReload) {
+      if (ttsEnabled.value) {
+        scheduleTtsHighlightRestore()
+        return
+      }
       if (status.value === 'speaking' || status.value === 'loading' || status.value === 'paused') {
         restoreHighlightForActiveWord()
         return
       }
-      if (!userStoppedPlayback) void tryAutoResumeAfterReload()
-      void prefetchInitialSentences()
+      void prefetchPlaybackAhead()
       return
     }
 
@@ -1118,13 +1563,38 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     wordCount.value = 0
     warmUpPromise = null
 
-    if (status.value === 'speaking' || status.value === 'loading' || status.value === 'paused') {
+    if (status.value === 'speaking' || status.value === 'loading') {
       resetResumeState()
-      stop({ checkpoint: false })
+      const nextSection = currentSectionIndex()
+      if (nextSection !== undefined) {
+        writeTtsPlaybackSession(options.fileId, {
+          enabled: true,
+          wasPlaying: false,
+          sectionIndex: nextSection,
+          wordIndex: 0,
+        })
+        ttsEnabled.value = true
+      }
+      playbackGeneration++
+      cleanupRuntime(true)
+      window.speechSynthesis?.cancel()
+      status.value = 'idle'
+      activeIndex.value = -1
+      currentSentenceText.value = ''
+      error.value = null
+      suppressTtsMediaSession()
+      syncMediaSession()
+      void prefetchPlaybackAhead()
+      return
     }
 
-    if (!userStoppedPlayback) void tryAutoResumeAfterReload()
-    void prefetchInitialSentences()
+    if (ttsEnabled.value) {
+      scheduleTtsHighlightRestore()
+      void prefetchPlaybackAhead()
+      return
+    }
+
+    void prefetchPlaybackAhead()
   }
 
   async function waitForTtsStatus(targets: TtsStatus[], timeoutMs = 5000): Promise<boolean> {
@@ -1149,23 +1619,82 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     }
   }
 
-  async function tryAutoResumeAfterReload(): Promise<boolean> {
+  async function restoreTtsReadyState(session: TtsPlaybackSession): Promise<boolean> {
+    await warmUp()
+    if (!rebuildIndex()) return false
+
+    ttsEnabled.value = true
+    syncDisplayedProvider()
+    status.value = 'idle'
+    if (!restoreHighlightFromSession()) {
+      const wordIndex = Math.min(Math.max(0, session.wordIndex), Math.max(0, words.length - 1))
+      setActiveWord(wordIndex)
+    }
+    scheduleTtsHighlightRestore()
+    syncMediaSession()
+    void prefetchPlaybackAhead(session.wordIndex)
+    writeTtsPlaybackSession(options.fileId, {
+      enabled: true,
+      wasPlaying: false,
+      sectionIndex: session.sectionIndex,
+      wordIndex: Math.max(0, activeIndex.value >= 0 ? activeIndex.value : session.wordIndex),
+    })
+    return activeIndex.value >= 0
+  }
+
+  function resolveRestoredTtsSession(session: TtsPlaybackSession): TtsPlaybackSession {
+    const persisted = options.getPersistedTtsPosition?.()
+    if (!persisted) return session
+    return {
+      ...session,
+      sectionIndex: persisted.sectionIndex,
+      wordIndex: persisted.wordIndex,
+    }
+  }
+
+  async function restoreTtsAfterReload(): Promise<'resumed' | 'ready' | false> {
     if (autoResumeAttempted || userStoppedPlayback || readTtsUserStopped(options.fileId)) return false
+
     const session = readTtsPlaybackSession(options.fileId)
-    if (!session?.wasPlaying) return false
+    if (!session?.enabled) return false
 
-    const sectionIndex = currentSectionIndex()
-    if (sectionIndex === undefined || session.sectionIndex !== sectionIndex) return false
+    const restoredSession = resolveRestoredTtsSession(session)
+    const activeSection = currentSectionIndex()
+    if (activeSection === undefined || restoredSession.sectionIndex !== activeSection) return false
 
-    autoResumeAttempted = true
-    await start(session.wordIndex, { userInitiated: false })
+    if (restoredSession.wasPlaying) {
+      await start(restoredSession.wordIndex, { userInitiated: false })
+      const started = await waitForTtsStatus(['speaking', 'loading'])
+      if (started) {
+        clearPlaybackSession()
+        autoResumeAttempted = true
+        ttsEnabled.value = true
+        return 'resumed'
+      }
+      writeTtsPlaybackSession(options.fileId, {
+        enabled: true,
+        wasPlaying: false,
+        sectionIndex: restoredSession.sectionIndex,
+        wordIndex: restoredSession.wordIndex,
+      })
+      return false
+    }
 
-    const started = await waitForTtsStatus(['speaking', 'loading', 'paused'])
-    if (started) {
-      clearPlaybackSession()
-      return true
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const ready = await restoreTtsReadyState(restoredSession)
+      if (ready) {
+        autoResumeAttempted = true
+        ttsEnabled.value = true
+        return 'ready'
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
     }
     return false
+  }
+
+  async function tryAutoResumeAfterReload(): Promise<boolean> {
+    const result = await restoreTtsAfterReload()
+    return result === 'resumed'
   }
 
   function attachTapToRead(doc: Document) {
@@ -1190,34 +1719,20 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   }
 
   watch(
-    () => [settings().ttsSentenceHighlightColor, settings().ttsWordHighlightColor],
-    () => {
-      const doc = options.getDocument()
-      if (doc) injectTtsHighlightStyles(doc, settings().ttsSentenceHighlightColor, settings().ttsWordHighlightColor)
+    () => [currentSectionIndex(), ttsEnabled.value, status.value] as const,
+    ([section, enabled, playbackStatus]) => {
+      if (!enabled || section === undefined) return
+      if (playbackStatus === 'speaking' || playbackStatus === 'loading') return
+      scheduleTtsHighlightRestore()
     },
   )
 
   watch(
-    () => [
-      settings().ttsProvider,
-      settings().ttsVoice,
-      settings().ttsRate,
-      settings().ttsPitch,
-      settings().ttsVolume,
-      settings().ttsGcpChirp3Voice,
-      settings().ttsAzureVoice,
-      settings().ttsXaiVoice,
-      settings().ttsKokoroVoice,
-      settings().ttsGpt4oMiniVoice,
-      credentials.azureKey,
-      credentials.azureRegion,
-      credentials.gcpChirp3Configured,
-      credentials.xaiConfigured,
-      credentials.kokoroConfigured,
-    ],
+    () => [settings().ttsSentenceHighlightColor, settings().ttsWordHighlightColor],
     () => {
-      if (!isPlaying.value) return
-      restartFromCurrentWord()
+      const doc = options.getDocument()
+      if (doc) injectTtsHighlightStyles(doc, settings().ttsSentenceHighlightColor, settings().ttsWordHighlightColor)
+      if (ttsEnabled.value) scheduleTtsHighlightRestore()
     },
   )
 
@@ -1239,13 +1754,34 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   navigator.mediaDevices?.addEventListener('devicechange', onAudioOutputChanged)
 
+  const onPageHide = () => persistTtsSessionOnExit()
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') persistTtsSessionOnExit()
+  }
+
+  onMounted(() => {
+    window.addEventListener('pagehide', onPageHide)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    attachFoliateShellScrollListeners()
+  })
+
   onUnmounted(() => {
+    cancelScheduledHighlightRestore()
+    if (scrollFollowEvalTimer !== null) {
+      clearTimeout(scrollFollowEvalTimer)
+      scrollFollowEvalTimer = null
+    }
+    const activeDoc = options.getDocument()
+    if (activeDoc) detachScrollFollowListeners(activeDoc)
+    foliateShellScrollCleanup?.()
+    window.removeEventListener('pagehide', onPageHide)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
     navigator.mediaDevices?.removeEventListener('devicechange', onAudioOutputChanged)
     registerTtsMediaSessionController(null)
-    if (status.value === 'speaking' || status.value === 'loading' || status.value === 'paused') {
-      syncPlaybackSession(true)
-    }
-    checkpointTtsPosition()
+    persistTtsSessionOnExit()
+    playbackGeneration++
+    window.speechSynthesis?.cancel()
+    suppressTtsMediaSession()
     cleanupRuntime(true)
   })
 
@@ -1255,20 +1791,31 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     activeIndex,
     wordCount,
     progress,
+    scrollFollowEnabled,
+    resumeScrollFollow,
+    evaluateScrollFollow,
     isActive,
     isPlaying,
     currentProvider,
     currentSentenceText,
     start,
+    playFromToolbar,
+    applyTtsSettingsChange,
     pause,
     resume,
     stop,
+    suspend,
+    leaveReader,
+    persistForNavigation,
     replay,
     restartFromCurrentWord,
     skipBackward,
     skipForward,
     handleDocumentLoad,
     tryAutoResumeAfterReload,
+    restoreTtsAfterReload,
+    refreshTtsHighlight,
     warmUp,
+    prefetchPlaybackAhead,
   }
 }

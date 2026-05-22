@@ -3,14 +3,27 @@ import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { migrateLegacyThemeHighlightColors, resolveThemeHighlightColors } from '@/features/reader/epub/theme-highlight'
+import { useReaderDeviceFormFactor } from '@/features/reader/shared/lib/device-form-factor'
 import {
   CBX_READER_DEFAULTS,
+  EPUB_DEVICE_SETTING_KEYS,
+  EPUB_READER_DEFAULTS,
+  READER_DEVICE_FORM_FACTORS,
   type CbxReaderSettings,
+  type EpubDeviceSettings,
+  type EpubReaderDefaultsStorageV2,
   type EpubReaderSettings,
+  type EpubSharedSettings,
   type ReaderFormatGroup,
   type ReaderSettings,
   READER_GROUP_DEFAULTS,
+  createEmptyEpubDeviceSettingsMap,
   getFormatGroup,
+  isEpubDefaultsStorageV2,
+  mergeEpubDefaultsForDevice,
+  migrateFlatEpubDefaultsToV2,
+  pickEpubDeviceSettings,
+  pickEpubSharedSettings,
 } from '@bookorbit/types'
 
 // -- Shared localStorage helpers --
@@ -47,17 +60,7 @@ const READER_SETTINGS_SYNC_DEBOUNCE_MS = 500
 
 /** Settings from the in-reader cog and TTS panels — stored as account-wide format defaults. */
 export const EPUB_GLOBAL_SETTING_KEYS = [
-  'themeName',
-  'isDark',
-  'fontFamily',
-  'fontSize',
-  'lineHeight',
-  'maxColumnCount',
-  'gap',
-  'maxInlineSize',
-  'justify',
-  'hyphenate',
-  'flow',
+  ...EPUB_DEVICE_SETTING_KEYS,
   'ttsProvider',
   'ttsVoice',
   'ttsRate',
@@ -184,6 +187,22 @@ function sanitizeDefaultSettings(group: ReaderFormatGroup, raw: unknown): Reader
   } as ReaderSettings
 }
 
+function sanitizeEpubDefaultsStorage(raw: unknown): EpubReaderDefaultsStorageV2 | null {
+  if (isEpubDefaultsStorageV2(raw)) {
+    const shared = isRecord(raw.shared) ? (raw.shared as EpubSharedSettings) : {}
+    const devices = createEmptyEpubDeviceSettingsMap()
+    for (const device of READER_DEVICE_FORM_FACTORS) {
+      const deviceRaw = raw.devices[device]
+      devices[device] = isRecord(deviceRaw) ? pickEpubDeviceSettings(deviceRaw as Partial<EpubReaderSettings>) : {}
+    }
+    return { v: 2, shared, devices }
+  }
+
+  if (!isRecord(raw)) return null
+  const migrated = migrateLegacyThemeHighlightColors(raw as unknown as EpubReaderSettings)
+  return migrateFlatEpubDefaultsToV2(migrated)
+}
+
 function withResolvedEpubHighlights(settings: ReaderSettings): ReaderSettings {
   const epub = settings as EpubReaderSettings
   const resolved = resolveThemeHighlightColors(epub)
@@ -193,15 +212,54 @@ function withResolvedEpubHighlights(settings: ReaderSettings): ReaderSettings {
   } as ReaderSettings
 }
 
+function resolveEpubDefaultSettings(
+  storage: EpubReaderDefaultsStorageV2 | null,
+  deviceFormFactor: ReturnType<typeof useReaderDeviceFormFactor>['deviceFormFactor']['value'],
+): ReaderSettings | null {
+  if (!storage) return null
+  const merged = mergeEpubDefaultsForDevice(storage, deviceFormFactor)
+  return withResolvedEpubHighlights({
+    ...EPUB_READER_DEFAULTS,
+    ...merged,
+  } as ReaderSettings)
+}
+
+function splitEpubDefaultPatch(patch: Partial<ReaderSettings>): { device: EpubDeviceSettings; shared: EpubSharedSettings } {
+  return {
+    device: pickEpubDeviceSettings(patch as Partial<EpubReaderSettings>),
+    shared: pickEpubSharedSettings(patch as Partial<EpubReaderSettings>),
+  }
+}
+
+function mergeEpubDefaultsStorage(
+  current: EpubReaderDefaultsStorageV2 | null,
+  deviceFormFactor: ReturnType<typeof useReaderDeviceFormFactor>['deviceFormFactor']['value'],
+  patch: Partial<ReaderSettings>,
+): EpubReaderDefaultsStorageV2 {
+  const base = current ?? migrateFlatEpubDefaultsToV2({})
+  const { device, shared } = splitEpubDefaultPatch(patch)
+
+  return {
+    v: 2,
+    shared: { ...base.shared, ...shared },
+    devices: {
+      ...base.devices,
+      [deviceFormFactor]: { ...base.devices[deviceFormFactor], ...device },
+    },
+  }
+}
+
 // -- Per-book settings (used inside the reader) --
 
 export function useReaderSettings(bookFileId: number, format: string) {
   const group = getFormatGroup(format)
   const { user } = useAuth()
+  const { deviceFormFactor } = useReaderDeviceFormFactor()
 
   // Only the fields the user explicitly changed for this book — not a full snapshot.
   const bookDelta = ref<Partial<ReaderSettings> | null>(null)
   const defaultSettings = ref<ReaderSettings | null>(null)
+  const epubDefaults = ref<EpubReaderDefaultsStorageV2 | null>(null)
   const isCustomized = ref(false)
 
   const syncEnabled = computed(() => isReaderSyncEnabled(user.value))
@@ -219,12 +277,15 @@ export function useReaderSettings(bookFileId: number, format: string) {
   })
 
   const defaultSync = createDebouncedSync(async () => {
-    if (!syncEnabled.value || !defaultSettings.value) return
+    if (!syncEnabled.value) return
+
+    const payload = group === 'epub' ? epubDefaults.value : defaultSettings.value
+    if (!payload) return
 
     await api(`/api/v1/reader/defaults/${group}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: defaultSettings.value }),
+      body: JSON.stringify({ settings: payload }),
     })
   })
 
@@ -233,11 +294,18 @@ export function useReaderSettings(bookFileId: number, format: string) {
     void defaultSync.flush()
   })
 
+  const resolvedDefaultSettings = computed<ReaderSettings | null>(() => {
+    if (group === 'epub') {
+      return resolveEpubDefaultSettings(epubDefaults.value, deviceFormFactor.value)
+    }
+    return defaultSettings.value
+  })
+
   // Merge order: hardcoded fallback → format defaults → per-book delta
   const effective = computed<ReaderSettings>(() => {
     const merged = {
       ...(READER_GROUP_DEFAULTS[group] as ReaderSettings),
-      ...(defaultSettings.value ?? undefined),
+      ...(resolvedDefaultSettings.value ?? undefined),
       ...(bookDelta.value ?? undefined),
     } as ReaderSettings
 
@@ -248,9 +316,17 @@ export function useReaderSettings(bookFileId: number, format: string) {
     return merged
   })
 
+  function writeDefaultSettingsToLs() {
+    if (group === 'epub') {
+      if (epubDefaults.value) writeLs(lsDefaultKey(group), epubDefaults.value)
+      return
+    }
+    if (defaultSettings.value) writeLs(lsDefaultKey(group), defaultSettings.value)
+  }
+
   async function load() {
     const lsBook = readLs<Partial<ReaderSettings>>(lsBookKey(bookFileId))
-    const lsDefault = readLs<ReaderSettings>(lsDefaultKey(group))
+    const lsDefault = readLs<unknown>(lsDefaultKey(group))
 
     if (lsBook) {
       const sanitized = sanitizeBookDelta(group, lsBook)
@@ -264,7 +340,19 @@ export function useReaderSettings(bookFileId: number, format: string) {
         removeLs(lsBookKey(bookFileId))
       }
     }
-    if (lsDefault) {
+
+    if (group === 'epub') {
+      if (lsDefault) {
+        const sanitized = sanitizeEpubDefaultsStorage(lsDefault)
+        if (sanitized) {
+          epubDefaults.value = sanitized
+          if (!jsonEqual(lsDefault, sanitized)) writeDefaultSettingsToLs()
+        } else {
+          epubDefaults.value = null
+          removeLs(lsDefaultKey(group))
+        }
+      }
+    } else if (lsDefault) {
       const sanitized = sanitizeDefaultSettings(group, lsDefault)
       if (sanitized) {
         defaultSettings.value = sanitized
@@ -328,14 +416,26 @@ export function useReaderSettings(bookFileId: number, format: string) {
         removeLs(lsBookKey(bookFileId))
       }
     }
+
     if (defRes?.[group]) {
-      const sanitized = sanitizeDefaultSettings(group, defRes[group])
-      if (sanitized) {
-        defaultSettings.value = sanitized
-        writeLs(lsDefaultKey(group), sanitized)
+      if (group === 'epub') {
+        const sanitized = sanitizeEpubDefaultsStorage(defRes[group])
+        if (sanitized) {
+          epubDefaults.value = sanitized
+          writeDefaultSettingsToLs()
+        } else {
+          epubDefaults.value = null
+          removeLs(lsDefaultKey(group))
+        }
       } else {
-        defaultSettings.value = null
-        removeLs(lsDefaultKey(group))
+        const sanitized = sanitizeDefaultSettings(group, defRes[group])
+        if (sanitized) {
+          defaultSettings.value = sanitized
+          writeLs(lsDefaultKey(group), sanitized)
+        } else {
+          defaultSettings.value = null
+          removeLs(lsDefaultKey(group))
+        }
       }
     }
   }
@@ -364,10 +464,14 @@ export function useReaderSettings(bookFileId: number, format: string) {
   }
 
   function updateDefaultSettings(patch: Partial<ReaderSettings>) {
-    const current = defaultSettings.value ?? READER_GROUP_DEFAULTS[group]
-    const next = { ...current, ...patch } as ReaderSettings
-    defaultSettings.value = group === 'epub' ? withResolvedEpubHighlights(next) : next
-    writeLs(lsDefaultKey(group), defaultSettings.value)
+    if (group === 'epub') {
+      epubDefaults.value = mergeEpubDefaultsStorage(epubDefaults.value, deviceFormFactor.value, patch)
+      writeDefaultSettingsToLs()
+    } else {
+      const current = defaultSettings.value ?? READER_GROUP_DEFAULTS[group]
+      defaultSettings.value = { ...current, ...patch } as ReaderSettings
+      writeDefaultSettingsToLs()
+    }
 
     if (syncEnabled.value) {
       defaultSync.schedule()
@@ -398,7 +502,11 @@ export function useReaderSettings(bookFileId: number, format: string) {
 
   function resetDefaultSettings() {
     defaultSync.cancel()
-    defaultSettings.value = null
+    if (group === 'epub') {
+      epubDefaults.value = null
+    } else {
+      defaultSettings.value = null
+    }
     removeLs(lsDefaultKey(group))
 
     if (syncEnabled.value) {
@@ -410,6 +518,7 @@ export function useReaderSettings(bookFileId: number, format: string) {
     effective,
     bookDelta,
     isCustomized,
+    deviceFormFactor,
     load,
     updateBookSettings,
     updateGlobalSettings,
@@ -424,18 +533,30 @@ export function useReaderSettings(bookFileId: number, format: string) {
 export function useReaderDefaultSettings<T extends ReaderSettings>(format: string) {
   const group = getFormatGroup(format)
   const { user } = useAuth()
+  const { deviceFormFactor } = useReaderDeviceFormFactor()
 
   const settings = ref<T | null>(null)
+  const epubDefaults = ref<EpubReaderDefaultsStorageV2 | null>(null)
   const syncEnabled = computed(() => isReaderSyncEnabled(user.value))
-  const effective = computed<T>(() => (settings.value ?? READER_GROUP_DEFAULTS[group]) as T)
+
+  const effective = computed<T>(() => {
+    if (group === 'epub') {
+      const resolved = resolveEpubDefaultSettings(epubDefaults.value, deviceFormFactor.value)
+      return (resolved ?? READER_GROUP_DEFAULTS[group]) as T
+    }
+    return (settings.value ?? READER_GROUP_DEFAULTS[group]) as T
+  })
 
   const defaultSync = createDebouncedSync(async () => {
-    if (!syncEnabled.value || !settings.value) return
+    if (!syncEnabled.value) return
+
+    const payload = group === 'epub' ? epubDefaults.value : settings.value
+    if (!payload) return
 
     await api(`/api/v1/reader/defaults/${group}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: settings.value }),
+      body: JSON.stringify({ settings: payload }),
     })
   })
 
@@ -443,9 +564,29 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
     void defaultSync.flush()
   })
 
+  function writeDefaultSettingsToLs() {
+    if (group === 'epub') {
+      if (epubDefaults.value) writeLs(lsDefaultKey(group), epubDefaults.value)
+      return
+    }
+    if (settings.value) writeLs(lsDefaultKey(group), settings.value)
+  }
+
   async function load() {
-    const ls = readLs<T>(lsDefaultKey(group))
-    if (ls) {
+    const ls = readLs<unknown>(lsDefaultKey(group))
+
+    if (group === 'epub') {
+      if (ls) {
+        const sanitized = sanitizeEpubDefaultsStorage(ls)
+        if (sanitized) {
+          epubDefaults.value = sanitized
+          if (!jsonEqual(ls, sanitized)) writeDefaultSettingsToLs()
+        } else {
+          epubDefaults.value = null
+          removeLs(lsDefaultKey(group))
+        }
+      }
+    } else if (ls) {
       const sanitized = sanitizeDefaultSettings(group, ls)
       if (sanitized) {
         settings.value = sanitized as T
@@ -461,13 +602,24 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
       if (res.ok) {
         const data = await res.json()
         if (data[group]) {
-          const sanitized = sanitizeDefaultSettings(group, data[group])
-          if (sanitized) {
-            settings.value = sanitized as T
-            writeLs(lsDefaultKey(group), sanitized)
+          if (group === 'epub') {
+            const sanitized = sanitizeEpubDefaultsStorage(data[group])
+            if (sanitized) {
+              epubDefaults.value = sanitized
+              writeDefaultSettingsToLs()
+            } else {
+              epubDefaults.value = null
+              removeLs(lsDefaultKey(group))
+            }
           } else {
-            settings.value = null
-            removeLs(lsDefaultKey(group))
+            const sanitized = sanitizeDefaultSettings(group, data[group])
+            if (sanitized) {
+              settings.value = sanitized as T
+              writeLs(lsDefaultKey(group), sanitized)
+            } else {
+              settings.value = null
+              removeLs(lsDefaultKey(group))
+            }
           }
         }
       }
@@ -475,9 +627,14 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
   }
 
   function update(patch: Partial<T>) {
-    const next = { ...effective.value, ...patch } as T
-    settings.value = group === 'epub' ? (withResolvedEpubHighlights(next) as T) : next
-    writeLs(lsDefaultKey(group), settings.value)
+    if (group === 'epub') {
+      epubDefaults.value = mergeEpubDefaultsStorage(epubDefaults.value, deviceFormFactor.value, patch as Partial<ReaderSettings>)
+      writeDefaultSettingsToLs()
+    } else {
+      const next = { ...effective.value, ...patch } as T
+      settings.value = next
+      writeLs(lsDefaultKey(group), settings.value)
+    }
 
     if (syncEnabled.value) {
       defaultSync.schedule()
@@ -486,7 +643,11 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
 
   function reset() {
     defaultSync.cancel()
-    settings.value = null
+    if (group === 'epub') {
+      epubDefaults.value = null
+    } else {
+      settings.value = null
+    }
     removeLs(lsDefaultKey(group))
 
     if (syncEnabled.value) {
@@ -495,7 +656,7 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
     toast.success('Settings reset to defaults')
   }
 
-  return { effective, load, update, reset }
+  return { effective, deviceFormFactor, load, update, reset }
 }
 
 /** Upload locally cached reader defaults and per-book overrides after enabling account sync. */
@@ -506,8 +667,12 @@ export async function pushLocalReaderPreferencesToBackend(): Promise<void> {
   const defaultGroups: ReaderFormatGroup[] = ['epub', 'pdf', 'cbx', 'audio']
   await Promise.all(
     defaultGroups.map(async (group) => {
-      const settings = readLs<ReaderSettings>(lsDefaultKey(group))
+      const raw = readLs<unknown>(lsDefaultKey(group))
+      if (!raw) return
+
+      const settings = group === 'epub' ? sanitizeEpubDefaultsStorage(raw) : sanitizeDefaultSettings(group, raw)
       if (!settings) return
+
       await api(`/api/v1/reader/defaults/${group}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -523,12 +688,12 @@ export async function pushLocalReaderPreferencesToBackend(): Promise<void> {
       .map(async (key) => {
         const bookFileId = Number(key.slice(bookPrefix.length))
         if (!Number.isFinite(bookFileId)) return
-        const settings = readLs<Partial<ReaderSettings>>(key)
-        if (!settings || Object.keys(settings).length === 0) return
+        const bookSettings = readLs<Partial<ReaderSettings>>(key)
+        if (!bookSettings || Object.keys(bookSettings).length === 0) return
         await api(`/api/v1/reader/preferences/${bookFileId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ settings }),
+          body: JSON.stringify({ settings: bookSettings }),
         }).catch(() => {})
       }),
   )

@@ -35,6 +35,7 @@ export function useFoliate(
   const loading = ref(false)
   const restoring = ref(false)
   const error = ref<string | null>(null)
+  let initialRestoreDone: Promise<void> | undefined
   const fraction = ref(0)
   const viewRef = ref<unknown>(null)
   const bookLanguage = ref<string>('en')
@@ -63,25 +64,42 @@ export function useFoliate(
     format: string,
     cfi?: string | null,
     fallbackFraction?: number,
-    options?: { hasCachedProgress?: boolean },
+    options?: { hasCachedProgress?: boolean; initialSectionIndex?: number },
   ) {
+    let loadTimeoutId: ReturnType<typeof setTimeout> | undefined
+    let resolveInitialRestore: (() => void) | undefined
+    initialRestoreDone = new Promise<void>((resolve) => {
+      resolveInitialRestore = resolve
+    })
+
     const el = container()
-    if (!el) return
+    if (!el) {
+      resolveInitialRestore?.()
+      resolveInitialRestore = undefined
+      return
+    }
 
     const hasCachedProgress = options?.hasCachedProgress ?? false
     restoring.value = hasCachedProgress
     loading.value = !hasCachedProgress
     error.value = null
-
-    let loadTimeoutId: ReturnType<typeof setTimeout> | undefined
     let restoreAfterInitialLoad = false
     const pendingRestore = {
       cfi: cfi ?? null,
       fraction: fallbackFraction,
+      sectionIndex: options?.initialSectionIndex,
     }
-    restoreAfterInitialLoad = !!(pendingRestore.cfi || (pendingRestore.fraction !== undefined && pendingRestore.fraction > 0))
+    restoreAfterInitialLoad = !!(
+      pendingRestore.sectionIndex !== undefined ||
+      pendingRestore.cfi ||
+      (pendingRestore.fraction !== undefined && pendingRestore.fraction > 0)
+    )
 
     async function navigateToRestore(view: { goTo: (target: string | number) => Promise<void>; goToFraction?: (f: number) => void }) {
+      if (pendingRestore.sectionIndex !== undefined) {
+        await view.goTo(pendingRestore.sectionIndex)
+        return
+      }
       if (pendingRestore.cfi) {
         try {
           await view.goTo(pendingRestore.cfi)
@@ -136,9 +154,23 @@ export function useFoliate(
         // new chapter document, not the previous one.
         setTimeout(() => {
           if (onApplyStyles) onApplyStyles(view.renderer)
+          const finishInitialRestore = () => {
+            resolveInitialRestore?.()
+            resolveInitialRestore = undefined
+          }
           if (restoreAfterInitialLoad) {
             restoreAfterInitialLoad = false
             void navigateToRestore(view)
+              .then(() => {
+                const doc = view.renderer?.getContents?.()?.[0]?.doc
+                if (doc) {
+                  onDocumentLoad?.(doc)
+                  input.attachIframeClicks(doc)
+                }
+              })
+              .finally(finishInitialRestore)
+          } else {
+            finishInitialRestore()
           }
         }, 0)
         annotations.reAddAll(view)
@@ -165,6 +197,8 @@ export function useFoliate(
         error.value = detail?.message ?? 'Reader error'
         loading.value = false
         restoring.value = false
+        resolveInitialRestore?.()
+        resolveInitialRestore = undefined
       })
 
       loadTimeoutId = setTimeout(() => {
@@ -172,6 +206,8 @@ export function useFoliate(
           error.value = 'Could not open the book. Your browser may not fully support the reader. Try refreshing or using a different browser.'
           loading.value = false
           restoring.value = false
+          resolveInitialRestore?.()
+          resolveInitialRestore = undefined
         }
       }, 30_000)
 
@@ -205,7 +241,13 @@ export function useFoliate(
       error.value = e instanceof Error ? e.message : 'Failed to open book'
       loading.value = false
       restoring.value = false
+      resolveInitialRestore?.()
+      resolveInitialRestore = undefined
     }
+  }
+
+  async function waitForInitialRestore() {
+    await initialRestoreDone
   }
 
   function getViewEl() {
@@ -242,7 +284,7 @@ export function useFoliate(
       format: string,
       cfi?: string | null,
       fallbackFraction?: number,
-      options?: { hasCachedProgress?: boolean },
+      options?: { hasCachedProgress?: boolean; initialSectionIndex?: number },
     ) => open(bookId, fileId, format, cfi, fallbackFraction, options),
     prev: () => getViewEl()?.prev?.(),
     next: () => getViewEl()?.next?.(),
@@ -253,6 +295,7 @@ export function useFoliate(
     getChapters: (): unknown[] => getViewEl()?.book?.toc ?? [],
     getRenderer: (): FoliateRenderer | null => getViewEl()?.renderer ?? null,
     getActiveDocument: (): Document | null => getViewEl()?.renderer?.getContents?.()?.[0]?.doc ?? null,
+    waitForInitialRestore,
     addAnnotation: (cfi: string, color = '#FACC15', style = 'highlight') => annotations.addAnnotation(viewRef.value, cfi, color, style),
     addAnnotations: (anns: { cfi: string; color: string; style: string }[]) => annotations.addAnnotations(viewRef.value, anns),
     deleteAnnotation: (cfi: string) => annotations.deleteAnnotation(viewRef.value, cfi),
