@@ -15,10 +15,10 @@ vi.mock('vue-sonner', () => ({
 
 vi.mock('@jofr/capacitor-media-session', () => ({
   MediaSession: {
-    setMetadata: vi.fn(async () => undefined),
-    setPlaybackState: vi.fn(async () => undefined),
-    setActionHandler: vi.fn(async () => undefined),
-    setPositionState: vi.fn(async () => undefined),
+    setMetadata: vi.fn<() => Promise<void>>(),
+    setPlaybackState: vi.fn<() => Promise<void>>(),
+    setActionHandler: vi.fn<() => Promise<void>>(),
+    setPositionState: vi.fn<() => Promise<void>>(),
   },
 }))
 
@@ -72,7 +72,7 @@ class FakeDynamicsCompressorNode {
   ratio = { value: 0 }
   attack = { value: 0 }
   release = { value: 0 }
-  connect = vi.fn((target?: unknown) => target ?? {}) as ReturnType<typeof vi.fn>
+  connect = vi.fn<(target?: unknown) => unknown>((target) => target ?? {})
   disconnect = vi.fn<() => void>()
 }
 
@@ -221,8 +221,8 @@ describe('useEpubTts cloud playback', () => {
     vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
       const audio = document.createElement('audio')
       if (src) audio.src = src
-      audio.play = vi.fn(async () => undefined) as typeof audio.play
-      audio.pause = vi.fn() as typeof audio.pause
+      audio.play = vi.fn<() => Promise<void>>() as typeof audio.play
+      audio.pause = vi.fn<() => void>() as typeof audio.pause
       Object.defineProperty(audio, 'paused', { configurable: true, value: true })
       return audio
     } as unknown as typeof Audio)

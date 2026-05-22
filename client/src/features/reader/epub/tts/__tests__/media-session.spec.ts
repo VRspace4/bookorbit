@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mediaSessionMock = vi.hoisted(() => ({
-  setMetadata: vi.fn(async () => undefined),
-  setPlaybackState: vi.fn(async () => undefined),
-  setActionHandler: vi.fn(async () => undefined),
-  setPositionState: vi.fn(async () => undefined),
+  setMetadata: vi.fn<() => Promise<void>>(),
+  setPlaybackState: vi.fn<() => Promise<void>>(),
+  setActionHandler: vi.fn<() => Promise<void>>(),
+  setPositionState: vi.fn<() => Promise<void>>(),
 }))
 
 vi.mock('@jofr/capacitor-media-session', () => ({
@@ -28,8 +28,8 @@ describe('tts media session', () => {
     vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
       const audio = document.createElement('audio')
       if (src) audio.src = src
-      audio.play = vi.fn(async () => undefined) as typeof audio.play
-      audio.pause = vi.fn() as typeof audio.pause
+      audio.play = vi.fn<() => Promise<void>>() as typeof audio.play
+      audio.pause = vi.fn<() => void>() as typeof audio.pause
       Object.defineProperty(audio, 'paused', { configurable: true, value: true })
       return audio
     } as unknown as typeof Audio)
@@ -60,8 +60,8 @@ describe('tts media session', () => {
       replay: () => {
         status = 'speaking'
       },
-      skipBackward: vi.fn(),
-      skipForward: vi.fn(),
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
     })
 
     const handlers = new Map<string, () => void>()
@@ -103,8 +103,8 @@ describe('tts media session', () => {
       replay: () => {
         status = 'speaking'
       },
-      skipBackward: vi.fn(),
-      skipForward: vi.fn(),
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
     })
 
     const handlers = new Map<string, () => void>()
@@ -130,19 +130,19 @@ describe('tts media session', () => {
     initTtsMediaSession()
     await Promise.resolve()
 
-    const pause = vi.fn()
-    const resume = vi.fn()
-    const skipBackward = vi.fn()
+    const pause = vi.fn<() => void>()
+    const resume = vi.fn<() => void>()
+    const skipBackward = vi.fn<() => void>()
 
     registerTtsMediaSessionController({
       getStatus: () => 'idle',
       getChapterTitle: () => 'Chapter 1',
       pause,
       resume,
-      stop: vi.fn(),
-      replay: vi.fn(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
       skipBackward,
-      skipForward: vi.fn(),
+      skipForward: vi.fn<() => void>(),
     })
 
     const handlers = new Map<string, () => void>()
@@ -164,19 +164,19 @@ describe('tts media session', () => {
     initTtsMediaSession()
     await Promise.resolve()
 
-    const pause = vi.fn()
-    const resume = vi.fn()
-    const skipBackward = vi.fn()
+    const pause = vi.fn<() => void>()
+    const resume = vi.fn<() => void>()
+    const skipBackward = vi.fn<() => void>()
 
     registerTtsMediaSessionController({
       getStatus: () => 'paused',
       getChapterTitle: () => 'Chapter 1',
       pause,
       resume,
-      stop: vi.fn(),
-      replay: vi.fn(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
       skipBackward,
-      skipForward: vi.fn(),
+      skipForward: vi.fn<() => void>(),
     })
 
     suppressTtsMediaSession()
@@ -200,16 +200,16 @@ describe('tts media session', () => {
     initTtsMediaSession()
     await Promise.resolve()
 
-    const skipBackward = vi.fn()
-    const skipForward = vi.fn()
+    const skipBackward = vi.fn<() => void>()
+    const skipForward = vi.fn<() => void>()
 
     registerTtsMediaSessionController({
       getStatus: () => 'speaking',
       getChapterTitle: () => 'Chapter 1',
-      pause: vi.fn(),
-      resume: vi.fn(),
-      stop: vi.fn(),
-      replay: vi.fn(),
+      pause: vi.fn<() => void>(),
+      resume: vi.fn<() => void>(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
       skipBackward,
       skipForward,
     })
@@ -233,16 +233,16 @@ describe('tts media session', () => {
     initTtsMediaSession()
     await Promise.resolve()
 
-    const skipBackward = vi.fn()
-    const skipForward = vi.fn()
+    const skipBackward = vi.fn<() => void>()
+    const skipForward = vi.fn<() => void>()
 
     registerTtsMediaSessionController({
       getStatus: () => 'speaking',
       getChapterTitle: () => 'Chapter 1',
-      pause: vi.fn(),
-      resume: vi.fn(),
-      stop: vi.fn(),
-      replay: vi.fn(),
+      pause: vi.fn<() => void>(),
+      resume: vi.fn<() => void>(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
       skipBackward,
       skipForward,
     })
@@ -264,16 +264,16 @@ describe('tts media session', () => {
     initTtsMediaSession()
     await Promise.resolve()
 
-    const skipBackward = vi.fn()
-    const skipForward = vi.fn()
+    const skipBackward = vi.fn<() => void>()
+    const skipForward = vi.fn<() => void>()
 
     registerTtsMediaSessionController({
       getStatus: () => 'idle',
       getChapterTitle: () => 'Chapter 1',
-      pause: vi.fn(),
-      resume: vi.fn(),
-      stop: vi.fn(),
-      replay: vi.fn(),
+      pause: vi.fn<() => void>(),
+      resume: vi.fn<() => void>(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
       skipBackward,
       skipForward,
     })
@@ -296,12 +296,12 @@ describe('tts media session', () => {
     registerTtsMediaSessionController({
       getStatus: () => 'speaking',
       getChapterTitle: () => 'Chapter 2',
-      pause: vi.fn(),
-      resume: vi.fn(),
-      stop: vi.fn(),
-      replay: vi.fn(),
-      skipBackward: vi.fn(),
-      skipForward: vi.fn(),
+      pause: vi.fn<() => void>(),
+      resume: vi.fn<() => void>(),
+      stop: vi.fn<() => void>(),
+      replay: vi.fn<() => void>(),
+      skipBackward: vi.fn<() => void>(),
+      skipForward: vi.fn<() => void>(),
     })
     syncTtsMediaSession()
     await Promise.resolve()

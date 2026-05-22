@@ -4,13 +4,7 @@ import type { EpubReaderSettings, TtsProvider } from '@bookorbit/types'
 import { api } from '@/lib/api'
 import { useTtsCredentials } from '../tts/credentials'
 import { AZURE_DEFAULT_VOICE, GCP_CHIRP3_DEFAULT_VOICE, GPT_4O_MINI_TTS_DEFAULT_VOICE, KOKORO_DEFAULT_VOICE, XAI_DEFAULT_VOICE } from '../tts/voices'
-import {
-  initTtsMediaSession,
-  registerTtsMediaSessionController,
-  suppressTtsMediaSession,
-  syncTtsMediaSession,
-  unsuppressTtsMediaSession,
-} from '../tts/media-session'
+import { registerTtsMediaSessionController, suppressTtsMediaSession, syncTtsMediaSession, unsuppressTtsMediaSession } from '../tts/media-session'
 import { buildPreparedAudioCacheKey, getOrCreatePreparedAudio } from '../tts/tts-audio-cache'
 import { createTtsOutputChain } from '../tts/tts-audio-output'
 import {
@@ -25,7 +19,6 @@ import { useTtsUsage } from '../tts/tts-usage'
 import {
   buildWordIndex,
   clearTtsHighlight,
-  findFirstVisibleWordIndex,
   findSentenceForWord,
   findWordIndexAtPoint,
   highlightWord,
@@ -427,7 +420,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
       return
     }
 
-    const currentRoot = root!
     const restoredIndex = fromIndex ?? restoreWordIndex()
     const startIndex = Math.min(Math.max(0, restoredIndex ?? 0), Math.max(0, words.length - 1))
     const sentence = findSentenceForWord(sentences, startIndex)

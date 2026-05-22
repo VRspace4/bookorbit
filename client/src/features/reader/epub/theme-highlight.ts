@@ -57,7 +57,7 @@ export function buildThemeHighlightPatch(
 
   return {
     themeHighlightColors: {
-      ...(settings.themeHighlightColors ?? {}),
+      ...settings.themeHighlightColors,
       [themeName]: next,
     },
     ...(themeName === settings.themeName ? next : {}),

@@ -26,14 +26,14 @@ function mockViewport(width: number) {
     configurable: true,
   })
 
-  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+  window.matchMedia = vi.fn<(query: string) => MediaQueryList>().mockImplementation((query: string) => ({
     matches: query === '(min-width: 768px)' ? width >= 768 : false,
     media: query,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    addListener: vi.fn(),
-    removeListener: vi.fn(),
-    dispatchEvent: vi.fn(),
+    addEventListener: vi.fn<() => void>(),
+    removeEventListener: vi.fn<() => void>(),
+    addListener: vi.fn<() => void>(),
+    removeListener: vi.fn<() => void>(),
+    dispatchEvent: vi.fn<() => boolean>(),
   })) as typeof window.matchMedia
 }
 

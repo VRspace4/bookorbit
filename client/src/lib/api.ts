@@ -1,5 +1,4 @@
 import type { RefreshResponse } from '@bookorbit/types'
-import { shouldRefreshAccessToken } from '@/features/auth/lib/access-token'
 
 const ACCESS_TOKEN_STORAGE_KEY = 'bookorbit:access-token'
 

@@ -22,7 +22,12 @@ const settings: EpubReaderSettings = {
 describe('tts-audio-cache', () => {
   it('deduplicates in-flight synthesis for the same sentence', async () => {
     clearPreparedAudioCache()
-    const factory = vi.fn(async () => ({
+    const factory = vi.fn<
+      () => Promise<{
+        sentence: { text: string; wordStartIdx: number; wordEndIdxExclusive: number }
+        buffer: AudioBuffer
+      }>
+    >(async () => ({
       sentence: { text: 'Hello world.', wordStartIdx: 0, wordEndIdxExclusive: 2 },
       buffer: {} as AudioBuffer,
     }))
