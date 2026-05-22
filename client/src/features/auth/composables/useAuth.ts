@@ -1,19 +1,35 @@
 import { ref } from 'vue'
 import type { AuthUser, AuthResponse } from '@bookorbit/types'
-import { api, refreshAccessToken, setAccessToken, setOnAuthFailure } from '@/lib/api'
+import { api, getAccessToken, hydrateAccessTokenFromStorage, refreshAccessToken, setAccessToken, setOnAuthFailure } from '@/lib/api'
 import router from '@/router'
 import { useSetupStatus } from './useSetupStatus'
 import { disconnectAuthorEnrichmentSocket } from '@/features/settings/composables/useAuthorEnrichmentStatus'
 import { disconnectBookMetadataFetchSocket } from '@/features/book-metadata-fetch/composables/useBookMetadataFetchStatus'
+import { clearBookorbitRuntimeCaches, clearPwaUserState } from '@/features/pwa/lib/native-app'
+import { shouldRefreshAccessToken } from '../lib/access-token'
 
 const SESSION_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+const FOREGROUND_REFRESH_DEBOUNCE_MS = 30 * 1000
 
 const user = ref<AuthUser | null>(null)
 const isLoading = ref(false)
 let sessionRefreshTimer: number | null = null
+let lastForegroundRefreshAt = 0
 
 function canRefreshSession() {
   return user.value && (typeof document === 'undefined' || document.visibilityState === 'visible')
+}
+
+function needsSessionRefresh() {
+  return canRefreshSession() && shouldRefreshAccessToken(getAccessToken())
+}
+
+function shouldRefreshOnForeground() {
+  if (!needsSessionRefresh()) return false
+  const now = Date.now()
+  if (now - lastForegroundRefreshAt < FOREGROUND_REFRESH_DEBOUNCE_MS) return false
+  lastForegroundRefreshAt = now
+  return true
 }
 
 function stopSessionRefresh() {
@@ -26,7 +42,7 @@ function stopSessionRefresh() {
 function startSessionRefresh() {
   stopSessionRefresh()
   sessionRefreshTimer = window.setInterval(() => {
-    if (!canRefreshSession()) return
+    if (!needsSessionRefresh()) return
     void refreshAccessToken().catch(() => {
       // Let the next foreground API request decide whether the session is gone.
     })
@@ -35,7 +51,7 @@ function startSessionRefresh() {
 
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
-    if (!canRefreshSession()) return
+    if (!shouldRefreshOnForeground()) return
     void refreshAccessToken().catch(() => {
       // Best-effort refresh after a sleeping tab wakes up.
     })
@@ -46,6 +62,8 @@ function clearAuth() {
   stopSessionRefresh()
   user.value = null
   setAccessToken(null)
+  clearPwaUserState()
+  void clearBookorbitRuntimeCaches()
   disconnectAuthorEnrichmentSocket()
   disconnectBookMetadataFetchSocket()
 }
@@ -66,6 +84,17 @@ export function useAuth() {
   async function init(): Promise<void> {
     isLoading.value = true
     try {
+      hydrateAccessTokenFromStorage()
+      if (getAccessToken() && !shouldRefreshAccessToken(getAccessToken())) {
+        try {
+          await me()
+          startSessionRefresh()
+          return
+        } catch {
+          // Fall back to refresh if the cached token is no longer valid.
+        }
+      }
+
       const res = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'include' })
       if (!res.ok) return
       const { accessToken } = await res.json()

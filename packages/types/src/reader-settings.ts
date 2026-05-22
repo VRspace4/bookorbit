@@ -1,4 +1,5 @@
 export type ReaderFormatGroup = "epub" | "pdf" | "cbx" | "audio";
+export type TtsProvider = "browser" | "azure" | "gcp-chirp3" | "xai" | "kokoro" | "gpt-4o-mini-tts";
 
 // Formats the reader can actually open. Used to show/hide Read/Open buttons.
 export const READER_OPENABLE_FORMATS = new Set([
@@ -47,6 +48,14 @@ export function getFormatGroup(format: string): ReaderFormatGroup {
   return FORMAT_TO_GROUP[format.toLowerCase()] ?? "epub";
 }
 
+export const DEFAULT_TTS_SENTENCE_HIGHLIGHT_COLOR = "#4f6f7d";
+export const DEFAULT_TTS_WORD_HIGHLIGHT_COLOR = "#0f4f5f";
+
+export interface ThemeHighlightColors {
+  ttsSentenceHighlightColor: string;
+  ttsWordHighlightColor: string;
+}
+
 export interface EpubReaderSettings {
   themeName: string; // matches one of the reader's built-in theme names
   isDark: boolean;
@@ -65,6 +74,23 @@ export interface EpubReaderSettings {
   overrideBookFormatting: boolean;
   // In-page footer display mode: 0 = pages, 1 = time remaining + session, 2 = chapter info
   footerDisplayMode: 0 | 1 | 2;
+  ttsProvider: TtsProvider;
+  ttsVoice: string | null;
+  ttsRate: number;
+  ttsPitch: number;
+  ttsVolume: number;
+  ttsGcpChirp3Voice: string;
+  ttsAzureVoice: string;
+  ttsXaiVoice: string;
+  ttsKokoroVoice: string;
+  ttsGpt4oMiniVoice: string;
+  ttsSkipBackSeconds: number;
+  ttsSkipForwardSeconds: number;
+  /** Per-theme TTS highlight overrides keyed by theme name. */
+  themeHighlightColors?: Record<string, ThemeHighlightColors>;
+  /** Effective highlight colors for the current theme (derived from theme defaults + overrides). */
+  ttsSentenceHighlightColor: string;
+  ttsWordHighlightColor: string;
 }
 
 export interface PdfReaderSettings {
@@ -117,6 +143,20 @@ export const EPUB_READER_DEFAULTS: EpubReaderSettings = {
   flow: "paginated",
   overrideBookFormatting: true,
   footerDisplayMode: 0,
+  ttsProvider: "kokoro",
+  ttsVoice: null,
+  ttsRate: 1,
+  ttsPitch: 1,
+  ttsVolume: 1,
+  ttsGcpChirp3Voice: "en-US-Chirp3-HD-Kore",
+  ttsAzureVoice: "en-US-JennyNeural",
+  ttsXaiVoice: "Eve",
+  ttsKokoroVoice: "af_bella",
+  ttsGpt4oMiniVoice: "coral",
+  ttsSkipBackSeconds: 15,
+  ttsSkipForwardSeconds: 30,
+  ttsSentenceHighlightColor: DEFAULT_TTS_SENTENCE_HIGHLIGHT_COLOR,
+  ttsWordHighlightColor: DEFAULT_TTS_WORD_HIGHLIGHT_COLOR,
 };
 
 export const PDF_READER_DEFAULTS: PdfReaderSettings = {

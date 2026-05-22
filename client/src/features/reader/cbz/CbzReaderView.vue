@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { type Component, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import {
   AlignJustify,
   ArrowDownUp,
@@ -30,6 +30,7 @@ import { useCbz } from './composables/useCbz'
 import { useCbzSettings } from './composables/useCbzSettings'
 import type { BgColor, Direction, FitMode, ScrollMode, SpreadAlignment, ViewMode, WidePageSingletonMode } from './composables/useCbzSettings'
 import { useReaderSettings } from '../shared/composables/useReaderSettings'
+import { exitReader } from '../shared/lib/reader-navigation'
 import type { CbxReaderSettings } from '@bookorbit/types'
 import { DEFAULT_WIDE_PAGE_RATIO_THRESHOLD, createCbzSpreadLayout } from './lib/spread-layout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -39,6 +40,11 @@ const TWO_PAGE_BREAKPOINT = 900
 
 const props = defineProps<{ bookId: number; fileId: number }>()
 const router = useRouter()
+
+async function handleBack() {
+  await progress.flush()
+  await exitReader(router)
+}
 
 const { headerVisible, footerVisible, handleMiddleTap, showHeader, showFooter, setVisibilityLock } = useVisibility()
 
@@ -499,18 +505,13 @@ const sliderTicks = computed(() => {
 })
 
 // ── Progress save ──────────────────────────────────────────────────────────────
-let saveTimer: ReturnType<typeof setTimeout> | null = null
-
 watch(currentPage, (page) => {
   schedulePreload(page)
   onActivity()
 
-  if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    progress.pageNumber.value = page + 1
-    progress.percentage.value = progressPercent.value
-    progress.save()
-  }, 2000)
+  progress.pageNumber.value = page + 1
+  progress.percentage.value = progressPercent.value
+  progress.scheduleSave()
 })
 
 function onResize() {
@@ -553,11 +554,15 @@ onMounted(async () => {
   schedulePreload(currentPage.value)
 })
 
+onBeforeRouteLeave(async () => {
+  await progress.flush()
+  return true
+})
+
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
   window.removeEventListener('keydown', onKeyDown)
   io?.disconnect()
-  if (saveTimer) clearTimeout(saveTimer)
   if (forceToggleHighlightTimer) clearTimeout(forceToggleHighlightTimer)
 })
 </script>
@@ -570,7 +575,7 @@ onUnmounted(() => {
       :class="headerVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'"
     >
       <div class="h-12 flex items-center gap-1 px-3 bg-background/90 backdrop-blur-md border-b border-border">
-        <button class="viewer-btn" @click="router.back()"><ArrowLeft :size="16" /></button>
+        <button class="viewer-btn" @click="handleBack()"><ArrowLeft :size="16" /></button>
         <div class="flex-1 min-w-0 flex flex-col justify-center px-2">
           <span v-if="bookTitle" class="text-sm font-serif text-foreground truncate leading-tight">{{ bookTitle }}</span>
           <span class="text-xs text-muted-foreground tabular-nums">{{ pageLabel }}</span>

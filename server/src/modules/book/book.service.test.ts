@@ -1555,7 +1555,7 @@ describe('BookService', () => {
 
       await service.saveProgress(user.id, 7, { percentage: 25, positionSeconds: 900 } as never, user);
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 7, null, null, 25, 900);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 7, null, null, 25, 900, undefined, undefined);
     });
 
     it('passes null positionSeconds when not provided in DTO', async () => {
@@ -1569,7 +1569,7 @@ describe('BookService', () => {
 
       await service.saveProgress(user.id, 8, { percentage: 50 } as never, user);
 
-      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null);
+      expect(bookRepo.upsertProgress).toHaveBeenCalledWith(user.id, 8, null, null, 50, null, undefined, undefined);
     });
   });
 

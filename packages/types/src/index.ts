@@ -39,3 +39,5 @@ export * from "./achievement";
 export * from "./reading-session";
 export * from "./annotation";
 export * from "./hardcover";
+export * from "./tts-config";
+export * from "./tts-usage";

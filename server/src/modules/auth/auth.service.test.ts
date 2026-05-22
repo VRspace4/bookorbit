@@ -497,6 +497,7 @@ describe('AuthService', () => {
         userId: 5,
         revokedAt: null,
         expiresAt: new Date(Date.now() + 60_000),
+        createdAt: new Date(Date.now() - 10 * 60 * 1000),
       });
       (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
         id: 5,
@@ -509,6 +510,33 @@ describe('AuthService', () => {
       expect(db.update).toHaveBeenCalled();
       expect(oidcSessionRepo.touchActiveByUserId).toHaveBeenCalledWith(5, expect.any(Date));
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalled();
+    });
+
+    it('reuses a recent refresh token during short foreground switches', async () => {
+      const { service, db } = makeService();
+      const reply = makeReply();
+      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+        id: 11,
+        userId: 5,
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+        createdAt: new Date(),
+      });
+      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
+        id: 5,
+        tokenVersion: 2,
+        active: true,
+        provisioningMethod: 'local',
+      });
+
+      const result = await service.refresh(makeRequest({ refresh_token: 'ok-token' }), reply);
+      expect(result).toEqual({ accessToken: 'signed-jwt' });
+      expect(db.update).not.toHaveBeenCalled();
+      expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
+        'access_token',
+        'signed-jwt',
+        expect.objectContaining({ path: '/api' }),
+      );
     });
   });
 

@@ -32,6 +32,7 @@ import { useAudioQueue } from './composables/useAudioQueue'
 import { useAudioSettings } from './composables/useAudioSettings'
 import { useAudioBookmarks, type AudioBookmark } from './composables/useAudioBookmarks'
 import { useReadingSession } from '../shared/composables/useReadingSession'
+import { exitReader } from '../shared/lib/reader-navigation'
 
 const props = defineProps<{ bookId: number; fileId: number }>()
 const router = useRouter()
@@ -49,6 +50,11 @@ const sleepButtonRef = ref<HTMLButtonElement | null>(null)
 const speedButtonRef = ref<HTMLButtonElement | null>(null)
 const sleepPopoverStyle = ref<Record<string, string>>({})
 const speedPopoverStyle = ref<Record<string, string>>({})
+
+async function handleBack() {
+  progress.flush()
+  await exitReader(router)
+}
 
 // Reset chapters tab to default when sheet closes
 watch(showChapters, (val) => {
@@ -758,7 +764,7 @@ onMounted(async () => {
       <div class="text-center max-w-sm">
         <p class="text-sm font-medium text-white mb-2">Failed to load audiobook</p>
         <p class="text-xs text-white/50 mb-4">{{ error }}</p>
-        <button class="text-sm text-white/80 underline" @click="router.back">Go back</button>
+        <button class="text-sm text-white/80 underline" @click="handleBack">Go back</button>
       </div>
     </div>
 
@@ -767,7 +773,7 @@ onMounted(async () => {
       <div class="relative z-10 flex flex-col h-full text-white">
         <!-- Header -->
         <div class="flex items-center gap-2 px-3 py-3 shrink-0">
-          <button class="p-2 rounded-full hover:bg-white/10 transition-colors" @click="router.back">
+          <button class="p-2 rounded-full hover:bg-white/10 transition-colors" @click="handleBack">
             <ChevronLeft class="w-5 h-5" />
           </button>
           <div class="flex-1 min-w-0 px-1">

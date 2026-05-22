@@ -22,7 +22,7 @@ export interface FoliateRenderer {
   setStyles?: (css: string) => void
   setAttribute: (name: string, value: string) => void
   removeAttribute: (name: string) => void
-  getContents?: () => { index: number }[]
+  getContents?: () => { index?: number; doc?: Document }[]
 }
 
 export function useFoliate(
@@ -30,8 +30,10 @@ export function useFoliate(
   onRelocate?: (detail: RelocateDetail) => void,
   onApplyStyles?: (renderer: FoliateRenderer) => void,
   onMiddleTap?: () => void,
+  onDocumentLoad?: (doc: Document) => void,
 ) {
   const loading = ref(false)
+  const restoring = ref(false)
   const error = ref<string | null>(null)
   const fraction = ref(0)
   const viewRef = ref<unknown>(null)
@@ -55,14 +57,45 @@ export function useFoliate(
     await customElements.whenDefined('foliate-view')
   }
 
-  async function open(bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number) {
+  async function open(
+    bookId: number,
+    fileId: number,
+    format: string,
+    cfi?: string | null,
+    fallbackFraction?: number,
+    options?: { hasCachedProgress?: boolean },
+  ) {
     const el = container()
     if (!el) return
 
-    loading.value = true
+    const hasCachedProgress = options?.hasCachedProgress ?? false
+    restoring.value = hasCachedProgress
+    loading.value = !hasCachedProgress
     error.value = null
 
     let loadTimeoutId: ReturnType<typeof setTimeout> | undefined
+    let restoreAfterInitialLoad = false
+    const pendingRestore = {
+      cfi: cfi ?? null,
+      fraction: fallbackFraction,
+    }
+    restoreAfterInitialLoad = !!(pendingRestore.cfi || (pendingRestore.fraction !== undefined && pendingRestore.fraction > 0))
+
+    async function navigateToRestore(view: { goTo: (target: string | number) => Promise<void>; goToFraction?: (f: number) => void }) {
+      if (pendingRestore.cfi) {
+        try {
+          await view.goTo(pendingRestore.cfi)
+          return
+        } catch {
+          // fall through to fraction/start
+        }
+      }
+      if (pendingRestore.fraction !== undefined && pendingRestore.fraction > 0) {
+        view.goToFraction?.(pendingRestore.fraction)
+        return
+      }
+      await view.goTo(0).catch(() => {})
+    }
 
     try {
       await loadScript()
@@ -87,6 +120,7 @@ export function useFoliate(
       el.innerHTML = ''
       el.appendChild(view)
       viewRef.value = view
+      input.attachViewTouches(view)
 
       // Safety timeout: if the 'load' event never fires (e.g. service worker or
       // iframe restrictions on iOS), clear the loading state with a helpful message
@@ -96,14 +130,22 @@ export function useFoliate(
         const detail = (e as CustomEvent).detail
         clearTimeout(loadTimeoutId)
         loading.value = false
+        restoring.value = false
         // The paginator's internal #view reference is updated in a microtask after the
         // 'load' event fires. Deferring to a macrotask ensures setStyles targets the
         // new chapter document, not the previous one.
         setTimeout(() => {
           if (onApplyStyles) onApplyStyles(view.renderer)
+          if (restoreAfterInitialLoad) {
+            restoreAfterInitialLoad = false
+            void navigateToRestore(view)
+          }
         }, 0)
         annotations.reAddAll(view)
-        if (detail?.doc) input.attachIframeClicks(detail.doc)
+        if (detail?.doc) {
+          onDocumentLoad?.(detail.doc)
+          input.attachIframeClicks(detail.doc)
+        }
       })
 
       view.addEventListener('draw-annotation', (e: Event) => {
@@ -122,12 +164,14 @@ export function useFoliate(
         clearTimeout(loadTimeoutId)
         error.value = detail?.message ?? 'Reader error'
         loading.value = false
+        restoring.value = false
       })
 
       loadTimeoutId = setTimeout(() => {
         if (loading.value) {
           error.value = 'Could not open the book. Your browser may not fully support the reader. Try refreshing or using a different browser.'
           loading.value = false
+          restoring.value = false
         }
       }, 30_000)
 
@@ -154,18 +198,13 @@ export function useFoliate(
         await view.open(file)
       }
       if (onApplyStyles) onApplyStyles(view.renderer)
-      if (cfi) {
-        await view.goTo(cfi).catch(() => {})
-      } else if (fallbackFraction !== undefined && fallbackFraction > 0) {
-        view.goToFraction?.(fallbackFraction)
-      } else {
-        await view.goTo(0).catch(() => {})
-      }
+      await view.goTo(0).catch(() => {})
     } catch (e) {
       console.error('[useFoliate]', e)
       clearTimeout(loadTimeoutId)
       error.value = e instanceof Error ? e.message : 'Failed to open book'
       loading.value = false
+      restoring.value = false
     }
   }
 
@@ -192,12 +231,19 @@ export function useFoliate(
 
   return {
     loading,
+    restoring,
     error,
     fraction,
     bookLanguage,
     view: viewRef,
-    open: (bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number) =>
-      open(bookId, fileId, format, cfi, fallbackFraction),
+    open: (
+      bookId: number,
+      fileId: number,
+      format: string,
+      cfi?: string | null,
+      fallbackFraction?: number,
+      options?: { hasCachedProgress?: boolean },
+    ) => open(bookId, fileId, format, cfi, fallbackFraction, options),
     prev: () => getViewEl()?.prev?.(),
     next: () => getViewEl()?.next?.(),
     goTo: (t: string | number) => getViewEl()?.goTo?.(t),
@@ -206,6 +252,7 @@ export function useFoliate(
     getSectionFractions: (): number[] => getViewEl()?.getSectionFractions?.() ?? [],
     getChapters: (): unknown[] => getViewEl()?.book?.toc ?? [],
     getRenderer: (): FoliateRenderer | null => getViewEl()?.renderer ?? null,
+    getActiveDocument: (): Document | null => getViewEl()?.renderer?.getContents?.()?.[0]?.doc ?? null,
     addAnnotation: (cfi: string, color = '#FACC15', style = 'highlight') => annotations.addAnnotation(viewRef.value, cfi, color, style),
     addAnnotations: (anns: { cfi: string; color: string; style: string }[]) => annotations.addAnnotations(viewRef.value, anns),
     deleteAnnotation: (cfi: string) => annotations.deleteAnnotation(viewRef.value, cfi),

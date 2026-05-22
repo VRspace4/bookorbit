@@ -197,6 +197,20 @@ describe('ReaderPreferencesService', () => {
       flow: 'paginated' as const,
       overrideBookFormatting: true,
       footerDisplayMode: 0 as const,
+      ttsProvider: 'kokoro' as const,
+      ttsVoice: null,
+      ttsRate: 1,
+      ttsPitch: 1,
+      ttsVolume: 1,
+      ttsGcpChirp3Voice: 'en-US-Chirp3-HD-Kore',
+      ttsAzureVoice: 'en-US-JennyNeural',
+      ttsXaiVoice: 'Eve',
+      ttsKokoroVoice: 'af_bella',
+      ttsGpt4oMiniVoice: 'coral',
+      ttsSkipBackSeconds: 15,
+      ttsSkipForwardSeconds: 30,
+      ttsSentenceHighlightColor: '#4f6f7d',
+      ttsWordHighlightColor: '#0f4f5f',
     };
 
     it('accepts valid footerDisplayMode values (0, 1, 2) in full epub defaults', async () => {
@@ -235,6 +249,50 @@ describe('ReaderPreferencesService', () => {
       delete (withoutFooterMode as Record<string, unknown>).footerDisplayMode;
 
       await expect(service.upsertDefault(1, 'epub', withoutFooterMode)).rejects.toThrow(BadRequestException);
+    });
+
+    it('accepts valid partial epub tts settings', async () => {
+      const user = makeUser();
+      mockBookService.verifyFileAccess.mockResolvedValueOnce({ format: 'epub' });
+
+      await service.upsertPreference(user, 22, { ttsProvider: 'kokoro', ttsRate: 1.4, ttsVoice: null });
+
+      expect(mockRepo.upsertPreference).toHaveBeenCalledWith(7, 22, { ttsProvider: 'kokoro', ttsRate: 1.4, ttsVoice: null });
+    });
+
+    it('rejects invalid epub tts colors', async () => {
+      const user = makeUser();
+      mockBookService.verifyFileAccess.mockResolvedValueOnce({ format: 'epub' });
+
+      await expect(service.upsertPreference(user, 23, { ttsWordHighlightColor: 'blue' })).rejects.toThrow(BadRequestException);
+      expect(mockRepo.upsertPreference).not.toHaveBeenCalled();
+    });
+
+    it('accepts per-theme highlight overrides in full epub defaults', async () => {
+      mockRepo.upsertDefault.mockResolvedValue(undefined);
+
+      await service.upsertDefault(1, 'epub', {
+        ...validEpubDefaults,
+        themeHighlightColors: {
+          sepia: {
+            ttsSentenceHighlightColor: '#aa0000',
+            ttsWordHighlightColor: '#bb0000',
+          },
+        },
+      });
+
+      expect(mockRepo.upsertDefault).toHaveBeenCalledWith(
+        1,
+        'epub',
+        expect.objectContaining({
+          themeHighlightColors: {
+            sepia: {
+              ttsSentenceHighlightColor: '#aa0000',
+              ttsWordHighlightColor: '#bb0000',
+            },
+          },
+        }),
+      );
     });
   });
 });

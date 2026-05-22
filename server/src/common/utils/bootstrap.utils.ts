@@ -35,7 +35,17 @@ export function buildCspDirectives(options: CspOptions = {}) {
   const { allowCloudflareInsights = false } = options;
 
   const scriptSrc = ["'self'", "'wasm-unsafe-eval'", ...(allowCloudflareInsights ? [CLOUDFLARE_INSIGHTS_SCRIPT_SRC] : [])];
-  const connectSrc = ["'self'", 'ws:', 'wss:', 'https://cdn.jsdelivr.net', ...(allowCloudflareInsights ? [CLOUDFLARE_INSIGHTS_CONNECT_SRC] : [])];
+  const connectSrc = [
+    "'self'",
+    'ws:',
+    'wss:',
+    'https://cdn.jsdelivr.net',
+    'https://*.api.cognitive.microsoft.com',
+    'https://*.tts.speech.microsoft.com',
+    'https://*.voice.speech.microsoft.com',
+    'https://*.cognitiveservices.azure.com',
+    ...(allowCloudflareInsights ? [CLOUDFLARE_INSIGHTS_CONNECT_SRC] : []),
+  ];
 
   return {
     defaultSrc: ["'self'"],

@@ -126,6 +126,8 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(SaveProgressDto, { percentage: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, cfi: 123 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 'five' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 10, ttsSectionIndex: 2, ttsWordIndex: 15 })).length).toBe(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 10, ttsWordIndex: -1 })).length).toBeGreaterThan(0);
   });
 
   it('requires non-empty search text and bounds search limit', async () => {

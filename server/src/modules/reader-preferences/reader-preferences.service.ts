@@ -9,6 +9,14 @@ import { ReaderPreferencesRepository } from './reader-preferences.repository';
 const VALID_FORMAT_GROUPS = Object.keys(READER_GROUP_DEFAULTS) as ReaderFormatGroup[];
 const VALID_FORMAT_GROUPS_SET = new Set(VALID_FORMAT_GROUPS);
 
+const THEME_HIGHLIGHT_COLORS_SCHEMA = z.record(
+  z.string().min(1),
+  z.object({
+    ttsSentenceHighlightColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    ttsWordHighlightColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  }),
+);
+
 const EPUB_SETTINGS_SCHEMA = z
   .object({
     themeName: z.string().min(1),
@@ -25,6 +33,21 @@ const EPUB_SETTINGS_SCHEMA = z
     flow: z.enum(['paginated', 'scrolled']),
     overrideBookFormatting: z.boolean(),
     footerDisplayMode: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    ttsProvider: z.enum(['browser', 'azure', 'gcp-chirp3', 'xai', 'kokoro', 'gpt-4o-mini-tts']),
+    ttsVoice: z.string().min(1).nullable(),
+    ttsRate: z.number().min(0.5).max(2),
+    ttsPitch: z.number().min(0.5).max(2),
+    ttsVolume: z.number().min(0).max(1),
+    ttsGcpChirp3Voice: z.string().min(1),
+    ttsAzureVoice: z.string().min(1),
+    ttsXaiVoice: z.string().min(1),
+    ttsKokoroVoice: z.string().min(1),
+    ttsGpt4oMiniVoice: z.string().min(1),
+    ttsSkipBackSeconds: z.number().int().min(0).max(120),
+    ttsSkipForwardSeconds: z.number().int().min(0).max(120),
+    themeHighlightColors: THEME_HIGHLIGHT_COLORS_SCHEMA.optional(),
+    ttsSentenceHighlightColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    ttsWordHighlightColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   })
   .strict();
 

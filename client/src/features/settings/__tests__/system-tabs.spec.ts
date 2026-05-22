@@ -3,12 +3,12 @@ import { SYSTEM_TABS, SYSTEM_TAB_INFO, normalizeSystemTab } from '../lib/system-
 
 describe('system-tabs', () => {
   describe('SYSTEM_TABS', () => {
-    it('contains exactly file-naming, book-dock, maintenance, audit-log', () => {
-      expect(SYSTEM_TABS).toEqual(['file-naming', 'book-dock', 'maintenance', 'audit-log'])
+    it('contains exactly file-naming, book-dock, maintenance, text-to-speech, audit-log', () => {
+      expect(SYSTEM_TABS).toEqual(['file-naming', 'book-dock', 'maintenance', 'text-to-speech', 'audit-log'])
     })
 
-    it('has length 4', () => {
-      expect(SYSTEM_TABS.length).toBe(4)
+    it('has length 5', () => {
+      expect(SYSTEM_TABS.length).toBe(5)
     })
   })
 
@@ -44,6 +44,10 @@ describe('system-tabs', () => {
       expect(SYSTEM_TAB_INFO.maintenance.permission).toBe('manage_app_settings')
     })
 
+    it('text-to-speech has manage_app_settings permission', () => {
+      expect(SYSTEM_TAB_INFO['text-to-speech'].permission).toBe('manage_app_settings')
+    })
+
     it('audit-log has null permission (superuser only)', () => {
       expect(SYSTEM_TAB_INFO['audit-log'].permission).toBeNull()
     })
@@ -58,6 +62,10 @@ describe('system-tabs', () => {
 
     it('maintenance has correct nav label', () => {
       expect(SYSTEM_TAB_INFO.maintenance.navLabel).toBe('Maintenance')
+    })
+
+    it('text-to-speech has correct nav label', () => {
+      expect(SYSTEM_TAB_INFO['text-to-speech'].navLabel).toBe('Text-to-Speech')
     })
 
     it('audit-log has correct nav label', () => {
@@ -96,6 +104,10 @@ describe('system-tabs', () => {
 
     it('returns maintenance when given "maintenance"', () => {
       expect(normalizeSystemTab('maintenance')).toBe('maintenance')
+    })
+
+    it('returns text-to-speech when given "text-to-speech"', () => {
+      expect(normalizeSystemTab('text-to-speech')).toBe('text-to-speech')
     })
 
     it('returns audit-log when given "audit-log"', () => {

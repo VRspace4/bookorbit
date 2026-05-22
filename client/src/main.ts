@@ -8,8 +8,11 @@ import App from './App.vue'
 import router from './router'
 import { useAuth } from './features/auth/composables/useAuth'
 import { useSetupStatus } from './features/auth/composables/useSetupStatus'
+import { initTtsMediaSession } from './features/reader/epub/tts/media-session'
 
 const app = createApp(App)
+
+initTtsMediaSession()
 
 app.use(createPinia())
 

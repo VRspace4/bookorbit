@@ -851,14 +851,40 @@ export class BookRepository {
     pageNumber: number | null,
     percentage: number,
     positionSeconds?: number | null,
+    ttsSectionIndex?: number | null,
+    ttsWordIndex?: number | null,
   ) {
     const now = new Date();
+    const includeTts = ttsSectionIndex !== undefined || ttsWordIndex !== undefined;
+    const ttsSection = includeTts ? (ttsSectionIndex ?? null) : null;
+    const ttsWord = includeTts ? (ttsWordIndex ?? null) : null;
+    const insertValues = {
+      userId,
+      bookFileId: fileId,
+      cfi,
+      pageNumber,
+      percentage,
+      positionSeconds: positionSeconds ?? null,
+      ...(includeTts ? { ttsSectionIndex: ttsSection, ttsWordIndex: ttsWord } : {}),
+      updatedAt: now,
+    };
+    const updateSet: Record<string, unknown> = {
+      cfi,
+      pageNumber,
+      percentage,
+      positionSeconds: positionSeconds ?? null,
+      updatedAt: now,
+    };
+    if (includeTts) {
+      updateSet.ttsSectionIndex = ttsSection;
+      updateSet.ttsWordIndex = ttsWord;
+    }
     await this.db
       .insert(readingProgress)
-      .values({ userId, bookFileId: fileId, cfi, pageNumber, percentage, positionSeconds: positionSeconds ?? null, updatedAt: now })
+      .values(insertValues)
       .onConflictDoUpdate({
         target: [readingProgress.bookFileId, readingProgress.userId],
-        set: { cfi, pageNumber, percentage, positionSeconds: positionSeconds ?? null, updatedAt: now },
+        set: updateSet,
       });
   }
 

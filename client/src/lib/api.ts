@@ -1,4 +1,7 @@
 import type { RefreshResponse } from '@bookorbit/types'
+import { shouldRefreshAccessToken } from '@/features/auth/lib/access-token'
+
+const ACCESS_TOKEN_STORAGE_KEY = 'bookorbit:access-token'
 
 let _accessToken: string | null = null
 let _onAuthFailure: (() => void) | null = null
@@ -6,9 +9,28 @@ let _refreshPromise: Promise<string> | null = null
 
 export function setAccessToken(token: string | null): void {
   _accessToken = token
+  if (typeof window === 'undefined') return
+  try {
+    if (token) window.sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token)
+    else window.sessionStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY)
+  } catch {
+    // sessionStorage may be unavailable in private browsing modes.
+  }
 }
 
 export function getAccessToken(): string | null {
+  return _accessToken
+}
+
+export function hydrateAccessTokenFromStorage(): string | null {
+  if (_accessToken) return _accessToken
+  if (typeof window === 'undefined') return null
+  try {
+    const stored = window.sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY)
+    if (stored) _accessToken = stored
+  } catch {
+    // Ignore storage failures during startup.
+  }
   return _accessToken
 }
 

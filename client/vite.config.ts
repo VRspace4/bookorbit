@@ -6,6 +6,10 @@ import vueDevTools from 'vite-plugin-vue-devtools'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
+const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:3000'
+const hmrHost = process.env.VITE_HMR_HOST
+const enableDevPwa = process.env.VITE_PWA_DEV === 'true' || Boolean(hmrHost)
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
@@ -13,8 +17,8 @@ export default defineConfig({
     vueDevTools(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
-      injectRegister: 'auto',
+      registerType: 'prompt',
+      injectRegister: null,
       includeAssets: [
         'favicon.ico',
         'pwa-icon-source.svg',
@@ -25,6 +29,7 @@ export default defineConfig({
         'maskable-icon-512x512.png',
       ],
       manifest: {
+        id: '/',
         name: 'BookOrbit',
         short_name: 'BookOrbit',
         description: 'Your personal book library and reading space',
@@ -79,6 +84,7 @@ export default defineConfig({
         ],
       },
       workbox: {
+        cleanupOutdatedCaches: true,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
         navigateFallback: 'index.html',
         navigateFallbackDenylist: [/^\/api\//],
@@ -87,7 +93,7 @@ export default defineConfig({
             urlPattern: /^.*\/api\/v1\/books\/\d+\/cover(\?.*)?$/,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'book-covers',
+              cacheName: 'bookorbit-book-covers',
               expiration: {
                 maxEntries: 200,
                 maxAgeSeconds: 60 * 60 * 24 * 30,
@@ -101,9 +107,111 @@ export default defineConfig({
             urlPattern: /^.*\/api\/v1\/books\/\d+\/thumbnail(\?.*)?$/,
             handler: 'CacheFirst',
             options: {
-              cacheName: 'book-thumbnails',
+              cacheName: 'bookorbit-book-thumbnails',
               expiration: {
                 maxEntries: 200,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/epub\/\d+\/info(\?.*)?$/,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'bookorbit-api-reader',
+              networkTimeoutSeconds: 3,
+              expiration: {
+                maxEntries: 120,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/reader\/(preferences\/\d+|defaults)(\/[^?]+)?(\?.*)?$/,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'bookorbit-api-reader',
+              networkTimeoutSeconds: 3,
+              expiration: {
+                maxEntries: 160,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/books\/\d+(\?.*)?$/,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'bookorbit-api-reader',
+              networkTimeoutSeconds: 3,
+              expiration: {
+                maxEntries: 120,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/epub\/\d+\/file\/.*$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'bookorbit-epub-assets',
+              expiration: {
+                maxEntries: 800,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/cbz\/files\/\d+\/pages(\?.*)?$/,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'bookorbit-api-reader',
+              networkTimeoutSeconds: 3,
+              expiration: {
+                maxEntries: 80,
+                maxAgeSeconds: 60 * 60 * 24 * 7,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/cbz\/files\/\d+\/pages\/\d+(\?.*)?$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'bookorbit-comic-pages',
+              expiration: {
+                maxEntries: 500,
+                maxAgeSeconds: 60 * 60 * 24 * 30,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            urlPattern: /^.*\/api\/v1\/fonts(\/.*)?(\?.*)?$/,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'bookorbit-fonts',
+              expiration: {
+                maxEntries: 100,
                 maxAgeSeconds: 60 * 60 * 24 * 30,
               },
               cacheableResponse: {
@@ -114,8 +222,9 @@ export default defineConfig({
         ],
       },
       devOptions: {
-        enabled: false,
+        enabled: enableDevPwa,
         type: 'module',
+        navigateFallbackAllowlist: [/^\/$/],
       },
     }),
   ],
@@ -131,21 +240,32 @@ export default defineConfig({
   },
   server: {
     host: true,
+    port: Number(process.env.VITE_PORT ?? 5173),
+    strictPort: true,
     allowedHosts: true,
+    ...(hmrHost
+      ? {
+          hmr: {
+            host: hmrHost,
+            protocol: 'wss',
+            clientPort: 443,
+          },
+        }
+      : {}),
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: apiProxyTarget,
         configure: (proxy) => {
           proxy.on('proxyReq', (proxyReq, req) => {
             if (req.headers.host) proxyReq.setHeader('x-forwarded-host', req.headers.host)
             const localPort = (req.socket as { localPort?: number })?.localPort
             if (localPort) proxyReq.setHeader('x-forwarded-port', String(localPort))
-            proxyReq.setHeader('x-forwarded-proto', 'http')
+            proxyReq.setHeader('x-forwarded-proto', hmrHost ? 'https' : 'http')
           })
         },
       },
       '/socket.io': {
-        target: 'http://localhost:3000',
+        target: apiProxyTarget,
         ws: true,
         changeOrigin: true,
       },

@@ -86,6 +86,9 @@ export const readingProgress = pgTable(
     pageNumber: integer('page_number'),
     // Audio: playback position in seconds
     positionSeconds: real('position_seconds'),
+    // EPUB TTS: section index + word index within that section's visible text
+    ttsSectionIndex: integer('tts_section_index'),
+    ttsWordIndex: integer('tts_word_index'),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .notNull()
       .defaultNow()
@@ -98,6 +101,8 @@ export const readingProgress = pgTable(
     check('reading_progress_percentage_range_chk', sql`${t.percentage} >= 0 and ${t.percentage} <= 100`),
     check('reading_progress_page_number_nonnegative_chk', sql`${t.pageNumber} is null or ${t.pageNumber} >= 0`),
     check('reading_progress_position_seconds_nonnegative_chk', sql`${t.positionSeconds} is null or ${t.positionSeconds} >= 0`),
+    check('reading_progress_tts_section_index_nonnegative_chk', sql`${t.ttsSectionIndex} is null or ${t.ttsSectionIndex} >= 0`),
+    check('reading_progress_tts_word_index_nonnegative_chk', sql`${t.ttsWordIndex} is null or ${t.ttsWordIndex} >= 0`),
   ],
 );
 
@@ -304,3 +309,28 @@ export const readerPreferences = pgTable(
 
 export type ReaderPreference = typeof readerPreferences.$inferSelect;
 export type NewReaderPreference = typeof readerPreferences.$inferInsert;
+
+export const ttsUsage = pgTable(
+  'tts_usage',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    provider: varchar('provider', { length: 32 }).notNull(),
+    usageMonth: date('usage_month').notNull(),
+    characterCount: integer('character_count').notNull().default(0),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => new Date()),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.provider, t.usageMonth] }),
+    index('tts_usage_user_month_idx').on(t.userId, t.usageMonth),
+    check('tts_usage_character_count_nonnegative_chk', sql`${t.characterCount} >= 0`),
+    check('tts_usage_provider_chk', sql`${t.provider} in ('browser', 'azure', 'gcp-chirp3', 'xai', 'kokoro', 'gpt-4o-mini-tts')`),
+  ],
+);
+
+export type TtsUsageRow = typeof ttsUsage.$inferSelect;
+export type NewTtsUsage = typeof ttsUsage.$inferInsert;

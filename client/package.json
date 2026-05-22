@@ -31,13 +31,19 @@
     "lint:eslint:fix": "eslint src --fix --cache",
     "format": "prettier --write --experimental-cli src/",
     "format:check": "prettier --check src/",
+    "cap": "cap",
+    "android:sync": "pnpm build && cap sync android",
+    "android:apk": "pnpm build && cap sync android && cd android && ./gradlew assembleDebug",
+    "android:apk:standalone": "pnpm build && cap sync android && cd android && ./gradlew assembleDebug",
     "generate-pwa-icons": "pwa-assets-generator --config pwa-assets.config.ts"
   },
   "dependencies": {
     "@bookorbit/types": "workspace:*",
+    "@capacitor/core": "^8.3.4",
     "@embedpdf/vue-pdf-viewer": "^2.14.2",
     "@fontsource-variable/fraunces": "^5.2.9",
     "@fontsource-variable/inter": "^5.2.8",
+    "@jofr/capacitor-media-session": "^4.0.0",
     "@tailwindcss/vite": "^4.3.0",
     "@tanstack/vue-table": "^8.21.3",
     "@tanstack/vue-virtual": "^3.13.24",
@@ -51,6 +57,7 @@
     "echarts": "^6.0.0",
     "howler": "^2.2.4",
     "lucide-vue-next": "^1.0.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.50.0",
     "pinia": "^3.0.4",
     "reka-ui": "^2.9.7",
     "socket.io-client": "^4.8.3",
@@ -62,9 +69,12 @@
     "vue-echarts": "8.1.0-beta.2",
     "vue-router": "^5.0.7",
     "vue-sonner": "^2.0.9",
-    "vue-virtual-scroller": "^3.0.3"
+    "vue-virtual-scroller": "^3.0.3",
+    "workbox-window": "7.4.1"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.3.4",
+    "@capacitor/cli": "^8.3.4",
     "@tsconfig/node24": "^24.0.4",
     "@types/canvas-confetti": "^1.9.0",
     "@types/dompurify": "^3.2.0",

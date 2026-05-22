@@ -470,7 +470,15 @@ export class BookController {
 
   @Get('files/:fileId/progress')
   async getFileProgress(@Param('fileId', ParseIntPipe) fileId: number, @CurrentUser() user: RequestUser) {
-    return (await this.bookService.getProgress(user.id, fileId, user)) ?? { cfi: null, pageNumber: null, percentage: 0 };
+    return (
+      (await this.bookService.getProgress(user.id, fileId, user)) ?? {
+        cfi: null,
+        pageNumber: null,
+        percentage: 0,
+        ttsSectionIndex: null,
+        ttsWordIndex: null,
+      }
+    );
   }
 
   @Post('files/:fileId/progress')

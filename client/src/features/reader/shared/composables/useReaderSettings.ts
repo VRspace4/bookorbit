@@ -1,10 +1,12 @@
-import { computed, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
+import { migrateLegacyThemeHighlightColors, resolveThemeHighlightColors } from '@/features/reader/epub/theme-highlight'
 import {
   CBX_READER_DEFAULTS,
   type CbxReaderSettings,
+  type EpubReaderSettings,
   type ReaderFormatGroup,
   type ReaderSettings,
   READER_GROUP_DEFAULTS,
@@ -39,6 +41,89 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
+}
+
+const READER_SETTINGS_SYNC_DEBOUNCE_MS = 500
+
+/** Settings from the in-reader cog and TTS panels — stored as account-wide format defaults. */
+export const EPUB_GLOBAL_SETTING_KEYS = [
+  'themeName',
+  'isDark',
+  'fontFamily',
+  'fontSize',
+  'lineHeight',
+  'maxColumnCount',
+  'gap',
+  'maxInlineSize',
+  'justify',
+  'hyphenate',
+  'flow',
+  'ttsProvider',
+  'ttsVoice',
+  'ttsRate',
+  'ttsPitch',
+  'ttsVolume',
+  'ttsGcpChirp3Voice',
+  'ttsAzureVoice',
+  'ttsXaiVoice',
+  'ttsKokoroVoice',
+  'ttsGpt4oMiniVoice',
+  'ttsSkipBackSeconds',
+  'ttsSkipForwardSeconds',
+  'themeHighlightColors',
+  'ttsSentenceHighlightColor',
+  'ttsWordHighlightColor',
+] as const satisfies readonly (keyof EpubReaderSettings)[]
+
+export function isReaderSyncEnabled(user: { settings?: { syncReaderPreferences?: boolean } } | null | undefined): boolean {
+  if (!user) return false
+  return user.settings?.syncReaderPreferences !== false
+}
+
+function pickGlobalSettings(patch: Partial<ReaderSettings>): Partial<ReaderSettings> {
+  const out: Partial<ReaderSettings> = {}
+  for (const key of EPUB_GLOBAL_SETTING_KEYS) {
+    if (key in patch) {
+      ;(out as Record<string, unknown>)[key] = (patch as Record<string, unknown>)[key]
+    }
+  }
+  return out
+}
+
+function stripGlobalSettingsFromDelta(delta: Partial<ReaderSettings>): Partial<ReaderSettings> {
+  const next = { ...delta }
+  for (const key of EPUB_GLOBAL_SETTING_KEYS) {
+    delete (next as Record<string, unknown>)[key]
+  }
+  return next
+}
+
+function createDebouncedSync(syncFn: () => Promise<void>) {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let pending = false
+
+  function schedule() {
+    pending = true
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => {
+      timer = null
+      void flush()
+    }, READER_SETTINGS_SYNC_DEBOUNCE_MS)
+  }
+
+  async function flush() {
+    if (!pending) return
+    pending = false
+    await syncFn().catch(() => {})
+  }
+
+  function cancel() {
+    if (timer) clearTimeout(timer)
+    timer = null
+    pending = false
+  }
+
+  return { schedule, flush, cancel }
 }
 
 function sanitizeCbxPartialSettings(settings: unknown): Partial<CbxReaderSettings> | null {
@@ -81,7 +166,14 @@ function sanitizeBookDelta(group: ReaderFormatGroup, raw: unknown): Partial<Read
 }
 
 function sanitizeDefaultSettings(group: ReaderFormatGroup, raw: unknown): ReaderSettings | null {
-  if (group !== 'cbx') return isRecord(raw) ? (raw as unknown as ReaderSettings) : null
+  if (group !== 'cbx') {
+    if (!isRecord(raw)) return null
+    if (group === 'epub') {
+      const migrated = migrateLegacyThemeHighlightColors(raw as EpubReaderSettings)
+      return migrated as ReaderSettings
+    }
+    return raw as unknown as ReaderSettings
+  }
 
   const sanitized = sanitizeCbxPartialSettings(raw)
   if (!sanitized) return null
@@ -89,6 +181,15 @@ function sanitizeDefaultSettings(group: ReaderFormatGroup, raw: unknown): Reader
   return {
     ...CBX_READER_DEFAULTS,
     ...sanitized,
+  } as ReaderSettings
+}
+
+function withResolvedEpubHighlights(settings: ReaderSettings): ReaderSettings {
+  const epub = settings as EpubReaderSettings
+  const resolved = resolveThemeHighlightColors(epub)
+  return {
+    ...epub,
+    ...resolved,
   } as ReaderSettings
 }
 
@@ -103,17 +204,49 @@ export function useReaderSettings(bookFileId: number, format: string) {
   const defaultSettings = ref<ReaderSettings | null>(null)
   const isCustomized = ref(false)
 
-  const syncEnabled = computed(() => user.value?.settings?.syncReaderPreferences === true)
+  const syncEnabled = computed(() => isReaderSyncEnabled(user.value))
+
+  const bookSync = createDebouncedSync(async () => {
+    if (!syncEnabled.value) return
+    const settings = bookDelta.value
+    if (!settings || Object.keys(settings).length === 0) return
+
+    await api(`/api/v1/reader/preferences/${bookFileId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings }),
+    })
+  })
+
+  const defaultSync = createDebouncedSync(async () => {
+    if (!syncEnabled.value || !defaultSettings.value) return
+
+    await api(`/api/v1/reader/defaults/${group}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: defaultSettings.value }),
+    })
+  })
+
+  onUnmounted(() => {
+    void bookSync.flush()
+    void defaultSync.flush()
+  })
 
   // Merge order: hardcoded fallback → format defaults → per-book delta
-  const effective = computed<ReaderSettings>(
-    () =>
-      ({
-        ...(READER_GROUP_DEFAULTS[group] as ReaderSettings),
-        ...(defaultSettings.value ?? undefined),
-        ...(bookDelta.value ?? undefined),
-      }) as ReaderSettings,
-  )
+  const effective = computed<ReaderSettings>(() => {
+    const merged = {
+      ...(READER_GROUP_DEFAULTS[group] as ReaderSettings),
+      ...(defaultSettings.value ?? undefined),
+      ...(bookDelta.value ?? undefined),
+    } as ReaderSettings
+
+    if (group === 'epub') {
+      return withResolvedEpubHighlights(merged)
+    }
+
+    return merged
+  })
 
   async function load() {
     const lsBook = readLs<Partial<ReaderSettings>>(lsBookKey(bookFileId))
@@ -142,8 +275,38 @@ export function useReaderSettings(bookFileId: number, format: string) {
       }
     }
 
+    migrateGlobalSettingsFromBookDelta()
+
     if (syncEnabled.value) {
       await syncFromDb()
+      migrateGlobalSettingsFromBookDelta()
+    }
+  }
+
+  function migrateGlobalSettingsFromBookDelta() {
+    if (group !== 'epub' || !bookDelta.value) return
+
+    const globalFromDelta = pickGlobalSettings(bookDelta.value)
+    if (Object.keys(globalFromDelta).length === 0) return
+
+    updateDefaultSettings(globalFromDelta)
+
+    const nextDelta = stripGlobalSettingsFromDelta(bookDelta.value)
+    if (Object.keys(nextDelta).length === 0) {
+      bookDelta.value = null
+      isCustomized.value = false
+      removeLs(lsBookKey(bookFileId))
+      if (syncEnabled.value) {
+        api(`/api/v1/reader/preferences/${bookFileId}`, { method: 'DELETE' }).catch(() => {})
+      }
+      return
+    }
+
+    bookDelta.value = nextDelta
+    isCustomized.value = true
+    writeLs(lsBookKey(bookFileId), nextDelta)
+    if (syncEnabled.value) {
+      bookSync.schedule()
     }
   }
 
@@ -185,15 +348,12 @@ export function useReaderSettings(bookFileId: number, format: string) {
     writeLs(lsBookKey(bookFileId), next)
 
     if (syncEnabled.value) {
-      api(`/api/v1/reader/preferences/${bookFileId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: next }),
-      }).catch(() => {})
+      bookSync.schedule()
     }
   }
 
   function resetBookSettings() {
+    bookSync.cancel()
     bookDelta.value = null
     isCustomized.value = false
     removeLs(lsBookKey(bookFileId))
@@ -206,19 +366,38 @@ export function useReaderSettings(bookFileId: number, format: string) {
   function updateDefaultSettings(patch: Partial<ReaderSettings>) {
     const current = defaultSettings.value ?? READER_GROUP_DEFAULTS[group]
     const next = { ...current, ...patch } as ReaderSettings
-    defaultSettings.value = next
-    writeLs(lsDefaultKey(group), next)
+    defaultSettings.value = group === 'epub' ? withResolvedEpubHighlights(next) : next
+    writeLs(lsDefaultKey(group), defaultSettings.value)
 
     if (syncEnabled.value) {
-      api(`/api/v1/reader/defaults/${group}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: next }),
-      }).catch(() => {})
+      defaultSync.schedule()
+    }
+  }
+
+  // Saves appearance, text, layout, and TTS settings as account-wide defaults (not per-book).
+  function updateGlobalSettings(patch: Partial<ReaderSettings>) {
+    const globalPatch = pickGlobalSettings(patch)
+    if (Object.keys(globalPatch).length === 0) return
+
+    updateDefaultSettings(globalPatch)
+
+    if (bookDelta.value) {
+      const nextDelta = stripGlobalSettingsFromDelta(bookDelta.value)
+      if (Object.keys(nextDelta).length === 0) {
+        resetBookSettings()
+      } else if (!jsonEqual(nextDelta, bookDelta.value)) {
+        bookDelta.value = nextDelta
+        isCustomized.value = true
+        writeLs(lsBookKey(bookFileId), nextDelta)
+        if (syncEnabled.value) {
+          bookSync.schedule()
+        }
+      }
     }
   }
 
   function resetDefaultSettings() {
+    defaultSync.cancel()
     defaultSettings.value = null
     removeLs(lsDefaultKey(group))
 
@@ -233,6 +412,7 @@ export function useReaderSettings(bookFileId: number, format: string) {
     isCustomized,
     load,
     updateBookSettings,
+    updateGlobalSettings,
     resetBookSettings,
     updateDefaultSettings,
     resetDefaultSettings,
@@ -246,8 +426,22 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
   const { user } = useAuth()
 
   const settings = ref<T | null>(null)
-  const syncEnabled = computed(() => user.value?.settings?.syncReaderPreferences === true)
+  const syncEnabled = computed(() => isReaderSyncEnabled(user.value))
   const effective = computed<T>(() => (settings.value ?? READER_GROUP_DEFAULTS[group]) as T)
+
+  const defaultSync = createDebouncedSync(async () => {
+    if (!syncEnabled.value || !settings.value) return
+
+    await api(`/api/v1/reader/defaults/${group}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: settings.value }),
+    })
+  })
+
+  onUnmounted(() => {
+    void defaultSync.flush()
+  })
 
   async function load() {
     const ls = readLs<T>(lsDefaultKey(group))
@@ -282,19 +476,16 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
 
   function update(patch: Partial<T>) {
     const next = { ...effective.value, ...patch } as T
-    settings.value = next
-    writeLs(lsDefaultKey(group), next)
+    settings.value = group === 'epub' ? (withResolvedEpubHighlights(next) as T) : next
+    writeLs(lsDefaultKey(group), settings.value)
 
     if (syncEnabled.value) {
-      api(`/api/v1/reader/defaults/${group}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: next }),
-      }).catch(() => {})
+      defaultSync.schedule()
     }
   }
 
   function reset() {
+    defaultSync.cancel()
     settings.value = null
     removeLs(lsDefaultKey(group))
 
@@ -305,4 +496,40 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
   }
 
   return { effective, load, update, reset }
+}
+
+/** Upload locally cached reader defaults and per-book overrides after enabling account sync. */
+export async function pushLocalReaderPreferencesToBackend(): Promise<void> {
+  const { user } = useAuth()
+  if (!isReaderSyncEnabled(user.value)) return
+
+  const defaultGroups: ReaderFormatGroup[] = ['epub', 'pdf', 'cbx', 'audio']
+  await Promise.all(
+    defaultGroups.map(async (group) => {
+      const settings = readLs<ReaderSettings>(lsDefaultKey(group))
+      if (!settings) return
+      await api(`/api/v1/reader/defaults/${group}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings }),
+      }).catch(() => {})
+    }),
+  )
+
+  const bookPrefix = 'reader:book:'
+  await Promise.all(
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith(bookPrefix))
+      .map(async (key) => {
+        const bookFileId = Number(key.slice(bookPrefix.length))
+        if (!Number.isFinite(bookFileId)) return
+        const settings = readLs<Partial<ReaderSettings>>(key)
+        if (!settings || Object.keys(settings).length === 0) return
+        await api(`/api/v1/reader/preferences/${bookFileId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ settings }),
+        }).catch(() => {})
+      }),
+  )
 }

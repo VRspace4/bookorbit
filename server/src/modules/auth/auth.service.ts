@@ -336,6 +336,14 @@ export class AuthService {
       }
     }
 
+    const refreshReuseWindowMs = parseDurationMs(this.config.get<string>('auth.refreshReuseWindow') ?? '5m');
+    const tokenAgeMs = Date.now() - row.createdAt.getTime();
+    if (tokenAgeMs >= 0 && tokenAgeMs < refreshReuseWindowMs) {
+      const accessToken = this.jwtService.sign({ sub: row.userId, ver: userForToken.tokenVersion });
+      this.setAccessCookie(reply, accessToken);
+      return { accessToken };
+    }
+
     // Rotate: revoke old, issue new
     await this.db.update(schema.refreshTokens).set({ revokedAt: new Date() }).where(eq(schema.refreshTokens.id, row.id));
 

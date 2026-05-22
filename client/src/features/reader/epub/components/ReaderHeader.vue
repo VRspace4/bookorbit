@@ -13,6 +13,7 @@ import {
   Minimize,
   Search,
   Settings,
+  Volume2,
 } from 'lucide-vue-next'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -22,6 +23,7 @@ const props = defineProps<{
   isBookmarked: boolean
   settingsOpen: boolean
   footerMode: 0 | 1 | 2
+  ttsActive?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -29,6 +31,7 @@ const emit = defineEmits<{
   toggleSidebar: []
   toggleSearch: []
   toggleBookmark: []
+  toggleTts: []
   'update:settingsOpen': [open: boolean]
   toggleFullscreen: []
   toggleHelp: []
@@ -105,6 +108,20 @@ onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenC
 
     <!-- Right button group -->
     <div class="flex items-center gap-1 shrink-0 ml-auto">
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn"
+            :class="props.ttsActive ? '!bg-muted !text-foreground' : ''"
+            aria-label="Text-to-speech"
+            @click="emit('toggleTts')"
+          >
+            <Volume2 :size="18" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Text-to-speech</TooltipContent>
+      </Tooltip>
+
       <Tooltip>
         <TooltipTrigger as-child>
           <button class="viewer-btn" aria-label="Search" @click="emit('toggleSearch')">

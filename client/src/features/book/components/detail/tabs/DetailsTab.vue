@@ -44,6 +44,7 @@ import { useMetadataScoreWeights } from '@/features/metadata-score/composables/u
 import { useSafeHtml } from '@/features/book/composables/useSafeHtml'
 import { useKoreaderBookProgress } from '@/features/koreader/composables/useKoreaderBookProgress'
 import { RATING_STARS, getRatingStarClass } from '@/features/book/lib/rating-stars'
+import { clearCachedReaderProgress } from '@/features/reader/shared/lib/reader-progress-cache'
 
 type FileProgress = {
   percentage: number
@@ -638,6 +639,7 @@ async function handleResetFileProgress(row: ProgressRow) {
   try {
     const res = await api(`/api/v1/books/files/${fileId}/progress`, { method: 'DELETE' })
     if (!res.ok) throw new Error('Failed to reset file progress')
+    clearCachedReaderProgress(fileId)
     await loadSupplemental()
   } finally {
     setFileResetting(fileId, false)

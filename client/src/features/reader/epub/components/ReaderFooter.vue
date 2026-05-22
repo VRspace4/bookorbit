@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { ChevronLeft, ChevronRight, ChevronsUpDown } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, ChevronsUpDown, Bookmark } from 'lucide-vue-next'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import type { SeekBookmark } from '../composables/useSeekBookmark'
 
 const props = defineProps<{
   fraction: number
@@ -11,12 +12,14 @@ const props = defineProps<{
   chapterStartFraction: number
   chapterEndFraction: number
   locationTotal: number
+  seekBookmark?: SeekBookmark | null
 }>()
 
 const emit = defineEmits<{
   prevSection: []
   nextSection: []
   seek: [fraction: number]
+  seekBookmarkTap: []
 }>()
 
 const showGoToInput = ref(false)
@@ -113,6 +116,24 @@ function handleGoToBlur() {
           :style="{ left: `${sf * 100}%`, background: 'var(--muted-foreground)' }"
         />
       </template>
+
+      <!-- Previous-position bookmark shown after scrubbing the progress bar -->
+      <div v-if="seekBookmark" class="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 z-20" :style="{ left: `${seekBookmark.fraction * 100}%` }">
+        <button
+          type="button"
+          class="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 flex flex-col items-center group cursor-pointer"
+          aria-label="Return to previous position"
+          @click.stop="emit('seekBookmarkTap')"
+        >
+          <div
+            class="flex items-center justify-center w-7 h-9 rounded-sm border border-border/60 bg-background/95 shadow-md transition-transform group-hover:scale-105 group-active:scale-95"
+          >
+            <Bookmark :size="22" fill="currentColor" class="text-primary" />
+          </div>
+          <div class="w-0 h-0 border-l-[5px] border-r-[5px] border-t-[6px] border-l-transparent border-r-transparent border-t-border/60 -mt-px" />
+        </button>
+        <div class="w-2 h-2 rounded-full bg-foreground shadow-sm ring-2 ring-background" />
+      </div>
     </div>
 
     <template v-if="showGoToInput">

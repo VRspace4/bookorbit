@@ -171,4 +171,41 @@ describe('ReaderFooter', () => {
 
     expect(wrapper.find('input[type="text"]').exists()).toBe(false)
   })
+
+  it('renders seek bookmark marker when seekBookmark prop is set', () => {
+    const wrapper = mount(ReaderFooter, {
+      props: {
+        ...defaultProps,
+        seekBookmark: { fraction: 0.49, cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      },
+      global: globalStubs,
+    })
+
+    const marker = wrapper.find('button[aria-label="Return to previous position"]')
+    expect(marker.exists()).toBe(true)
+    expect(marker.element.parentElement?.getAttribute('style')).toContain('left: 49%')
+  })
+
+  it('does not render seek bookmark marker when seekBookmark is null', () => {
+    const wrapper = mount(ReaderFooter, {
+      props: { ...defaultProps, seekBookmark: null },
+      global: globalStubs,
+    })
+
+    expect(wrapper.find('button[aria-label="Return to previous position"]').exists()).toBe(false)
+  })
+
+  it('emits seekBookmarkTap when bookmark thumbnail is clicked', async () => {
+    const wrapper = mount(ReaderFooter, {
+      props: {
+        ...defaultProps,
+        seekBookmark: { fraction: 0.49, cfi: null },
+      },
+      global: globalStubs,
+    })
+
+    await wrapper.get('button[aria-label="Return to previous position"]').trigger('click')
+
+    expect(wrapper.emitted('seekBookmarkTap')?.length).toBe(1)
+  })
 })

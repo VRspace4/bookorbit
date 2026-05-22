@@ -14,6 +14,7 @@ import {
   Trophy,
   User,
   MoreVertical,
+  Smartphone,
 } from 'lucide-vue-next'
 import { useRouter, useRoute } from 'vue-router'
 import { toast } from 'vue-sonner'
@@ -50,6 +51,7 @@ import { useNotifications } from '@/features/notifications/composables/useNotifi
 import UserAvatar from '@/components/UserAvatar.vue'
 import { DEFAULT_FORMAT_PRIORITY } from '@bookorbit/types'
 import { useThemeStore } from '@/stores/theme'
+import { useInstallPrompt } from '@/features/pwa/composables/useInstallPrompt'
 
 const router = useRouter()
 const route = useRoute()
@@ -60,6 +62,7 @@ const { onLibraryUploadCompleted } = useLibraryUploadEvents()
 const { summary: bookDockSummary, fetchSummary: fetchBookDockSummary, subscribe: subscribeBookDockSummary } = useBookDockSummary()
 const { subscribe: subscribeNotifications } = useNotifications()
 const themeStore = useThemeStore()
+const installPrompt = useInstallPrompt()
 
 const isBookDockActive = computed(() => route.name === 'book-dock')
 const statisticsTab = computed<string | null>(() => {
@@ -95,6 +98,10 @@ function navigateToAccount() {
 
 function navigateToSettings() {
   router.push({ name: 'settings-libraries' })
+}
+
+async function installApp() {
+  await installPrompt.installApp()
 }
 
 const uploadOpen = ref(false)
@@ -728,6 +735,10 @@ function formatBadgeClass(fmt: string): string {
             <DropdownMenuItem @click="navigateToAccount">
               <User :size="13" class="mr-2 text-muted-foreground" />
               Account
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="installPrompt.isInstallable.value && !installPrompt.isInstalled.value" @click="installApp">
+              <Smartphone :size="13" class="mr-2 text-muted-foreground" />
+              Install App
             </DropdownMenuItem>
             <DropdownMenuSeparator v-if="canChangePassword" />
             <DropdownMenuItem v-if="canChangePassword" @click="openChangePassword()">

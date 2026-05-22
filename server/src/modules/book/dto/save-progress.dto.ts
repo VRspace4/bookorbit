@@ -19,4 +19,16 @@ export class SaveProgressDto {
   @IsNumber()
   @Min(0)
   positionSeconds?: number | null;
+
+  @IsOptional()
+  @ValidateIf((o: SaveProgressDto) => o.ttsSectionIndex != null)
+  @IsNumber()
+  @Min(0)
+  ttsSectionIndex?: number | null;
+
+  @IsOptional()
+  @ValidateIf((o: SaveProgressDto) => o.ttsWordIndex != null)
+  @IsNumber()
+  @Min(0)
+  ttsWordIndex?: number | null;
 }

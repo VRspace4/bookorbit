@@ -11,6 +11,7 @@ import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { MAX_PROFILE_AVATAR_BYTES, useProfileAvatar } from '@/features/auth/composables/useProfileAvatar'
 import { useChangePasswordDialog } from '@/composables/useChangePasswordDialog'
 import SettingsPageHeader from './SettingsPageHeader.vue'
+import NativeAppSettings from './NativeAppSettings.vue'
 import { useMediaQuery } from '@vueuse/core'
 import { useOnboardingTour } from '@/features/onboarding/composables/useOnboardingTour'
 
@@ -429,6 +430,8 @@ function closeUnlinkDialog() {
         {{ savingTimezone ? 'Saving...' : 'Save preferences' }}
       </button>
     </section>
+
+    <NativeAppSettings />
 
     <section class="rounded-lg border border-border bg-card p-4 md:p-5 space-y-4 shadow-xs">
       <button class="md:hidden w-full flex items-center justify-between gap-2 text-left" @click="avatarCardOpen = !avatarCardOpen">

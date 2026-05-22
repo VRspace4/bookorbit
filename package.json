@@ -22,6 +22,8 @@
     "verify": "pnpm run lint:check && pnpm run typecheck && pnpm run test",
     "verify:strict": "pnpm run format:check && pnpm run lint:check && pnpm run typecheck:full && pnpm run test",
     "build:client": "pnpm --filter client build",
+    "build:android:apk": "pnpm --filter client android:apk",
+    "build:android:apk:standalone": "pnpm --filter client android:apk:standalone",
     "build:server": "pnpm --filter server build",
     "typecheck": "pnpm run typecheck:server && pnpm run typecheck:client",
     "typecheck:full": "pnpm run typecheck:server && pnpm run typecheck:client",

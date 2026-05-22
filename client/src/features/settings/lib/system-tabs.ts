@@ -1,4 +1,4 @@
-export const SYSTEM_TABS = ['file-naming', 'book-dock', 'maintenance', 'audit-log'] as const
+export const SYSTEM_TABS = ['file-naming', 'book-dock', 'maintenance', 'text-to-speech', 'audit-log'] as const
 
 export type SystemTab = (typeof SYSTEM_TABS)[number]
 
@@ -26,6 +26,12 @@ export const SYSTEM_TAB_INFO: Record<SystemTab, SystemTabInfo> = {
     navLabel: 'Maintenance',
     titleLabel: 'Maintenance',
     subtitle: 'Manage background tasks, system indices, and maintenance operations.',
+    permission: 'manage_app_settings',
+  },
+  'text-to-speech': {
+    navLabel: 'Text-to-Speech',
+    titleLabel: 'Text-to-Speech',
+    subtitle: 'Configure cloud TTS provider API keys for all users and devices.',
     permission: 'manage_app_settings',
   },
   'audit-log': {

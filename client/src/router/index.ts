@@ -6,6 +6,7 @@ import { INTEGRATIONS_TAB_INFO, normalizeIntegrationsTab } from '@/features/sett
 import { ADMIN_TAB_INFO, normalizeAdminTab } from '@/features/settings/lib/admin-tabs'
 import { SYSTEM_TAB_INFO, normalizeSystemTab } from '@/features/settings/lib/system-tabs'
 import { ACCOUNT_TAB_INFO, normalizeAccountTab } from '@/features/settings/lib/account-tabs'
+import { registerPwaRoutePersistence } from '@/features/pwa/lib/native-app'
 import { registerAuthGuard } from './guards/auth.guard'
 import { registerRouteTitleHook } from './title-resolver'
 
@@ -357,6 +358,7 @@ const router = createRouter({
 })
 
 registerAuthGuard(router)
+registerPwaRoutePersistence(router)
 registerRouteTitleHook(router)
 
 export default router

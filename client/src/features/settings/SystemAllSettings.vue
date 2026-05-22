@@ -5,6 +5,7 @@ import SettingsPageHeader from './SettingsPageHeader.vue'
 import FileNamingSettings from './FileNamingSettings.vue'
 import BookDockSettings from './BookDockSettings.vue'
 import MaintenanceSettings from './MaintenanceSettings.vue'
+import TtsProviderSettings from './TtsProviderSettings.vue'
 import AuditLogPage from '@/features/audit/AuditLogPage.vue'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { SYSTEM_TAB_INFO, SYSTEM_TABS, normalizeSystemTab, type SystemTab as Tab } from './lib/system-tabs'
@@ -52,6 +53,7 @@ const tabWidths: Record<Tab, string> = {
   'file-naming': 'max-w-7xl',
   'book-dock': 'max-w-3xl',
   maintenance: 'max-w-3xl',
+  'text-to-speech': 'max-w-3xl',
   'audit-log': 'max-w-7xl',
 }
 
@@ -87,6 +89,7 @@ function selectTab(tab: Tab) {
     <FileNamingSettings v-if="activeTab === 'file-naming'" embedded />
     <BookDockSettings v-else-if="activeTab === 'book-dock'" embedded />
     <MaintenanceSettings v-else-if="activeTab === 'maintenance'" embedded />
+    <TtsProviderSettings v-else-if="activeTab === 'text-to-speech'" embedded />
     <AuditLogPage v-else-if="activeTab === 'audit-log'" embedded />
   </div>
 </template>

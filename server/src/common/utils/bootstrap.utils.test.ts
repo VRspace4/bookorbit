@@ -152,6 +152,15 @@ describe('buildCspDirectives', () => {
       expect(connectSrc).toContain('https://cdn.jsdelivr.net');
     });
 
+    it('allows Azure Speech endpoints for browser TTS synthesis', () => {
+      const { connectSrc } = buildCspDirectives({ allowCloudflareInsights: false });
+
+      expect(connectSrc).toContain('https://*.api.cognitive.microsoft.com');
+      expect(connectSrc).toContain('https://*.tts.speech.microsoft.com');
+      expect(connectSrc).toContain('https://*.voice.speech.microsoft.com');
+      expect(connectSrc).toContain('https://*.cognitiveservices.azure.com');
+    });
+
     it('does not include Cloudflare Insights connect endpoint when disabled', () => {
       const { connectSrc } = buildCspDirectives({ allowCloudflareInsights: false });
 

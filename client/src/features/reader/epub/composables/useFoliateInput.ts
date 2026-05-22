@@ -3,6 +3,29 @@ const RIGHT_ZONE = 0.7
 const DOUBLE_CLICK_MS = 300
 const SWIPE_THRESHOLD = 50
 
+interface FoliateViewLike {
+  prev?: () => void
+  next?: () => void
+  prevSection?: () => void
+  nextSection?: () => void
+  renderer?: { getAttribute?: (name: string) => string | null }
+  getBoundingClientRect?: () => DOMRect
+}
+
+function isScrolledLayout(view: FoliateViewLike): boolean {
+  return view.renderer?.getAttribute?.('flow') === 'scrolled'
+}
+
+function navigatePrev(view: FoliateViewLike) {
+  if (isScrolledLayout(view)) view.prevSection?.()
+  else view.prev?.()
+}
+
+function navigateNext(view: FoliateViewLike) {
+  if (isScrolledLayout(view)) view.nextSection?.()
+  else view.next?.()
+}
+
 export function useFoliateInput(
   getView: () => unknown,
   onMiddleTap: (() => void) | undefined,
@@ -10,40 +33,98 @@ export function useFoliateInput(
   handleSelectionChange: (doc: Document) => void,
 ) {
   const clickedDocs = new WeakSet<Document>()
+  let viewTouchTarget: HTMLElement | null = null
+  let onViewTouchStart: ((e: TouchEvent) => void) | null = null
+  let onViewTouchMove: ((e: TouchEvent) => void) | null = null
+  let onViewTouchEnd: ((e: TouchEvent) => void) | null = null
 
   let lastClickTime = 0
   let lastClickZone: 'left' | 'middle' | 'right' | null = null
   let isNavigating = false
-  let touchStartX = 0
-  let touchStartY = 0
+  let touchStartScreenX = 0
+  let touchStartScreenY = 0
   let touchStartTime = 0
   let lastTouchTime = 0
   let isTextSelectionInProgress = false
+  let selectionActiveAtTouchStart = false
   let longHoldTimeout: ReturnType<typeof setTimeout> | null = null
 
   function getViewEl() {
-    return getView() as { prev?: () => void; next?: () => void; getBoundingClientRect?: () => DOMRect } | null
+    return getView() as FoliateViewLike | null
   }
 
-  function handleTouchStart(e: TouchEvent) {
+  function getActiveDoc(): Document | null {
+    const view = getView() as {
+      renderer?: { getContents?: () => { doc?: Document }[] }
+    } | null
+    return view?.renderer?.getContents?.()?.[0]?.doc ?? null
+  }
+
+  function hasActiveSelection(doc: Document) {
+    const selection = doc.defaultView?.getSelection()
+    return !!selection && !selection.isCollapsed && selection.rangeCount > 0
+  }
+
+  function stableTouchPoint(touch: Touch) {
+    return {
+      x: Number.isFinite(touch.screenX) ? touch.screenX : touch.clientX,
+      y: Number.isFinite(touch.screenY) ? touch.screenY : touch.clientY,
+    }
+  }
+
+  function postFoliateClick(touch: Touch, doc: Document | null) {
+    const viewRect = getViewEl()?.getBoundingClientRect?.()
+    if (!viewRect) return
+    const iframe = doc?.defaultView?.frameElement as HTMLIFrameElement | null
+    if (iframe) {
+      const iframeRect = iframe.getBoundingClientRect()
+      window.postMessage(
+        {
+          type: 'foliate-click',
+          clientX: iframeRect.left + touch.clientX,
+          clientY: iframeRect.top + touch.clientY,
+          iframeLeft: iframeRect.left,
+          iframeWidth: iframeRect.width,
+          eventClientX: touch.clientX,
+        },
+        window.location.origin,
+      )
+      return
+    }
+    window.postMessage(
+      {
+        type: 'foliate-click',
+        clientX: touch.clientX,
+        clientY: touch.clientY,
+        iframeLeft: viewRect.left,
+        iframeWidth: viewRect.width,
+        eventClientX: touch.clientX - viewRect.left,
+      },
+      window.location.origin,
+    )
+  }
+
+  function handleTouchStart(e: TouchEvent, doc: Document | null) {
     if (e.touches.length !== 1) return
     const touch = e.touches[0]!
-    touchStartX = touch.clientX
-    touchStartY = touch.clientY
+    const stablePoint = stableTouchPoint(touch)
+    touchStartScreenX = stablePoint.x
+    touchStartScreenY = stablePoint.y
     touchStartTime = Date.now()
     isTextSelectionInProgress = false
+    selectionActiveAtTouchStart = doc ? hasActiveSelection(doc) : false
     longHoldTimeout = setTimeout(() => {
       longHoldTimeout = null
     }, 500)
   }
 
-  function handleTouchMove(e: TouchEvent, doc: Document) {
+  function handleTouchMove(e: TouchEvent, doc: Document | null) {
     if (e.touches.length !== 1) return
     const touch = e.touches[0]!
-    const deltaX = Math.abs(touch.clientX - touchStartX)
-    const deltaY = Math.abs(touch.clientY - touchStartY)
-    const selection = doc.defaultView?.getSelection()
-    if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
+    const stablePoint = stableTouchPoint(touch)
+    const deltaX = Math.abs(stablePoint.x - touchStartScreenX)
+    const deltaY = Math.abs(stablePoint.y - touchStartScreenY)
+    if (doc && hasActiveSelection(doc) && !selectionActiveAtTouchStart) {
       isTextSelectionInProgress = true
       e.preventDefault()
       return
@@ -51,55 +132,44 @@ export function useFoliateInput(
     if (deltaX > 10 && deltaX > deltaY && !isTextSelectionInProgress) return
   }
 
-  function handleTouchEnd(e: TouchEvent, doc: Document) {
+  function handleTouchEnd(e: TouchEvent, doc: Document | null) {
     const touchEndTime = Date.now()
     const touchDuration = touchEndTime - touchStartTime
     lastTouchTime = touchEndTime
 
-    const selection = doc.defaultView?.getSelection()
-    const hasSelection = selection && !selection.isCollapsed && selection.rangeCount > 0
-
-    if (hasSelection) {
-      isTextSelectionInProgress = false
-      e.preventDefault()
-      setTimeout(() => handleSelectionEnd(doc), 50)
-      return
-    }
-
-    if (!isTextSelectionInProgress && e.changedTouches.length === 1) {
-      const touch = e.changedTouches[0]!
-      const deltaX = touch.clientX - touchStartX
-      const deltaY = Math.abs(touch.clientY - touchStartY)
-
-      if (Math.abs(deltaX) >= SWIPE_THRESHOLD && Math.abs(deltaX) > deltaY) {
-        if (isNavigating) return
-        isNavigating = true
-        if (deltaX < 0) getViewEl()?.next?.()
-        else getViewEl()?.prev?.()
-        setTimeout(() => (isNavigating = false), 300)
+    try {
+      if (doc && hasActiveSelection(doc) && !selectionActiveAtTouchStart) {
+        e.preventDefault()
+        setTimeout(() => handleSelectionEnd(doc), 50)
         return
       }
 
-      if (touchDuration < 500 && Math.abs(deltaX) < 10 && deltaY < 10) {
-        const iframe = doc.defaultView?.frameElement as HTMLIFrameElement | null
-        if (!iframe) return
-        const iframeRect = iframe.getBoundingClientRect()
-        const viewportX = iframeRect.left + touch.clientX
-        window.postMessage(
-          {
-            type: 'foliate-click',
-            clientX: viewportX,
-            clientY: iframeRect.top + touch.clientY,
-            iframeLeft: iframeRect.left,
-            iframeWidth: iframeRect.width,
-            eventClientX: touch.clientX,
-          },
-          window.location.origin,
-        )
-      }
-    }
+      if (!isTextSelectionInProgress && e.changedTouches.length === 1) {
+        const touch = e.changedTouches[0]!
+        const stablePoint = stableTouchPoint(touch)
+        const deltaX = stablePoint.x - touchStartScreenX
+        const deltaY = Math.abs(stablePoint.y - touchStartScreenY)
 
-    isTextSelectionInProgress = false
+        if (Math.abs(deltaX) >= SWIPE_THRESHOLD && Math.abs(deltaX) > deltaY) {
+          if (isNavigating) return
+          const view = getViewEl()
+          if (!view) return
+          isNavigating = true
+          e.preventDefault()
+          if (deltaX < 0) navigateNext(view)
+          else navigatePrev(view)
+          setTimeout(() => (isNavigating = false), 300)
+          return
+        }
+
+        if (touchDuration < 500 && Math.abs(deltaX) < 10 && deltaY < 10) {
+          postFoliateClick(touch, doc)
+        }
+      }
+    } finally {
+      isTextSelectionInProgress = false
+      selectionActiveAtTouchStart = false
+    }
   }
 
   function attachIframeClicks(doc: Document) {
@@ -147,11 +217,38 @@ export function useFoliateInput(
       true,
     )
 
-    doc.addEventListener('touchstart', (e: TouchEvent) => handleTouchStart(e), { passive: true })
+    // Touches inside the EPUB iframe do not bubble to foliate-view; handle them here.
+    doc.addEventListener('touchstart', (e: TouchEvent) => handleTouchStart(e, doc), { passive: true })
     doc.addEventListener('touchmove', (e: TouchEvent) => handleTouchMove(e, doc), { passive: false })
     doc.addEventListener('touchend', (e: TouchEvent) => handleTouchEnd(e, doc), { passive: false })
 
     doc.addEventListener('selectionchange', () => handleSelectionChange(doc))
+  }
+
+  function detachViewTouches() {
+    if (!viewTouchTarget || !onViewTouchStart || !onViewTouchMove || !onViewTouchEnd) return
+    const opts = { capture: true } as const
+    viewTouchTarget.removeEventListener('touchstart', onViewTouchStart, opts)
+    viewTouchTarget.removeEventListener('touchmove', onViewTouchMove, opts)
+    viewTouchTarget.removeEventListener('touchend', onViewTouchEnd, opts)
+    viewTouchTarget = null
+    onViewTouchStart = null
+    onViewTouchMove = null
+    onViewTouchEnd = null
+  }
+
+  /** Capture-phase listeners on the reader surface (includes margin areas outside the iframe). */
+  function attachViewTouches(viewEl: HTMLElement) {
+    if (viewTouchTarget === viewEl) return
+    detachViewTouches()
+    viewTouchTarget = viewEl
+    onViewTouchStart = (e) => handleTouchStart(e, getActiveDoc())
+    onViewTouchMove = (e) => handleTouchMove(e, getActiveDoc())
+    onViewTouchEnd = (e) => handleTouchEnd(e, getActiveDoc())
+    const capture = { capture: true } as const
+    viewEl.addEventListener('touchstart', onViewTouchStart, { ...capture, passive: true })
+    viewEl.addEventListener('touchmove', onViewTouchMove, { ...capture, passive: false })
+    viewEl.addEventListener('touchend', onViewTouchEnd, { ...capture, passive: false })
   }
 
   function handleWindowMessage(e: MessageEvent) {
@@ -193,13 +290,14 @@ export function useFoliateInput(
 
       const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0
 
-      if (currentZone === 'left' && !isMobile) {
+      const view = getViewEl()
+      if (currentZone === 'left' && !isMobile && view) {
         isNavigating = true
-        getViewEl()?.prev?.()
+        navigatePrev(view)
         setTimeout(() => (isNavigating = false), 300)
-      } else if (currentZone === 'right' && !isMobile) {
+      } else if (currentZone === 'right' && !isMobile && view) {
         isNavigating = true
-        getViewEl()?.next?.()
+        navigateNext(view)
         setTimeout(() => (isNavigating = false), 300)
       } else {
         onMiddleTap?.()
@@ -213,16 +311,16 @@ export function useFoliateInput(
     const view = getViewEl()
     if (!view) return
     if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
-      view.prev?.()
+      navigatePrev(view)
       e.preventDefault()
     } else if (e.key === 'ArrowRight' || e.key === 'PageDown') {
-      view.next?.()
+      navigateNext(view)
       e.preventDefault()
     } else if (e.key === ' ' && e.shiftKey) {
-      view.prev?.()
+      navigatePrev(view)
       e.preventDefault()
     } else if (e.key === ' ') {
-      view.next?.()
+      navigateNext(view)
       e.preventDefault()
     }
   }
@@ -231,9 +329,10 @@ export function useFoliateInput(
   document.addEventListener('keydown', handleKeydown)
 
   function cleanup() {
+    detachViewTouches()
     window.removeEventListener('message', handleWindowMessage)
     document.removeEventListener('keydown', handleKeydown)
   }
 
-  return { attachIframeClicks, cleanup }
+  return { attachIframeClicks, attachViewTouches, cleanup }
 }

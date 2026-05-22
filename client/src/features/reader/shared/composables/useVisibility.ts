@@ -1,18 +1,33 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 
-export function useVisibility() {
-  const headerVisible = ref(false)
-  const footerVisible = ref(false)
+export const READER_DESKTOP_MIN_WIDTH = 768
 
-  let isPinned = false
+export function isReaderDesktopViewport() {
+  return typeof window !== 'undefined' && window.matchMedia(`(min-width: ${READER_DESKTOP_MIN_WIDTH}px)`).matches
+}
+
+export function useVisibility() {
+  const desktopDefaultVisible = isReaderDesktopViewport()
+  const headerVisible = ref(desktopDefaultVisible)
+  const footerVisible = ref(desktopDefaultVisible)
+
+  let isPinned = desktopDefaultVisible
   let isVisibilityLocked = false
   let hideTimer: ReturnType<typeof setTimeout> | null = null
+  let desktopMediaQuery: MediaQueryList | null = null
 
   const HEADER_TRIGGER = 24
   const FOOTER_TRIGGER = 24
 
-  function scheduleHide() {
+  function clearHideTimer() {
     if (hideTimer) clearTimeout(hideTimer)
+    hideTimer = null
+  }
+
+  function scheduleHide() {
+    if (isReaderDesktopViewport() && isPinned) return
+
+    clearHideTimer()
     hideTimer = setTimeout(() => {
       if (!isPinned && !isVisibilityLocked) {
         headerVisible.value = false
@@ -21,8 +36,26 @@ export function useVisibility() {
     }, 3000)
   }
 
+  function applyViewportDefaults() {
+    if (isVisibilityLocked) return
+
+    if (isReaderDesktopViewport()) {
+      isPinned = true
+      headerVisible.value = true
+      footerVisible.value = true
+      clearHideTimer()
+      return
+    }
+
+    isPinned = false
+    headerVisible.value = false
+    footerVisible.value = false
+    clearHideTimer()
+  }
+
   function onMouseMove(e: MouseEvent) {
     if (isVisibilityLocked) return
+    if (isReaderDesktopViewport() && isPinned) return
 
     const y = e.clientY
     const height = window.innerHeight
@@ -51,7 +84,7 @@ export function useVisibility() {
     headerVisible.value = isPinned
     footerVisible.value = isPinned
     if (!isPinned) {
-      if (hideTimer) clearTimeout(hideTimer)
+      clearHideTimer()
     }
   }
 
@@ -61,10 +94,13 @@ export function useVisibility() {
       return
     }
 
-    if (!isPinned) {
+    if (isPinned) {
       headerVisible.value = true
-      scheduleHide()
+      return
     }
+
+    headerVisible.value = true
+    scheduleHide()
   }
 
   function showFooter() {
@@ -73,23 +109,26 @@ export function useVisibility() {
       return
     }
 
-    if (!isPinned) {
+    if (isPinned) {
       footerVisible.value = true
-      scheduleHide()
+      return
     }
+
+    footerVisible.value = true
+    scheduleHide()
   }
 
   function setVisibilityLock(locked: boolean) {
     isVisibilityLocked = locked
 
-    if (hideTimer) clearTimeout(hideTimer)
+    clearHideTimer()
 
     if (locked) {
       headerVisible.value = true
       return
     }
 
-    if (isPinned) {
+    if (isPinned || isReaderDesktopViewport()) {
       headerVisible.value = true
       footerVisible.value = true
       return
@@ -101,11 +140,15 @@ export function useVisibility() {
 
   onMounted(() => {
     document.addEventListener('mousemove', onMouseMove)
+    desktopMediaQuery = window.matchMedia(`(min-width: ${READER_DESKTOP_MIN_WIDTH}px)`)
+    desktopMediaQuery.addEventListener('change', applyViewportDefaults)
+    applyViewportDefaults()
   })
 
   onUnmounted(() => {
     document.removeEventListener('mousemove', onMouseMove)
-    if (hideTimer) clearTimeout(hideTimer)
+    desktopMediaQuery?.removeEventListener('change', applyViewportDefaults)
+    clearHideTimer()
   })
 
   return { headerVisible, footerVisible, handleMiddleTap, onMouseMove, showHeader, showFooter, setVisibilityLock }

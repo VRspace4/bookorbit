@@ -76,6 +76,16 @@ describe('ReaderSettings', () => {
       expect(accountCard.text()).toContain('Active')
     })
 
+    it('shows "My account" as active when syncReaderPreferences is unset', () => {
+      userState.settings = {}
+      const wrapper = mountComponent()
+
+      const cards = wrapper.findAll('.rounded-lg.border-2')
+      const accountCard = cards[1]!
+      expect(accountCard.classes()).toContain('border-primary')
+      expect(accountCard.text()).toContain('Active')
+    })
+
     it('does not show "Not available" badge for My account', () => {
       userState.settings = { syncReaderPreferences: false }
       const wrapper = mountComponent()

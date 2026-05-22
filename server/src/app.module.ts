@@ -60,6 +60,7 @@ import { KoreaderModule } from './modules/koreader/koreader.module';
 import { AppInfoModule } from './modules/app-info/app-info.module';
 import { AchievementModule } from './modules/achievement/achievement.module';
 import { HardcoverModule } from './modules/hardcover/hardcover.module';
+import { TtsModule } from './modules/tts/tts.module';
 
 @Module({
   imports: [
@@ -128,6 +129,7 @@ import { HardcoverModule } from './modules/hardcover/hardcover.module';
     AppInfoModule,
     AchievementModule,
     HardcoverModule,
+    TtsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

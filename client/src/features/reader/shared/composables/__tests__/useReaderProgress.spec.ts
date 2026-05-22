@@ -47,6 +47,7 @@ describe('useReaderProgress', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    localStorage.clear()
     apiMock.mockResolvedValue({ ok: true, json: async () => ({}) })
     elapsedMinutes.value = 0
   })
@@ -192,5 +193,124 @@ describe('useReaderProgress', () => {
     expect(saveCalls.length).toBe(1)
 
     vi.useRealTimers()
+  })
+
+  it('flushes pending save immediately on flush()', async () => {
+    vi.useFakeTimers()
+    const progress = useReaderProgress(1, 1, elapsedMinutes)
+
+    progress.onRelocate(makeDetail({ fraction: 0.42, cfi: 'epubcfi(/6/8)' }))
+
+    expect(apiMock).not.toHaveBeenCalled()
+
+    await progress.flush()
+
+    const saveCalls = apiMock.mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
+    )
+    expect(saveCalls.length).toBe(1)
+    expect(JSON.parse((saveCalls[0]![1] as { body: string }).body)).toMatchObject({
+      cfi: 'epubcfi(/6/8)',
+      percentage: 42,
+      positionSeconds: null,
+      ttsSectionIndex: null,
+      ttsWordIndex: null,
+    })
+
+    vi.useRealTimers()
+  })
+
+  it('loads cached progress before server progress is available', async () => {
+    localStorage.setItem(
+      'reader:progress:12',
+      JSON.stringify({
+        cfi: 'epubcfi(/6/10)',
+        pageNumber: 4,
+        positionSeconds: null,
+        percentage: 44,
+        updatedAt: new Date('2026-05-21T12:00:00.000Z').toISOString(),
+      }),
+    )
+    apiMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        cfi: 'epubcfi(/6/2)',
+        pageNumber: 1,
+        positionSeconds: null,
+        percentage: 10,
+        updatedAt: new Date('2026-05-21T11:00:00.000Z').toISOString(),
+      }),
+    })
+
+    const progress = useReaderProgress(1, 12, elapsedMinutes)
+    await progress.load()
+
+    expect(progress.cfi.value).toBe('epubcfi(/6/10)')
+    expect(progress.percentage.value).toBe(44)
+    expect(apiMock).toHaveBeenCalledWith(
+      '/api/v1/books/files/12/progress',
+      expect.objectContaining({
+        method: 'POST',
+      }),
+    )
+  })
+
+  it('writes relocated progress to localStorage immediately', () => {
+    vi.useFakeTimers()
+    const progress = useReaderProgress(1, 13, elapsedMinutes)
+
+    progress.onRelocate(makeDetail({ cfi: 'epubcfi(/6/12)', fraction: 0.62 }))
+
+    const cached = JSON.parse(localStorage.getItem('reader:progress:13') ?? '{}')
+    expect(cached).toMatchObject({
+      cfi: 'epubcfi(/6/12)',
+      percentage: 62,
+      positionSeconds: null,
+    })
+
+    vi.useRealTimers()
+  })
+
+  it('persists TTS position in debounced progress saves', async () => {
+    vi.useFakeTimers()
+    const progress = useReaderProgress(1, 14, elapsedMinutes)
+
+    progress.updateTtsPosition(3, 42)
+
+    await vi.advanceTimersByTimeAsync(2500)
+
+    const saveCalls = apiMock.mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
+    )
+    expect(saveCalls.length).toBe(1)
+    expect(JSON.parse((saveCalls[0]![1] as { body: string }).body)).toMatchObject({
+      ttsSectionIndex: 3,
+      ttsWordIndex: 42,
+    })
+
+    const cached = JSON.parse(localStorage.getItem('reader:progress:14') ?? '{}')
+    expect(cached).toMatchObject({ ttsSectionIndex: 3, ttsWordIndex: 42 })
+
+    vi.useRealTimers()
+  })
+
+  it('loads persisted TTS position from the server', async () => {
+    apiMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        cfi: 'epubcfi(/6/2)',
+        pageNumber: null,
+        positionSeconds: null,
+        percentage: 10,
+        ttsSectionIndex: 5,
+        ttsWordIndex: 88,
+        updatedAt: new Date('2026-05-21T12:00:00.000Z').toISOString(),
+      }),
+    })
+
+    const progress = useReaderProgress(1, 15, elapsedMinutes)
+    await progress.load()
+
+    expect(progress.getTtsPosition()).toEqual({ sectionIndex: 5, wordIndex: 88 })
   })
 })

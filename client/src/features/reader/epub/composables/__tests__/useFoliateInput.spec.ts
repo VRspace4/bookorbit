@@ -4,12 +4,15 @@ import { useFoliateInput } from '../useFoliateInput'
 interface ViewLike {
   prev: () => void
   next: () => void
+  prevSection?: () => void
+  nextSection?: () => void
+  renderer?: { getAttribute: (name: string) => string | null }
   getBoundingClientRect: () => DOMRect
 }
 
 type DocTarget = EventTarget & Document
 
-function makeDocTarget(): DocTarget {
+function makeDocTarget(options: { getSelection?: () => Selection | null } = {}): DocTarget {
   const target = new EventTarget() as DocTarget
   const frameElement = {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) as DOMRect,
@@ -19,11 +22,37 @@ function makeDocTarget(): DocTarget {
     configurable: true,
     value: {
       frameElement,
-      getSelection: () => null,
+      getSelection: options.getSelection ?? (() => null),
     },
   })
 
   return target
+}
+
+function makeTouch(clientX: number, clientY: number, screenX = clientX, screenY = clientY) {
+  return { clientX, clientY, screenX, screenY } as Touch
+}
+
+function makeTouchEvent(type: string, touches: Touch[], changedTouches = touches) {
+  const event = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent
+  Object.defineProperty(event, 'touches', { configurable: true, value: touches })
+  Object.defineProperty(event, 'changedTouches', { configurable: true, value: changedTouches })
+  return event
+}
+
+function makeViewHost(view: ViewLike, doc?: DocTarget) {
+  const host = document.createElement('div')
+  Object.defineProperty(host, 'getBoundingClientRect', {
+    configurable: true,
+    value: view.getBoundingClientRect,
+  })
+  if (doc) {
+    view.renderer = {
+      getAttribute: view.renderer?.getAttribute,
+      getContents: () => [{ doc: doc as unknown as Document }],
+    }
+  }
+  return host
 }
 
 describe('useFoliateInput', () => {
@@ -152,6 +181,145 @@ describe('useFoliateInput', () => {
     if (originalOntouchstart) {
       Object.defineProperty(window, 'ontouchstart', originalOntouchstart)
     }
+  })
+
+  it('allows scrolling when a text selection already existed before the touch gesture', () => {
+    const selection = { isCollapsed: false, rangeCount: 1 } as Selection
+    const handleSelectionEnd = vi.fn<(doc: Document) => void>()
+    const doc = makeDocTarget({ getSelection: () => selection })
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+    const host = makeViewHost(view, doc)
+    const input = useFoliateInput(() => view, undefined, handleSelectionEnd, vi.fn<() => void>())
+
+    input.attachViewTouches(host)
+
+    host.dispatchEvent(makeTouchEvent('touchstart', [makeTouch(20, 20)]))
+    const move = makeTouchEvent('touchmove', [makeTouch(20, 120)])
+    host.dispatchEvent(move)
+    const end = makeTouchEvent('touchend', [], [makeTouch(20, 120)])
+    host.dispatchEvent(end)
+
+    expect(move.defaultPrevented).toBe(false)
+    expect(end.defaultPrevented).toBe(false)
+    expect(handleSelectionEnd).not.toHaveBeenCalled()
+
+    input.cleanup()
+  })
+
+  it('navigates on horizontal swipe from the reader host (margin areas outside iframe)', () => {
+    const prev = vi.fn<() => void>()
+    const next = vi.fn<() => void>()
+    const view: ViewLike = {
+      prev,
+      next,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+    const host = makeViewHost(view)
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>())
+
+    input.attachViewTouches(host)
+
+    host.dispatchEvent(makeTouchEvent('touchstart', [makeTouch(10, 50)]))
+    host.dispatchEvent(makeTouchEvent('touchend', [], [makeTouch(90, 50)]))
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(prev).not.toHaveBeenCalled()
+
+    input.cleanup()
+  })
+
+  it('navigates sections on horizontal swipe when layout is scrolled', () => {
+    const prev = vi.fn<() => void>()
+    const next = vi.fn<() => void>()
+    const prevSection = vi.fn<() => void>()
+    const nextSection = vi.fn<() => void>()
+    const view: ViewLike = {
+      prev,
+      next,
+      prevSection,
+      nextSection,
+      renderer: { getAttribute: (name) => (name === 'flow' ? 'scrolled' : null) },
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+    const doc = makeDocTarget()
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>())
+
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [makeTouch(200, 100)]))
+    doc.dispatchEvent(makeTouchEvent('touchend', [], [makeTouch(100, 100)]))
+
+    expect(prevSection).toHaveBeenCalledTimes(1)
+    expect(nextSection).not.toHaveBeenCalled()
+    expect(prev).not.toHaveBeenCalled()
+    expect(next).not.toHaveBeenCalled()
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [makeTouch(100, 100)]))
+    doc.dispatchEvent(makeTouchEvent('touchend', [], [makeTouch(200, 100)]))
+
+    expect(nextSection).toHaveBeenCalledTimes(1)
+
+    input.cleanup()
+  })
+
+  it('does not treat a vertical scroll as a page turn when iframe-relative clientY stays fixed', () => {
+    const prev = vi.fn<() => void>()
+    const next = vi.fn<() => void>()
+    const view: ViewLike = {
+      prev,
+      next,
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+    const doc = makeDocTarget()
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>())
+
+    input.attachIframeClicks(doc)
+
+    doc.dispatchEvent(makeTouchEvent('touchstart', [makeTouch(20, 200, 20, 200)]))
+    doc.dispatchEvent(makeTouchEvent('touchmove', [makeTouch(80, 200, 80, 80)]))
+    doc.dispatchEvent(makeTouchEvent('touchend', [], [makeTouch(80, 200, 80, 80)]))
+
+    expect(prev).not.toHaveBeenCalled()
+    expect(next).not.toHaveBeenCalled()
+
+    input.cleanup()
+  })
+
+  it('still suppresses scrolling while a new touch text selection is being made', () => {
+    vi.useFakeTimers()
+
+    const selection = { isCollapsed: false, rangeCount: 1 } as Selection
+    let activeSelection: Selection | null = null
+    const handleSelectionEnd = vi.fn<(doc: Document) => void>()
+    const doc = makeDocTarget({ getSelection: () => activeSelection })
+    const view: ViewLike = {
+      prev: vi.fn<() => void>(),
+      next: vi.fn<() => void>(),
+      getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+    }
+    const host = makeViewHost(view, doc)
+    const input = useFoliateInput(() => view, undefined, handleSelectionEnd, vi.fn<() => void>())
+
+    input.attachViewTouches(host)
+
+    host.dispatchEvent(makeTouchEvent('touchstart', [makeTouch(20, 20)]))
+    activeSelection = selection
+
+    const move = makeTouchEvent('touchmove', [makeTouch(22, 24)])
+    host.dispatchEvent(move)
+    const end = makeTouchEvent('touchend', [], [makeTouch(22, 24)])
+    host.dispatchEvent(end)
+
+    expect(move.defaultPrevented).toBe(true)
+    expect(end.defaultPrevented).toBe(true)
+    vi.advanceTimersByTime(50)
+    expect(handleSelectionEnd).toHaveBeenCalledWith(doc)
+
+    input.cleanup()
   })
 
   it('stops responding to document keydown after cleanup', () => {

@@ -5,6 +5,7 @@ import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { isReaderSyncEnabled, pushLocalReaderPreferencesToBackend } from '@/features/reader/shared/composables/useReaderSettings'
 import SettingsPageHeader from './SettingsPageHeader.vue'
 
 const props = withDefaults(
@@ -19,7 +20,7 @@ const props = withDefaults(
 const { user } = useAuth()
 const { isDemoRestrictedAccount } = usePermissions()
 
-const syncEnabled = computed(() => !isDemoRestrictedAccount.value && (user.value?.settings?.syncReaderPreferences ?? false))
+const syncEnabled = computed(() => !isDemoRestrictedAccount.value && isReaderSyncEnabled(user.value))
 
 async function setStorageMode(sync: boolean) {
   if (!user.value || syncEnabled.value === sync) return
@@ -35,6 +36,9 @@ async function setStorageMode(sync: boolean) {
     })
     if (res.ok) {
       user.value = { ...user.value, settings: { ...user.value.settings, syncReaderPreferences: sync } }
+      if (sync) {
+        await pushLocalReaderPreferencesToBackend()
+      }
       toast.success(sync ? 'Preferences will now be synced' : 'Preferences will stay on this device')
     } else {
       toast.error('Failed to update storage mode')

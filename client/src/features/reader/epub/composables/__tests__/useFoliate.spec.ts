@@ -28,6 +28,7 @@ vi.mock('../useFoliateInput', () => ({
   useFoliateInput: () => ({
     cleanup: vi.fn<() => void>(),
     attachIframeClicks: vi.fn<() => void>(),
+    attachViewTouches: vi.fn<() => void>(),
   }),
 }))
 
@@ -38,10 +39,12 @@ describe('useFoliate.open', () => {
   let container: HTMLDivElement
   let mockGoTo: ReturnType<typeof vi.fn>
   let mockGoToFraction: ReturnType<typeof vi.fn>
+  let loadHandlers: Array<(event: Event) => void>
 
   beforeEach(() => {
     container = document.createElement('div')
     document.body.appendChild(container)
+    loadHandlers = []
 
     mockGoTo = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
     mockGoToFraction = vi.fn<() => void>()
@@ -54,6 +57,9 @@ describe('useFoliate.open', () => {
           open: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
           goTo: mockGoTo,
           goToFraction: mockGoToFraction,
+          addEventListener: vi.fn<(type: string, handler: (event: Event) => void) => void>((type, handler) => {
+            if (type === 'load') loadHandlers.push(handler)
+          }),
           renderer: {
             setAttribute: vi.fn<(name: string, value: string) => void>(),
             removeAttribute: vi.fn<(name: string) => void>(),
@@ -80,34 +86,15 @@ describe('useFoliate.open', () => {
     delete (window as { makeStreamingBook?: unknown }).makeStreamingBook
   })
 
-  it('navigates to CFI when cfi is provided', async () => {
-    const foliate = useFoliate(() => container)
+  async function dispatchLoad() {
+    for (const handler of loadHandlers) {
+      handler(new CustomEvent('load', { detail: { doc: document } }))
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
 
-    await foliate.open(1, 1, 'epub', 'epubcfi(/6/2!)', undefined)
-
-    expect(mockGoTo).toHaveBeenCalledWith('epubcfi(/6/2!)')
-    expect(mockGoToFraction).not.toHaveBeenCalled()
-  })
-
-  it('navigates to fallback fraction when cfi is null and fraction > 0', async () => {
-    const foliate = useFoliate(() => container)
-
-    await foliate.open(1, 1, 'epub', null, 0.42)
-
-    expect(mockGoTo).not.toHaveBeenCalled()
-    expect(mockGoToFraction).toHaveBeenCalledWith(0.42)
-  })
-
-  it('navigates to position 0 when cfi is null and fraction is 0', async () => {
-    const foliate = useFoliate(() => container)
-
-    await foliate.open(1, 1, 'epub', null, 0)
-
-    expect(mockGoTo).toHaveBeenCalledWith(0)
-    expect(mockGoToFraction).not.toHaveBeenCalled()
-  })
-
-  it('navigates to position 0 when cfi is null and fraction is undefined', async () => {
+  it('opens at position 0 to trigger the initial load event', async () => {
     const foliate = useFoliate(() => container)
 
     await foliate.open(1, 1, 'epub', null, undefined)
@@ -116,11 +103,55 @@ describe('useFoliate.open', () => {
     expect(mockGoToFraction).not.toHaveBeenCalled()
   })
 
-  it('gracefully handles goTo rejection without propagating', async () => {
-    mockGoTo.mockRejectedValue(new Error('invalid CFI'))
+  it('restores CFI after the initial load event', async () => {
     const foliate = useFoliate(() => container)
 
-    await expect(foliate.open(1, 1, 'epub', 'epubcfi(/bad)', undefined)).resolves.toBeUndefined()
+    await foliate.open(1, 1, 'epub', 'epubcfi(/6/2!)', undefined)
+    mockGoTo.mockClear()
+
+    await dispatchLoad()
+
+    expect(mockGoTo).toHaveBeenCalledWith('epubcfi(/6/2!)')
+    expect(mockGoToFraction).not.toHaveBeenCalled()
+  })
+
+  it('restores fallback fraction after the initial load event when cfi is null', async () => {
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 1, 'epub', null, 0.42)
+    mockGoTo.mockClear()
+
+    await dispatchLoad()
+
+    expect(mockGoTo).not.toHaveBeenCalled()
+    expect(mockGoToFraction).toHaveBeenCalledWith(0.42)
+  })
+
+  it('does not restore when cfi is null and fraction is 0', async () => {
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 1, 'epub', null, 0)
+    mockGoTo.mockClear()
+
+    await dispatchLoad()
+
+    expect(mockGoTo).not.toHaveBeenCalled()
+    expect(mockGoToFraction).not.toHaveBeenCalled()
+  })
+
+  it('falls back to fraction when CFI navigation fails after load', async () => {
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 1, 'epub', 'epubcfi(/bad)', 0.75)
+    mockGoTo.mockClear()
+    mockGoTo.mockImplementation(async (target: string | number) => {
+      if (typeof target === 'string') throw new Error('invalid CFI')
+    })
+
+    await dispatchLoad()
+
+    expect(mockGoTo).toHaveBeenCalledWith('epubcfi(/bad)')
+    expect(mockGoToFraction).toHaveBeenCalledWith(0.75)
   })
 
   it('does not call goTo or goToFraction when container is null', async () => {
@@ -129,15 +160,6 @@ describe('useFoliate.open', () => {
     await foliate.open(1, 1, 'epub', 'epubcfi(/6/2!)', 0.5)
 
     expect(mockGoTo).not.toHaveBeenCalled()
-    expect(mockGoToFraction).not.toHaveBeenCalled()
-  })
-
-  it('prefers cfi over fallback fraction when both are provided', async () => {
-    const foliate = useFoliate(() => container)
-
-    await foliate.open(1, 1, 'epub', 'epubcfi(/6/4!)', 0.75)
-
-    expect(mockGoTo).toHaveBeenCalledWith('epubcfi(/6/4!)')
     expect(mockGoToFraction).not.toHaveBeenCalled()
   })
 })

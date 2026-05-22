@@ -1291,7 +1291,17 @@ export class BookService {
 
   async saveProgress(userId: number, fileId: number, dto: SaveProgressDto, user: RequestUser) {
     const file = await this.verifyFileAccess(fileId, user);
-    await this.bookRepo.upsertProgress(userId, fileId, dto.cfi ?? null, dto.pageNumber ?? null, dto.percentage, dto.positionSeconds ?? null);
+    const hasTtsPosition = dto.ttsSectionIndex !== undefined || dto.ttsWordIndex !== undefined;
+    await this.bookRepo.upsertProgress(
+      userId,
+      fileId,
+      dto.cfi ?? null,
+      dto.pageNumber ?? null,
+      dto.percentage,
+      dto.positionSeconds ?? null,
+      hasTtsPosition ? (dto.ttsSectionIndex ?? null) : undefined,
+      hasTtsPosition ? (dto.ttsWordIndex ?? null) : undefined,
+    );
     this.libraryService
       .findOne(file.libraryId)
       .then((lib) =>
