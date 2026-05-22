@@ -5,6 +5,8 @@
  * - `fileAvailability` - derived from `books.status` ('present' | 'missing')
  * - `readProgress` - aggregated from `reading_progress.percentage` (per-user, per-book-file)
  * - `readStatus` - stored in `user_book_status.status` (per-user)
+ * - `startedAt` - from `user_book_status.started_at` (per-user)
+ * - `finishedAt` - from `user_book_status.finished_at` (per-user)
  * - `author` - resolved via `book_authors` join to `authors.name`
  * - `genre` - resolved via `book_genres` join to `genres.name`
  * - `tag` - resolved via `book_tags` join to `tags.name`
@@ -28,6 +30,8 @@ export type RuleField =
   | "library"
   | "format"
   | "addedAt"
+  | "startedAt"
+  | "finishedAt"
   | "fileAvailability"
   | "rating"
   | "readProgress"
@@ -78,6 +82,8 @@ export const FIELD_OPERATORS: Record<RuleField, RuleOperator[]> = {
   seriesIndex: ["eq", "notEq", "gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   pageCount: ["gt", "gte", "lt", "lte", "between", "isEmpty", "isNotEmpty"],
   addedAt: ["before", "after", "between", "withinLast"],
+  startedAt: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
+  finishedAt: ["before", "after", "between", "withinLast", "isEmpty", "isNotEmpty"],
   fileAvailability: ["isMissing", "isPresent"],
   rating: ["eq", "gt", "gte", "lt", "lte", "isEmpty", "isNotEmpty"],
   readProgress: ["isUnread", "isInProgress", "isFinished"],
@@ -140,6 +146,7 @@ export type GroupRule = {
  * - `readProgress` - aggregated from `reading_progress.percentage` (per-user, correlated subquery)
  * - `readStatus` - from `user_book_status.status` (per-user, correlated subquery)
  * - `lastReadAt` - max `reading_progress.updated_at` across all files (per-user, correlated subquery)
+ * - `startedAt` - from `user_book_status.started_at` (per-user, correlated subquery)
  * - `finishedAt` - from `user_book_status.finished_at` (per-user, correlated subquery)
  * - `rating` - from `user_book_ratings.rating` (per-user, correlated subquery)
  * - `format` - from `book_files.format` for the primary file (correlated subquery)
@@ -164,6 +171,7 @@ export type SortField =
   | "readStatus"
   | "format"
   | "lastReadAt"
+  | "startedAt"
   | "finishedAt"
   | "random"
   | "language"
@@ -185,6 +193,7 @@ export const SORT_FIELDS: SortField[] = [
   "readStatus",
   "format",
   "lastReadAt",
+  "startedAt",
   "finishedAt",
   "random",
   "language",

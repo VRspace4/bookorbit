@@ -16,6 +16,7 @@ import { inArray, type SQL } from 'drizzle-orm';
 import { bookCoverDirPath, bookThumbnailPath, findPreferredBookCoverFileName } from '../../common/book-cover-storage';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { isDateKey, resolveTimeZone, toDateKeyInTimeZone, toTimeZoneStartOfDay } from '../../common/utils/timezone.utils';
 import { extractEpubMetadata } from '../metadata/lib/epub';
 import { extractCbzMetadata, extractCbrMetadata, extractCb7Metadata } from '../metadata/lib/cbz-metadata';
 import { parseFb2File } from '../metadata/lib/fb2-parser';
@@ -31,7 +32,16 @@ import {
   isAudioFormat,
   resolveUploadPath,
 } from '@bookorbit/types';
-import type { AudiobookChapter, BookKoboState, BookMetadataLockField, BookQuery, BooksPage, MetadataField, ReadStatus } from '@bookorbit/types';
+import type {
+  AudiobookChapter,
+  BookKoboState,
+  BookMetadataLockField,
+  BookQuery,
+  BooksPage,
+  MetadataField,
+  ReadStatus,
+  UserBookStatus,
+} from '@bookorbit/types';
 import { assembleBookCards, assembleCollapsedBookCards } from './utils/assemble-book-cards';
 import type { RequestUser } from '../../common/types/request-user';
 import { AppSettingsService } from '../app-settings/app-settings.service';
@@ -59,6 +69,7 @@ import { SaveProgressDto } from './dto/save-progress.dto';
 import { UpsertAudioProgressDto } from './dto/upsert-audio-progress.dto';
 import { UpdateBookMetadataDto } from './dto/update-book-metadata.dto';
 import { buildBookDetailSupplementalFields } from './utils/build-book-detail-supplemental-fields';
+import type { SetStatusDto } from '../user-book-status/dto/set-status.dto';
 
 const METADATA_UPDATE_FAILPOINTS = [
   'afterScalarUpdate',
@@ -270,6 +281,7 @@ export class BookService {
     if (dto.query) {
       const libs = await this.libraryService.findAll(user);
       let accessibleLibraryIds = libs.map((l) => l.id);
+      const timeZone = this.resolveUserTimeZone(user);
       if (dto.query.libraryId !== undefined) {
         if (!accessibleLibraryIds.includes(dto.query.libraryId)) {
           throw new ForbiddenException(`Library ${dto.query.libraryId} is not accessible`);
@@ -281,6 +293,7 @@ export class BookService {
         implicitLibraryId: dto.query.libraryId,
         userId: user.id,
         q: dto.query.q,
+        timeZone,
       });
       return this.bookRepo.findIdsByWhere(where);
     }
@@ -374,6 +387,7 @@ export class BookService {
     if (dto.query) {
       const libraries = await this.libraryService.findAll(user);
       let accessibleLibraryIds = libraries.map((library) => library.id);
+      const timeZone = this.resolveUserTimeZone(user);
       if (dto.query.libraryId !== undefined) {
         if (!accessibleLibraryIds.includes(dto.query.libraryId)) {
           throw new ForbiddenException(`Library ${dto.query.libraryId} is not accessible`);
@@ -385,6 +399,7 @@ export class BookService {
         implicitLibraryId: dto.query.libraryId,
         userId: user.id,
         q: dto.query.q,
+        timeZone,
       });
       const rowCount = await this.bookRepo.countWhere(where);
       if (rowCount === 0) throw new BadRequestException('No books matched export selection');
@@ -446,6 +461,7 @@ export class BookService {
     if (dto.query) {
       const libraries = await this.libraryService.findAll(user);
       let accessibleLibraryIds = libraries.map((library) => library.id);
+      const timeZone = this.resolveUserTimeZone(user);
       if (dto.query.libraryId !== undefined) {
         if (!accessibleLibraryIds.includes(dto.query.libraryId)) {
           throw new ForbiddenException(`Library ${dto.query.libraryId} is not accessible`);
@@ -457,6 +473,7 @@ export class BookService {
         implicitLibraryId: dto.query.libraryId,
         userId: user.id,
         q: dto.query.q,
+        timeZone,
       });
       const rowCount = await this.bookRepo.countWhere(where);
       if (rowCount === 0) throw new BadRequestException('No books matched export selection');
@@ -759,11 +776,13 @@ export class BookService {
   async queryForLibrary(user: RequestUser, libraryId: number, query: BookQuery): Promise<BooksPage> {
     this.assertPaginationWindow(query.pagination.page, query.pagination.size);
     await this.libraryService.verifyUserAccess(user.id, libraryId, this.isSuperuser(user));
+    const timeZone = this.resolveUserTimeZone(user);
     const where = this.queryBuilder.buildWhere(query.filter, {
       accessibleLibraryIds: [libraryId],
       implicitLibraryId: libraryId,
       userId: user.id,
       q: query.q,
+      timeZone,
     });
     return this.executeBooksQuery(user.id, where, query);
   }
@@ -772,7 +791,8 @@ export class BookService {
     this.assertPaginationWindow(query.pagination.page, query.pagination.size);
     const libs = await this.libraryService.findAll(user);
     const accessibleLibraryIds = libs.map((l) => l.id);
-    const where = this.queryBuilder.buildWhere(query.filter, { accessibleLibraryIds, userId: user.id, q: query.q });
+    const timeZone = this.resolveUserTimeZone(user);
+    const where = this.queryBuilder.buildWhere(query.filter, { accessibleLibraryIds, userId: user.id, q: query.q, timeZone });
     return this.executeBooksQuery(user.id, where, query);
   }
 
@@ -1315,9 +1335,112 @@ export class BookService {
     await this.bookRepo.clearFileProgress(userId, fileId);
   }
 
-  async setReadStatus(bookId: number, status: ReadStatus, user: RequestUser): Promise<void> {
+  async setReadStatus(bookId: number, dto: SetStatusDto, user: RequestUser): Promise<UserBookStatus> {
     await this.verifyBookAccess(bookId, user);
-    await this.userBookStatusService.setManual(user.id, bookId, status);
+    const hasStatus = Object.prototype.hasOwnProperty.call(dto, 'status');
+    const hasStartedAt = Object.prototype.hasOwnProperty.call(dto, 'startedAt');
+    const hasFinishedAt = Object.prototype.hasOwnProperty.call(dto, 'finishedAt');
+    if (!hasStatus && !hasStartedAt && !hasFinishedAt) {
+      throw new BadRequestException('At least one of status, startedAt, or finishedAt is required');
+    }
+
+    const timeZone = this.resolveUserTimeZone(user);
+    const patch: { status?: ReadStatus; startedAt?: Date | null; finishedAt?: Date | null } = {};
+
+    let startedKey: string | null | undefined;
+    if (hasStartedAt) {
+      if (dto.startedAt === null) {
+        patch.startedAt = null;
+        startedKey = null;
+      } else {
+        const normalized = this.parseManualReadDateInput(dto.startedAt, 'startedAt', timeZone);
+        patch.startedAt = normalized.date;
+        startedKey = normalized.dateKey;
+      }
+    }
+
+    let finishedKey: string | null | undefined;
+    if (hasFinishedAt) {
+      if (dto.finishedAt === null) {
+        patch.finishedAt = null;
+        finishedKey = null;
+      } else {
+        const normalized = this.parseManualReadDateInput(dto.finishedAt, 'finishedAt', timeZone);
+        patch.finishedAt = normalized.date;
+        finishedKey = normalized.dateKey;
+      }
+    }
+
+    if (hasStatus && dto.status !== undefined) {
+      patch.status = dto.status;
+    }
+
+    const existing = await this.userBookStatusService.findOne(user.id, bookId);
+    const effectiveStarted = hasStartedAt ? (startedKey ?? null) : this.normalizeStoredStatusDateKey(existing?.startedAt ?? null, timeZone);
+    const effectiveFinished = hasFinishedAt ? (finishedKey ?? null) : this.normalizeStoredStatusDateKey(existing?.finishedAt ?? null, timeZone);
+
+    if (effectiveStarted && effectiveFinished && effectiveFinished < effectiveStarted) {
+      throw new BadRequestException('finishedAt must be on or after startedAt');
+    }
+
+    const updated = await this.userBookStatusService.updateManual(user.id, bookId, patch);
+    return this.toDateOnlyReadStatus(updated, timeZone);
+  }
+
+  private resolveUserTimeZone(user: RequestUser): string {
+    const timezoneValue = (user.settings as { timezone?: unknown } | undefined)?.timezone;
+    return resolveTimeZone(timezoneValue, 'UTC');
+  }
+
+  private parseManualReadDateInput(
+    value: string | null | undefined,
+    field: 'startedAt' | 'finishedAt',
+    timeZone: string,
+  ): { dateKey: string; date: Date } {
+    if (typeof value !== 'string') {
+      throw new BadRequestException(`${field} must be a date string or null`);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw new BadRequestException(`${field} must be a non-empty date string`);
+    }
+
+    const dateKey = this.normalizeInputToDateKey(trimmed, field, timeZone);
+    const todayKey = toDateKeyInTimeZone(new Date(), timeZone);
+    if (dateKey > todayKey) {
+      throw new BadRequestException(`${field} cannot be in the future`);
+    }
+    return {
+      dateKey,
+      date: toTimeZoneStartOfDay(dateKey, timeZone),
+    };
+  }
+
+  private normalizeInputToDateKey(value: string, field: 'startedAt' | 'finishedAt', timeZone: string): string {
+    if (isDateKey(value)) {
+      return value;
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(`${field} must be a valid date`);
+    }
+    return toDateKeyInTimeZone(parsed, timeZone);
+  }
+
+  private normalizeStoredStatusDateKey(value: string | null, timeZone: string): string | null {
+    if (!value) return null;
+    if (isDateKey(value)) return value;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return toDateKeyInTimeZone(parsed, timeZone);
+  }
+
+  private toDateOnlyReadStatus(status: UserBookStatus, timeZone: string): UserBookStatus {
+    return {
+      ...status,
+      startedAt: this.normalizeStoredStatusDateKey(status.startedAt, timeZone),
+      finishedAt: this.normalizeStoredStatusDateKey(status.finishedAt, timeZone),
+    };
   }
 
   async bulkSetStatus(bookIds: number[], status: ReadStatus, user: RequestUser): Promise<void> {

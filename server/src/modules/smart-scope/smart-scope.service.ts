@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 
 import type { BookQuery, BooksPage, GroupRule, SortSpec } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
+import { resolveTimeZone } from '../../common/utils/timezone.utils';
 import type { SmartScope } from '../../db/schema/smart-scopes';
 import { BookService } from '../book/book.service';
 import { BookQueryBuilder } from '../book/book-query-builder.service';
@@ -71,12 +72,13 @@ export class SmartScopeService {
   async findAll(user: RequestUser) {
     const smartScopes = await this.smartScopeRepo.findAllForUser(user.id);
     const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+    const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
     return Promise.all(
       smartScopes.map(async (smartScope) => {
         if (!smartScope.filter) {
           return { ...smartScope, bookCount: 0 };
         }
-        const where = this.queryBuilder.buildWhere(smartScope.filter, { accessibleLibraryIds, userId: user.id });
+        const where = this.queryBuilder.buildWhere(smartScope.filter, { accessibleLibraryIds, userId: user.id, timeZone });
         const bookCount = await this.bookReadService.countWhere(where);
         return { ...smartScope, bookCount };
       }),
@@ -166,6 +168,7 @@ export class SmartScopeService {
     }
 
     const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+    const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
     const filter = this.combineFilters(smartScope.filter, query.filter);
     const effectiveQuery: BookQuery = {
       ...query,
@@ -176,6 +179,7 @@ export class SmartScopeService {
       accessibleLibraryIds,
       userId: user.id,
       q: query.q,
+      timeZone,
     });
 
     try {

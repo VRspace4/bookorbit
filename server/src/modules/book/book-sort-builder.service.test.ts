@@ -114,6 +114,23 @@ describe('BookSortBuilder', () => {
     );
   });
 
+  it('throws for startedAt sort without userId', () => {
+    expect(() => service.build([{ field: 'startedAt', dir: 'asc' }])).toThrow(
+      new BadRequestException('startedAt sort requires an authenticated user'),
+    );
+  });
+
+  it('builds startedAt sort with userId', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    const result = service.build([{ field: 'startedAt', dir: 'desc' }], 42);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ type: 'sql', text: expect.stringContaining('SELECT ubs.started_at FROM user_book_status ubs') });
+    expect(result[0]?.values[0]).toBe(42);
+    expect(raw).toHaveBeenCalledWith('DESC');
+  });
+
   it('throws for rating sort without userId', () => {
     expect(() => service.build([{ field: 'rating', dir: 'asc' }])).toThrow(new BadRequestException('rating sort requires an authenticated user'));
   });

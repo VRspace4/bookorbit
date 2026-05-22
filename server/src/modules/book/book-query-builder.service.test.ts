@@ -99,7 +99,9 @@ function buildValueFor(operator: RuleOperator, field: RuleField): { value?: unkn
     case 'lte':
       return { value: 10 };
     case 'between':
-      return field === 'addedAt' ? { value: '2023-01-01', valueTo: '2023-12-31' } : { value: 10, valueTo: 20 };
+      return field === 'addedAt' || field === 'startedAt' || field === 'finishedAt'
+        ? { value: '2023-01-01', valueTo: '2023-12-31' }
+        : { value: 10, valueTo: 20 };
     case 'before':
     case 'after':
       return { value: '2023-01-01' };
@@ -899,6 +901,77 @@ describe('dateRuleToSql (addedAt)', () => {
   });
 });
 
+describe('read status date filters (startedAt / finishedAt)', () => {
+  it('requires an authenticated user', () => {
+    const { builder } = makeBuilder();
+    expect(() =>
+      builder.buildWhere(wrapRule({ type: 'rule', field: 'startedAt', operator: 'before', value: '2026-01-01' }) as never, BASE_CTX),
+    ).toThrow('startedAt filter requires an authenticated user');
+  });
+
+  it('builds before/after expressions using user-scoped date subqueries', () => {
+    const { builder } = makeBuilder();
+    const beforeWhere = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'startedAt', operator: 'before', value: '2026-01-01' }) as never,
+      USER_CTX,
+    ) as any;
+    const afterWhere = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'finishedAt', operator: 'after', value: '2026-02-01' }) as never,
+      USER_CTX,
+    ) as any;
+
+    const beforeRule = getRuleSql(beforeWhere);
+    const afterRule = getRuleSql(afterWhere);
+    expect(beforeRule).toMatchObject({ type: 'sql' });
+    expect(afterRule).toMatchObject({ type: 'sql' });
+    expect(beforeRule.values[1]).toBe('2026-01-01');
+    expect(afterRule.values[1]).toBe('2026-02-01');
+  });
+
+  it('builds inclusive between and calendar-day withinLast expressions', () => {
+    const { builder } = makeBuilder();
+    const betweenWhere = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'startedAt', operator: 'between', value: '2026-01-01', valueTo: '2026-01-31' }) as never,
+      USER_CTX,
+    ) as any;
+    const withinLastWhere = builder.buildWhere(
+      wrapRule({ type: 'rule', field: 'finishedAt', operator: 'withinLast', value: 7 }) as never,
+      USER_CTX,
+    ) as any;
+
+    const betweenRule = getRuleSql(betweenWhere);
+    const withinLastRule = getRuleSql(withinLastWhere);
+    expect(betweenRule).toMatchObject({ type: 'sql' });
+    expect(betweenRule.values[1]).toBe('2026-01-01');
+    expect(betweenRule.values[3]).toBe('2026-01-31');
+    expect(withinLastRule).toMatchObject({ type: 'sql' });
+    expect(withinLastRule.text.toLowerCase()).toContain('timezone(');
+  });
+
+  it('supports isEmpty / isNotEmpty operators', () => {
+    const { builder } = makeBuilder();
+    const emptyWhere = builder.buildWhere(wrapRule({ type: 'rule', field: 'startedAt', operator: 'isEmpty' }) as never, USER_CTX) as any;
+    const notEmptyWhere = builder.buildWhere(wrapRule({ type: 'rule', field: 'finishedAt', operator: 'isNotEmpty' }) as never, USER_CTX) as any;
+
+    const emptyRule = getRuleSql(emptyWhere);
+    const notEmptyRule = getRuleSql(notEmptyWhere);
+    expect(emptyRule).toMatchObject({ type: 'sql' });
+    expect(notEmptyRule).toMatchObject({ type: 'sql' });
+    expect(emptyRule.text.toLowerCase()).toContain('is null');
+    expect(notEmptyRule.text.toLowerCase()).toContain('is not null');
+  });
+
+  it('normalizes ISO date values using the provided timezone', () => {
+    const { builder } = makeBuilder();
+    const where = builder.buildWhere(wrapRule({ type: 'rule', field: 'startedAt', operator: 'before', value: '2026-01-01T02:30:00.000Z' }) as never, {
+      ...USER_CTX,
+      timeZone: 'America/New_York',
+    }) as any;
+    const rule = getRuleSql(where);
+    expect(rule.values[1]).toBe('2025-12-31');
+  });
+});
+
 describe('statusRuleToSql (fileAvailability)', () => {
   it('isMissing produces eq(books.status, "missing")', () => {
     const { builder } = makeBuilder();
@@ -1133,6 +1206,13 @@ describe('BookQueryBuilder.buildCollapseOrderBy', () => {
     expect(result).toContain('ubs.user_id = 5');
     expect(result).toContain('ubs.book_id = r.id');
     expect(result).toContain('DESC NULLS LAST');
+  });
+
+  it('generates user-scoped subquery for startedAt', () => {
+    const result = BookQueryBuilder.buildCollapseOrderBy([{ field: 'startedAt', dir: 'asc' }], 5);
+    expect(result).toContain('ubs.user_id = 5');
+    expect(result).toContain('ubs.book_id = r.id');
+    expect(result).toContain('ASC NULLS LAST');
   });
 
   it('generates author sort using r.id to avoid column shadowing', () => {

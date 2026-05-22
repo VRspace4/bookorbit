@@ -117,7 +117,7 @@ describe('SmartScopeService', () => {
     const result = await service.findAll(user);
 
     expect(queryBuilder.buildWhere).toHaveBeenCalledTimes(1);
-    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(secondSmartScope.filter, { accessibleLibraryIds: [2, 3], userId: 8 });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(secondSmartScope.filter, { accessibleLibraryIds: [2, 3], userId: 8, timeZone: 'UTC' });
     expect(result).toEqual([
       { ...firstSmartScope, bookCount: 0 },
       { ...secondSmartScope, bookCount: 7 },
@@ -312,7 +312,7 @@ describe('SmartScopeService', () => {
 
     const result = await service.executeSmartScope(5, makeUser({ id: 12 }), 1, 25);
 
-    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(smartScope.filter, { accessibleLibraryIds: [9], userId: 12 });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(smartScope.filter, { accessibleLibraryIds: [9], userId: 12, timeZone: 'UTC' });
     expect(bookService.executeBooksQuery).toHaveBeenCalledWith(12, 'where', {
       filter: smartScope.filter,
       sort: [{ field: 'title', dir: 'asc' }],
@@ -351,7 +351,7 @@ describe('SmartScopeService', () => {
         join: 'AND',
         rules: [smartScope.filter, requestFilter],
       },
-      { accessibleLibraryIds: [9], userId: 12, q: 'needle' },
+      { accessibleLibraryIds: [9], userId: 12, q: 'needle', timeZone: 'UTC' },
     );
     expect(bookService.executeBooksQuery).toHaveBeenCalledWith(12, 'combined-where', {
       filter: {
@@ -416,7 +416,7 @@ describe('SmartScopeService', () => {
           join: 'AND',
           rules: [smartScope.filter, requestFilter],
         },
-        { accessibleLibraryIds: [9], userId: 12, q: 'needle' },
+        { accessibleLibraryIds: [9], userId: 12, q: 'needle', timeZone: 'UTC' },
       );
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(12, 'combined-where', {
         ...query,

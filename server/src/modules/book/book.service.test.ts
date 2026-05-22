@@ -174,6 +174,13 @@ function makeService() {
   const userBookStatusService = {
     autoUpdate: vi.fn().mockResolvedValue(undefined),
     setManual: vi.fn().mockResolvedValue(undefined),
+    updateManual: vi.fn().mockResolvedValue({
+      status: 'unread',
+      source: 'manual',
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }),
     findOne: vi.fn().mockResolvedValue(null),
     findByBookIds: vi.fn().mockResolvedValue(new Map()),
   };
@@ -514,6 +521,7 @@ describe('BookService', () => {
         implicitLibraryId: 5,
         userId: 12,
         q: 'dune',
+        timeZone: 'UTC',
       });
       expect(bookRepo.countWhere).toHaveBeenCalledWith('WHERE_CLAUSE');
     });
@@ -1934,7 +1942,7 @@ describe('BookService', () => {
 
       await service.globalQuery(user, { filter: null, sort: [], pagination: { page: 0, size: 10 } } as never);
 
-      expect(queryBuilder.buildWhere).toHaveBeenCalledWith(null, { accessibleLibraryIds: [3, 4], userId: 7 });
+      expect(queryBuilder.buildWhere).toHaveBeenCalledWith(null, { accessibleLibraryIds: [3, 4], userId: 7, timeZone: 'UTC' });
       expect(bookRepo.findCards).toHaveBeenCalledWith({
         where: 'GLOBAL_WHERE',
         orderBy: ['GLOBAL_ORDER'],
@@ -1944,18 +1952,147 @@ describe('BookService', () => {
       });
     });
 
-    it('delegates getProgress and setReadStatus to downstream services', async () => {
-      const { service, bookRepo, userBookStatusService } = makeService();
+    it('delegates getProgress to repository', async () => {
+      const { service, bookRepo } = makeService();
       const user = makeUser({ id: 77 });
       vi.spyOn(service, 'verifyFileAccess').mockResolvedValue({ id: 1 } as never);
-      vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
       bookRepo.findProgress.mockResolvedValue({ percentage: 12 });
 
       await expect(service.getProgress(user.id, 1, user)).resolves.toEqual({ percentage: 12 });
-      await service.setReadStatus(10, 'finished' as never, user);
 
       expect(bookRepo.findProgress).toHaveBeenCalledWith(77, 1);
-      expect(userBookStatusService.setManual).toHaveBeenCalledWith(77, 10, 'finished');
+    });
+
+    describe('setReadStatus', () => {
+      it('requires at least one updatable field', async () => {
+        const { service } = makeService();
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+
+        await expect(service.setReadStatus(10, {} as never, makeUser())).rejects.toThrow(
+          'At least one of status, startedAt, or finishedAt is required',
+        );
+      });
+
+      it('updates status only and returns canonical date-only payload', async () => {
+        const { service, userBookStatusService } = makeService();
+        const user = makeUser({ id: 77 });
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+        userBookStatusService.updateManual.mockResolvedValue({
+          status: 'reading',
+          source: 'manual',
+          startedAt: '2026-04-10T00:00:00.000Z',
+          finishedAt: null,
+          updatedAt: '2026-04-11T00:00:00.000Z',
+        });
+
+        const result = await service.setReadStatus(10, { status: 'reading' }, user);
+
+        expect(userBookStatusService.updateManual).toHaveBeenCalledWith(77, 10, { status: 'reading' });
+        expect(result).toEqual({
+          status: 'reading',
+          source: 'manual',
+          startedAt: '2026-04-10',
+          finishedAt: null,
+          updatedAt: '2026-04-11T00:00:00.000Z',
+        });
+      });
+
+      it('accepts ISO date input, applies timezone normalization, and persists as manual patch dates', async () => {
+        const { service, userBookStatusService } = makeService();
+        const user = makeUser({ id: 12, settings: { timezone: 'America/New_York' } });
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+        userBookStatusService.updateManual.mockImplementation(
+          (_userId: number, _bookId: number, patch: { status?: string; startedAt?: Date | null; finishedAt?: Date | null }) => ({
+            status: (patch.status as 'reading' | undefined) ?? 'reading',
+            source: 'manual',
+            startedAt: patch.startedAt instanceof Date ? patch.startedAt.toISOString() : null,
+            finishedAt: patch.finishedAt instanceof Date ? patch.finishedAt.toISOString() : null,
+            updatedAt: '2026-04-11T00:00:00.000Z',
+          }),
+        );
+
+        const result = await service.setReadStatus(
+          10,
+          {
+            startedAt: '2026-01-01T02:30:00.000Z',
+            finishedAt: '2026-01-15',
+          },
+          user,
+        );
+
+        expect(userBookStatusService.updateManual).toHaveBeenCalledOnce();
+        const patch = userBookStatusService.updateManual.mock.calls[0]?.[2];
+        expect(patch.startedAt).toBeInstanceOf(Date);
+        expect(patch.finishedAt).toBeInstanceOf(Date);
+        expect(result.startedAt).toBe('2025-12-31');
+        expect(result.finishedAt).toBe('2026-01-15');
+      });
+
+      it('rejects future dates', async () => {
+        const { service, userBookStatusService } = makeService();
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-05-20T12:00:00.000Z'));
+
+        await expect(service.setReadStatus(10, { startedAt: '2026-05-21' }, makeUser())).rejects.toThrow('startedAt cannot be in the future');
+        expect(userBookStatusService.updateManual).not.toHaveBeenCalled();
+        vi.useRealTimers();
+      });
+
+      it('rejects finishedAt that is earlier than startedAt across omitted field merges', async () => {
+        const { service, userBookStatusService } = makeService();
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+        userBookStatusService.findOne.mockResolvedValue({
+          status: 'reading',
+          source: 'manual',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          finishedAt: '2026-01-10T00:00:00.000Z',
+          updatedAt: '2026-01-10T00:00:00.000Z',
+        });
+
+        await expect(service.setReadStatus(10, { startedAt: '2026-01-15' }, makeUser())).rejects.toThrow('finishedAt must be on or after startedAt');
+        expect(userBookStatusService.updateManual).not.toHaveBeenCalled();
+      });
+
+      it('falls back to UTC when user timezone is invalid', async () => {
+        const { service, userBookStatusService } = makeService();
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+        userBookStatusService.updateManual.mockImplementation((_userId: number, _bookId: number, patch: { startedAt?: Date | null }) => ({
+          status: 'reading',
+          source: 'manual',
+          startedAt: patch.startedAt instanceof Date ? patch.startedAt.toISOString() : null,
+          finishedAt: null,
+          updatedAt: '2026-04-11T00:00:00.000Z',
+        }));
+
+        const result = await service.setReadStatus(
+          10,
+          {
+            startedAt: '2026-01-01T00:30:00.000+05:00',
+          },
+          makeUser({ settings: { timezone: 'Invalid/Zone' } }),
+        );
+
+        expect(result.startedAt).toBe('2025-12-31');
+      });
+
+      it('supports explicit null clearing for reading dates', async () => {
+        const { service, userBookStatusService } = makeService();
+        vi.spyOn(service, 'verifyBookAccess').mockResolvedValue(undefined);
+        userBookStatusService.updateManual.mockResolvedValue({
+          status: 'reading',
+          source: 'manual',
+          startedAt: null,
+          finishedAt: null,
+          updatedAt: '2026-04-11T00:00:00.000Z',
+        });
+
+        const result = await service.setReadStatus(10, { startedAt: null, finishedAt: null }, makeUser());
+
+        expect(userBookStatusService.updateManual).toHaveBeenCalledWith(1, 10, { startedAt: null, finishedAt: null });
+        expect(result.startedAt).toBeNull();
+        expect(result.finishedAt).toBeNull();
+      });
     });
   });
 
@@ -2833,6 +2970,7 @@ describe('BookService', () => {
         implicitLibraryId: undefined,
         userId: 42,
         q: 'dune',
+        timeZone: 'UTC',
       });
       expect(bookRepo.findIdsByWhere).toHaveBeenCalledWith('where-clause');
     });
@@ -2850,6 +2988,7 @@ describe('BookService', () => {
         implicitLibraryId: 9,
         userId: 7,
         q: undefined,
+        timeZone: 'UTC',
       });
       expect(bookRepo.findIdsByWhere).toHaveBeenCalledWith('library-where');
     });

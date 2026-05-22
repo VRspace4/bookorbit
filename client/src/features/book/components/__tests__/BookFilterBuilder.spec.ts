@@ -48,4 +48,32 @@ describe('BookFilterBuilder', () => {
 
     expect(lastUpdate(wrapper)).toEqual({ type: 'group', join: 'AND', rules: [] })
   })
+
+  it('includes Date Started and Date Finished in field options', () => {
+    const wrapper = mount(BookFilterBuilder, {
+      props: {
+        modelValue: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'Dune' }] },
+      },
+    })
+
+    const [fieldSelect] = wrapper.findAll('select')
+    const optionText = fieldSelect!.findAll('option').map((opt) => opt.text())
+    expect(optionText).toContain('Date Started')
+    expect(optionText).toContain('Date Finished')
+  })
+
+  it('offers date and empty/not-empty operators for Date Started', async () => {
+    const wrapper = mount(BookFilterBuilder, {
+      props: {
+        modelValue: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'Dune' }] },
+      },
+    })
+
+    const [fieldSelect] = wrapper.findAll('select')
+    await fieldSelect!.setValue('startedAt')
+
+    const operatorSelect = wrapper.findAll('select')[1]
+    const operatorOptions = operatorSelect!.findAll('option').map((opt) => opt.text())
+    expect(operatorOptions).toEqual(expect.arrayContaining(['before', 'after', 'between', 'within last', 'is empty', 'is not empty']))
+  })
 })

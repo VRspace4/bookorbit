@@ -24,7 +24,7 @@ import { getProviderColor } from '@/lib/provider-colors'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '@/features/book/lib/cover-aspect-ratio'
 import { FORMAT_TO_GROUP, READER_OPENABLE_FORMATS } from '@bookorbit/types'
-import type { BookDetail, BookKoboState, ReadStatus } from '@bookorbit/types'
+import type { BookDetail, BookKoboState, ReadStatus, UserBookStatus } from '@bookorbit/types'
 import { STATUS_OPTIONS, STATUS_ICONS, STATUS_COLORS, useBookStatus } from '@/features/book/composables/useBookStatus'
 import BookDownloadButton from '@/features/book/components/BookDownloadButton.vue'
 import DiscoverRow from '@/features/book/components/detail/DiscoverRow.vue'
@@ -341,24 +341,153 @@ async function setRating(star: number) {
 
 const ratingStars = RATING_STARS
 
-const { setStatus } = useBookStatus()
+const { setStatus, updateStatus } = useBookStatus()
+
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/
+
+function dateToDateKey(value: Date): string {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function toDateInputValue(value: string | null | undefined): string {
+  if (!value) return ''
+  if (DATE_KEY_RE.test(value)) return value
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return dateToDateKey(parsed)
+}
 
 const localReadStatus = ref<ReadStatus | null>(props.book.readStatus?.status ?? null)
+const savedReadingDates = ref<{ startedAt: string; finishedAt: string }>({
+  startedAt: toDateInputValue(props.book.readStatus?.startedAt),
+  finishedAt: toDateInputValue(props.book.readStatus?.finishedAt),
+})
+const draftReadingDates = ref<{ startedAt: string; finishedAt: string }>({
+  startedAt: savedReadingDates.value.startedAt,
+  finishedAt: savedReadingDates.value.finishedAt,
+})
+const savingReadingDates = ref(false)
+const readingDatesError = ref<string | null>(null)
+const activeReadingDateField = ref<'startedAt' | 'finishedAt' | null>(null)
+const todayDateInput = computed(() => dateToDateKey(new Date()))
+
+function normalizeReadStatusDates(readStatus: UserBookStatus | null | undefined) {
+  return {
+    startedAt: toDateInputValue(readStatus?.startedAt),
+    finishedAt: toDateInputValue(readStatus?.finishedAt),
+  }
+}
+
+function validateReadingDates(values: { startedAt: string; finishedAt: string }): string | null {
+  const { startedAt, finishedAt } = values
+  if (startedAt && startedAt > todayDateInput.value) return 'Date Started cannot be in the future.'
+  if (finishedAt && finishedAt > todayDateInput.value) return 'Date Finished cannot be in the future.'
+  if (startedAt && finishedAt && finishedAt < startedAt) return 'Date Finished must be on or after Date Started.'
+  return null
+}
+
+const isEditingAnyReadingDate = computed(() => activeReadingDateField.value !== null)
+
+function formatDisplayDate(dateKey: string): string {
+  if (!dateKey) return '-'
+  const [year, month, day] = dateKey.split('-').map(Number)
+  const d = new Date(year!, month! - 1, day!)
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function isEditingReadingDate(field: 'startedAt' | 'finishedAt') {
+  return activeReadingDateField.value === field
+}
+
+function hasReadingDateFieldChanges(field: 'startedAt' | 'finishedAt') {
+  return draftReadingDates.value[field] !== savedReadingDates.value[field]
+}
+
+function startEditingReadingDate(field: 'startedAt' | 'finishedAt') {
+  if (savingReadingDates.value) return
+  activeReadingDateField.value = field
+  draftReadingDates.value = { ...savedReadingDates.value }
+  readingDatesError.value = null
+}
+
 watch(
-  () => props.book.readStatus?.status,
-  (val) => {
-    localReadStatus.value = (val as ReadStatus) ?? null
+  draftReadingDates,
+  (value) => {
+    readingDatesError.value = validateReadingDates(value)
   },
+  { deep: true },
+)
+
+function applyReadStatusUpdate(updatedReadStatus: UserBookStatus) {
+  localReadStatus.value = updatedReadStatus.status
+  const normalizedDates = normalizeReadStatusDates(updatedReadStatus)
+  savedReadingDates.value = normalizedDates
+  draftReadingDates.value = { ...normalizedDates }
+  readingDatesError.value = null
+  emit('saved', { ...props.book, readStatus: updatedReadStatus })
+}
+
+watch(
+  () => props.book.readStatus,
+  (value) => {
+    activeReadingDateField.value = null
+    localReadStatus.value = value?.status ?? null
+    const normalizedDates = normalizeReadStatusDates(value)
+    savedReadingDates.value = normalizedDates
+    draftReadingDates.value = { ...normalizedDates }
+    readingDatesError.value = null
+  },
+  { immediate: true },
 )
 
 async function handleSetReadStatus(status: ReadStatus) {
   const prev = localReadStatus.value
   localReadStatus.value = status
   try {
-    await setStatus(props.book.id, status)
+    const updatedReadStatus = await setStatus(props.book.id, status)
+    applyReadStatusUpdate(updatedReadStatus)
   } catch {
     localReadStatus.value = prev
   }
+}
+
+async function saveReadingDateField(field: 'startedAt' | 'finishedAt') {
+  if (!isEditingReadingDate(field)) return
+  if (savingReadingDates.value) return
+  const validationError = validateReadingDates(draftReadingDates.value)
+  readingDatesError.value = validationError
+  if (validationError) return
+
+  if (!hasReadingDateFieldChanges(field)) {
+    activeReadingDateField.value = null
+    return
+  }
+
+  const patch =
+    field === 'startedAt'
+      ? ({ startedAt: draftReadingDates.value.startedAt || null } as const)
+      : ({ finishedAt: draftReadingDates.value.finishedAt || null } as const)
+
+  savingReadingDates.value = true
+  try {
+    const updatedReadStatus = await updateStatus(props.book.id, patch)
+    applyReadStatusUpdate(updatedReadStatus)
+    activeReadingDateField.value = null
+  } catch {
+    readingDatesError.value = 'Failed to save reading dates.'
+  } finally {
+    savingReadingDates.value = false
+  }
+}
+
+function cancelReadingDateEdit(field: 'startedAt' | 'finishedAt') {
+  if (!isEditingReadingDate(field)) return
+  activeReadingDateField.value = null
+  draftReadingDates.value[field] = savedReadingDates.value[field]
+  readingDatesError.value = null
 }
 
 const fileProgressById = ref<Record<number, FileProgress>>({})
@@ -1142,18 +1271,6 @@ watch(
           <TriangleAlert class="size-3 text-amber-500 shrink-0" />
           <p class="text-[11px] text-amber-500">{{ koboAnomaly }}</p>
         </div>
-        <div v-if="collections.length" class="mt-3">
-          <span class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground block mb-1.5">Collections</span>
-          <div class="flex flex-wrap gap-1">
-            <span
-              v-for="col in collections"
-              :key="col.id"
-              class="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border"
-            >
-              {{ col.name }}
-            </span>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -1400,10 +1517,96 @@ watch(
           </template>
           <dd v-else class="text-sm text-foreground mt-0.5">-</dd>
         </div>
+        <div class="min-w-0">
+          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Date Started</dt>
+          <template v-if="isEditingReadingDate('startedAt')">
+            <dd class="mt-1">
+              <div class="flex items-center gap-1.5">
+                <input
+                  v-model="draftReadingDates.startedAt"
+                  type="date"
+                  :max="todayDateInput"
+                  class="w-full rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
+                />
+                <button
+                  class="h-6 rounded bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  :disabled="!hasReadingDateFieldChanges('startedAt') || savingReadingDates"
+                  @click="saveReadingDateField('startedAt')"
+                >
+                  {{ savingReadingDates ? 'Saving...' : 'Save' }}
+                </button>
+                <button
+                  class="inline-flex h-6 w-6 items-center justify-center rounded border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                  title="Cancel date started edit"
+                  aria-label="Cancel date started edit"
+                  :disabled="savingReadingDates"
+                  @click="cancelReadingDateEdit('startedAt')"
+                >
+                  <X class="size-3" />
+                </button>
+              </div>
+              <p v-if="readingDatesError" class="mt-1 text-[10px] text-rose-500">{{ readingDatesError }}</p>
+            </dd>
+          </template>
+          <dd v-else class="mt-0.5 flex items-center gap-1.5">
+            <span class="text-sm text-foreground">{{ formatDisplayDate(savedReadingDates.startedAt) }}</span>
+            <button
+              class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              title="Edit date started"
+              :disabled="isEditingAnyReadingDate || savingReadingDates"
+              @click="startEditingReadingDate('startedAt')"
+            >
+              <Pencil class="size-3" />
+            </button>
+          </dd>
+        </div>
+        <div class="min-w-0">
+          <dt class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Date Finished</dt>
+          <template v-if="isEditingReadingDate('finishedAt')">
+            <dd class="mt-1">
+              <div class="flex items-center gap-1.5">
+                <input
+                  v-model="draftReadingDates.finishedAt"
+                  type="date"
+                  :max="todayDateInput"
+                  class="w-full rounded border border-input bg-background px-2 py-1 text-xs text-foreground"
+                />
+                <button
+                  class="h-6 rounded bg-primary px-2 text-[10px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+                  :disabled="!hasReadingDateFieldChanges('finishedAt') || savingReadingDates"
+                  @click="saveReadingDateField('finishedAt')"
+                >
+                  {{ savingReadingDates ? 'Saving...' : 'Save' }}
+                </button>
+                <button
+                  class="inline-flex h-6 w-6 items-center justify-center rounded border border-destructive/30 text-destructive transition-colors hover:bg-destructive/10 disabled:opacity-50"
+                  title="Cancel date finished edit"
+                  aria-label="Cancel date finished edit"
+                  :disabled="savingReadingDates"
+                  @click="cancelReadingDateEdit('finishedAt')"
+                >
+                  <X class="size-3" />
+                </button>
+              </div>
+              <p v-if="readingDatesError" class="mt-1 text-[10px] text-rose-500">{{ readingDatesError }}</p>
+            </dd>
+          </template>
+          <dd v-else class="mt-0.5 flex items-center gap-1.5">
+            <span class="text-sm text-foreground">{{ formatDisplayDate(savedReadingDates.finishedAt) }}</span>
+            <button
+              class="p-0.5 rounded text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              title="Edit date finished"
+              :disabled="isEditingAnyReadingDate || savingReadingDates"
+              @click="startEditingReadingDate('finishedAt')"
+            >
+              <Pencil class="size-3" />
+            </button>
+          </dd>
+        </div>
       </dl>
 
-      <!-- Mobile-only: reading progress + collections (relocated from left column) -->
-      <div v-if="leftColumnProgressVisible.length || koboAnomaly || collections.length" class="md:hidden mt-6 pt-5 border-t border-border space-y-3">
+      <!-- Mobile-only: reading progress from left column -->
+      <div v-if="leftColumnProgressVisible.length || koboAnomaly" class="md:hidden mt-6 pt-5 border-t border-border space-y-3">
         <div v-if="leftColumnProgressVisible.length" class="space-y-2">
           <div v-for="row in leftColumnProgressVisible" :key="row.label" class="flex items-center gap-2 cursor-default">
             <span
@@ -1442,18 +1645,6 @@ watch(
         <div v-if="koboAnomaly" class="flex items-center gap-1.5">
           <TriangleAlert class="size-3 text-amber-500 shrink-0" />
           <p class="text-[11px] text-amber-500">{{ koboAnomaly }}</p>
-        </div>
-        <div v-if="collections.length">
-          <span class="text-[10px] uppercase tracking-wider font-medium text-muted-foreground block mb-1.5">Collections</span>
-          <div class="flex flex-wrap gap-1">
-            <span
-              v-for="col in collections"
-              :key="col.id"
-              class="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border"
-            >
-              {{ col.name }}
-            </span>
-          </div>
         </div>
       </div>
 

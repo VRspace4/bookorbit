@@ -13,7 +13,6 @@ import { STATISTICS_CHART_META } from '../statistics-chart-meta'
 import { useStatisticsConfig } from '../composables/useStatisticsConfig'
 import StatisticsGrid from './StatisticsGrid.vue'
 import StatisticsSummaryCard from './StatisticsSummaryCard.vue'
-import AchievementsTab from '@/features/achievements/components/AchievementsTab.vue'
 
 const {
   orderedLibraryCharts,
@@ -37,11 +36,11 @@ const router = useRouter()
 const { libraries, fetchLibraries } = useLibraries()
 const configOpen = ref(false)
 
-type StatisticsTab = 'library' | 'user' | 'achievements'
+type StatisticsTab = 'library' | 'user'
 
 function resolveStatisticsTab(tabQuery: unknown): StatisticsTab {
   const tab = Array.isArray(tabQuery) ? tabQuery[0] : tabQuery
-  return tab === 'library' || tab === 'user' || tab === 'achievements' ? tab : 'library'
+  return tab === 'user' ? 'user' : 'library'
 }
 
 const initialTab = resolveStatisticsTab(route.query.tab)
@@ -159,18 +158,9 @@ function setTab(tab: StatisticsTab) {
         >
           My Reading
         </button>
-        <button
-          :class="[
-            'flex-1 rounded-md px-4 py-1.5 text-sm font-medium transition-colors sm:flex-none',
-            activeTab === 'achievements' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-          ]"
-          @click="setTab('achievements')"
-        >
-          Achievements
-        </button>
       </div>
 
-      <div v-if="activeTab !== 'achievements'" class="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
+      <div class="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
         <Popover v-if="libraries.length > 1">
           <PopoverTrigger as-child>
             <button
@@ -223,7 +213,7 @@ function setTab(tab: StatisticsTab) {
       </div>
     </div>
 
-    <StatisticsSummaryCard v-if="activeTab !== 'achievements'" />
+    <StatisticsSummaryCard />
 
     <Sheet v-model:open="configOpen">
       <SheetContent side="right" class="w-[90dvw] max-w-[90dvw] sm:w-[420px] sm:max-w-[420px]">
@@ -279,9 +269,6 @@ function setTab(tab: StatisticsTab) {
     </div>
     <div v-if="loaded.has('user')" v-show="activeTab === 'user'">
       <StatisticsGrid :charts="visibleUserCharts" />
-    </div>
-    <div v-if="loaded.has('achievements')" v-show="activeTab === 'achievements'">
-      <AchievementsTab />
     </div>
   </div>
 </template>

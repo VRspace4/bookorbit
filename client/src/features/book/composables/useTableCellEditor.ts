@@ -84,7 +84,13 @@ export function useTableCellEditor() {
           body: JSON.stringify({ status }),
         })
         if (!res.ok) throw new Error(await getApiErrorMessage(res as Response))
-        onSuccess({ readStatus: { status, source: 'manual', startedAt: null, finishedAt: null, updatedAt: new Date().toISOString() } })
+        let updatedReadStatus: BookCard['readStatus'] = null
+        try {
+          updatedReadStatus = (await (res as Response).json()) as BookCard['readStatus']
+        } catch {
+          updatedReadStatus = { status, source: 'manual', startedAt: null, finishedAt: null, updatedAt: new Date().toISOString() }
+        }
+        onSuccess({ readStatus: updatedReadStatus })
       } else {
         if (columnId === 'narrators') {
           const res = await api(`/api/v1/books/${bookId}/metadata`, {

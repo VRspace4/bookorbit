@@ -43,36 +43,12 @@ export type QuerySelectionState = {
 }
 
 function buildLocalReadStatus(status: ReadStatus, existing: UserBookStatus | null, nowIso: string): UserBookStatus {
-  switch (status) {
-    case 'unread':
-    case 'want_to_read':
-      return {
-        status,
-        source: 'manual',
-        startedAt: null,
-        finishedAt: null,
-        updatedAt: nowIso,
-      }
-    case 'reading':
-    case 'on_hold':
-    case 'rereading':
-    case 'skimmed':
-    case 'abandoned':
-      return {
-        status,
-        source: 'manual',
-        startedAt: existing?.startedAt ?? nowIso,
-        finishedAt: null,
-        updatedAt: nowIso,
-      }
-    case 'read':
-      return {
-        status,
-        source: 'manual',
-        startedAt: existing?.startedAt ?? nowIso,
-        finishedAt: nowIso,
-        updatedAt: nowIso,
-      }
+  return {
+    status,
+    source: 'manual',
+    startedAt: existing?.startedAt ?? null,
+    finishedAt: existing?.finishedAt ?? null,
+    updatedAt: nowIso,
   }
 }
 

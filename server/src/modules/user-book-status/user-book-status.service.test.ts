@@ -23,6 +23,15 @@ const mockRepo = {
   findOne: vi.fn<(...args: [number, number]) => Promise<UserBookStatusRow | null>>(),
   findByBookIds: vi.fn<(...args: [number, number[]]) => Promise<UserBookStatusRow[]>>(),
   upsert: vi.fn<(...args: [number, number, ReadStatus, ReadStatusSource, Date, (UserBookStatusRow | null)?]) => Promise<void>>(),
+  upsertState:
+    vi.fn<
+      (
+        ...args: [number, number, { status: ReadStatus; source: ReadStatusSource; startedAt: Date | null; finishedAt: Date | null; updatedAt: Date }]
+      ) => Promise<void>
+    >(),
+};
+const mockAchievementEvents = {
+  emit: vi.fn(),
 };
 
 let service: UserBookStatusService;
@@ -32,20 +41,145 @@ beforeEach(() => {
   mockRepo.findOne.mockResolvedValue(null);
   mockRepo.findByBookIds.mockResolvedValue([]);
   mockRepo.upsert.mockResolvedValue(undefined);
-  service = new UserBookStatusService(mockRepo as unknown as UserBookStatusRepository, { emit: vi.fn() } as never);
+  mockRepo.upsertState.mockResolvedValue(undefined);
+  service = new UserBookStatusService(mockRepo as unknown as UserBookStatusRepository, mockAchievementEvents as never);
 });
 
 describe('setManual', () => {
-  it('calls upsert with manual source', async () => {
+  it('preserves existing dates while setting status and source to manual', async () => {
+    const started = new Date('2026-04-01T00:00:00.000Z');
+    const finished = new Date('2026-04-10T00:00:00.000Z');
+    mockRepo.findOne.mockResolvedValue(makeRow({ startedAt: started, finishedAt: finished, status: 'reading', source: 'auto' }));
+
     await service.setManual(1, 10, 'reading');
 
-    expect(mockRepo.upsert).toHaveBeenCalledOnce();
-    const [userId, bookId, status, source, now] = mockRepo.upsert.mock.calls[0];
+    expect(mockRepo.upsertState).toHaveBeenCalledOnce();
+    const [userId, bookId, state] = mockRepo.upsertState.mock.calls[0];
     expect(userId).toBe(1);
     expect(bookId).toBe(10);
-    expect(status).toBe('reading');
-    expect(source).toBe('manual');
-    expect(now).toBeInstanceOf(Date);
+    expect(state).toMatchObject({
+      status: 'reading',
+      source: 'manual',
+      startedAt: started,
+      finishedAt: finished,
+    });
+    expect(state.updatedAt).toBeInstanceOf(Date);
+    expect(mockRepo.upsert).not.toHaveBeenCalled();
+    expect(mockAchievementEvents.emit).not.toHaveBeenCalled();
+  });
+});
+
+describe('updateManual', () => {
+  it('updates only provided fields and preserves omitted values', async () => {
+    const existingStarted = new Date('2026-04-01T00:00:00.000Z');
+    const existingFinished = new Date('2026-04-15T00:00:00.000Z');
+    mockRepo.findOne.mockResolvedValue(makeRow({ status: 'read', source: 'auto', startedAt: existingStarted, finishedAt: existingFinished }));
+
+    const nextStarted = new Date('2026-04-02T00:00:00.000Z');
+    const result = await service.updateManual(1, 10, { startedAt: nextStarted });
+
+    expect(mockRepo.upsertState).toHaveBeenCalledOnce();
+    expect(mockRepo.upsertState.mock.calls[0]?.[2]).toMatchObject({
+      status: 'read',
+      source: 'manual',
+      startedAt: nextStarted,
+      finishedAt: existingFinished,
+    });
+    expect(result.status).toBe('read');
+    expect(result.startedAt).toBe(nextStarted.toISOString());
+    expect(result.finishedAt).toBe(existingFinished.toISOString());
+  });
+
+  it('allows explicit null clearing for date fields', async () => {
+    const existingStarted = new Date('2026-04-01T00:00:00.000Z');
+    const existingFinished = new Date('2026-04-15T00:00:00.000Z');
+    mockRepo.findOne.mockResolvedValue(makeRow({ status: 'read', source: 'manual', startedAt: existingStarted, finishedAt: existingFinished }));
+
+    const result = await service.updateManual(1, 10, { startedAt: null, finishedAt: null });
+
+    expect(mockRepo.upsertState).toHaveBeenCalledOnce();
+    expect(mockRepo.upsertState.mock.calls[0]?.[2]).toMatchObject({
+      status: 'read',
+      startedAt: null,
+      finishedAt: null,
+    });
+    expect(result.startedAt).toBeNull();
+    expect(result.finishedAt).toBeNull();
+  });
+
+  it('does not persist a no-op clear when no row exists', async () => {
+    mockRepo.findOne.mockResolvedValue(null);
+
+    const result = await service.updateManual(1, 10, { startedAt: null, finishedAt: null });
+
+    expect(mockRepo.upsertState).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: 'unread',
+      source: 'manual',
+      startedAt: null,
+      finishedAt: null,
+    });
+    expect(mockAchievementEvents.emit).not.toHaveBeenCalled();
+  });
+
+  it('emits achievement event only when a status patch changes the status', async () => {
+    mockRepo.findOne.mockResolvedValue(makeRow({ status: 'unread', source: 'auto' }));
+
+    await service.updateManual(1, 10, { status: 'reading' });
+    expect(mockAchievementEvents.emit).toHaveBeenCalledOnce();
+
+    vi.clearAllMocks();
+    mockRepo.findOne.mockResolvedValue(makeRow({ status: 'reading', source: 'manual' }));
+
+    await service.updateManual(1, 10, { startedAt: new Date('2026-04-01T00:00:00.000Z') });
+    expect(mockAchievementEvents.emit).not.toHaveBeenCalled();
+  });
+});
+
+describe('bulkSetManual', () => {
+  it('returns early when no book ids are provided', async () => {
+    await service.bulkSetManual(1, [], 'reading');
+    expect(mockRepo.findByBookIds).not.toHaveBeenCalled();
+    expect(mockRepo.upsertState).not.toHaveBeenCalled();
+    expect(mockAchievementEvents.emit).not.toHaveBeenCalled();
+  });
+
+  it('preserves existing dates and emits events only for changed statuses', async () => {
+    const existingStarted = new Date('2026-04-01T00:00:00.000Z');
+    const existingFinished = new Date('2026-04-12T00:00:00.000Z');
+    mockRepo.findByBookIds.mockResolvedValue([
+      makeRow({ bookId: 10, status: 'unread', source: 'auto', startedAt: existingStarted, finishedAt: existingFinished }),
+      makeRow({ bookId: 11, status: 'reading', source: 'manual', startedAt: existingStarted, finishedAt: null }),
+    ]);
+
+    await service.bulkSetManual(1, [10, 11, 12], 'reading');
+
+    expect(mockRepo.upsertState).toHaveBeenCalledTimes(3);
+    expect(mockRepo.upsertState).toHaveBeenCalledWith(
+      1,
+      10,
+      expect.objectContaining({ status: 'reading', source: 'manual', startedAt: existingStarted, finishedAt: existingFinished }),
+    );
+    expect(mockRepo.upsertState).toHaveBeenCalledWith(
+      1,
+      11,
+      expect.objectContaining({ status: 'reading', source: 'manual', startedAt: existingStarted, finishedAt: null }),
+    );
+    expect(mockRepo.upsertState).toHaveBeenCalledWith(
+      1,
+      12,
+      expect.objectContaining({ status: 'reading', source: 'manual', startedAt: null, finishedAt: null }),
+    );
+
+    expect(mockAchievementEvents.emit).toHaveBeenCalledTimes(2);
+    expect(mockAchievementEvents.emit).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ userId: 1, bookId: 10, previousStatus: 'unread', newStatus: 'reading' }),
+    );
+    expect(mockAchievementEvents.emit).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ userId: 1, bookId: 12, previousStatus: null, newStatus: 'reading' }),
+    );
   });
 });
 
@@ -61,6 +195,7 @@ describe('autoUpdate with default thresholds', () => {
 
     if (expectedStatus === null) {
       expect(mockRepo.upsert).not.toHaveBeenCalled();
+      expect(mockRepo.upsertState).not.toHaveBeenCalled();
       return;
     }
 
@@ -101,6 +236,7 @@ describe('autoUpdate normalization and guard behavior', () => {
     await service.autoUpdate(1, 10, 100);
 
     expect(mockRepo.upsert).not.toHaveBeenCalled();
+    expect(mockRepo.upsertState).not.toHaveBeenCalled();
   });
 
   it('skips updates when derived status is unchanged', async () => {

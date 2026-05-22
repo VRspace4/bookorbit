@@ -1,6 +1,6 @@
 import { api } from '@/lib/api'
 import { Book, BookCheck, BookMarked, BookOpen, BookX, Pause, RotateCcw, ScanLine } from 'lucide-vue-next'
-import type { ReadStatus } from '@bookorbit/types'
+import type { ReadStatus, UserBookStatus } from '@bookorbit/types'
 
 export type StatusOption = {
   value: ReadStatus
@@ -40,15 +40,26 @@ export const STATUS_COLORS: Record<ReadStatus, string> = {
   abandoned: 'text-rose-400',
 }
 
+export type ReadStatusPatch = {
+  status?: ReadStatus
+  startedAt?: string | null
+  finishedAt?: string | null
+}
+
 export function useBookStatus() {
-  async function setStatus(bookId: number, status: ReadStatus): Promise<void> {
+  async function updateStatus(bookId: number, patch: ReadStatusPatch): Promise<UserBookStatus> {
     const res = await api(`/api/v1/books/${bookId}/status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify(patch),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return (await res.json()) as UserBookStatus
   }
 
-  return { setStatus, STATUS_OPTIONS }
+  async function setStatus(bookId: number, status: ReadStatus): Promise<UserBookStatus> {
+    return updateStatus(bookId, { status })
+  }
+
+  return { setStatus, updateStatus, STATUS_OPTIONS }
 }

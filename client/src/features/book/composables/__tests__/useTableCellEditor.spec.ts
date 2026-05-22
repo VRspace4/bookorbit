@@ -120,7 +120,16 @@ describe('useTableCellEditor', () => {
   })
 
   it('saveCell calls PATCH /status for readStatus field', async () => {
-    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    ;(mocks.api as Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        status: 'reading',
+        source: 'manual',
+        startedAt: '2026-04-01',
+        finishedAt: null,
+        updatedAt: '2026-04-02T00:00:00.000Z',
+      }),
+    } as Response)
     const editor = useTableCellEditor()
     const book = makeBook()
     const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
@@ -134,9 +143,40 @@ describe('useTableCellEditor', () => {
         body: JSON.stringify({ status: 'reading' }),
       }),
     )
-    expect(onSuccess).toHaveBeenCalled()
-    const arg = onSuccess.mock.calls[0]![0] as { readStatus: { status: string } }
-    expect(arg.readStatus.status).toBe('reading')
+    expect(onSuccess).toHaveBeenCalledWith({
+      readStatus: {
+        status: 'reading',
+        source: 'manual',
+        startedAt: '2026-04-01',
+        finishedAt: null,
+        updatedAt: '2026-04-02T00:00:00.000Z',
+      },
+    })
+  })
+
+  it('saveCell falls back to synthetic readStatus payload when status response JSON parsing fails', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({
+      ok: true,
+      json: async () => {
+        throw new Error('invalid json')
+      },
+    } as unknown as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook()
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(book.id, 'readStatus', 'reading', onSuccess)
+
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        readStatus: expect.objectContaining({
+          status: 'reading',
+          source: 'manual',
+          startedAt: null,
+          finishedAt: null,
+        }),
+      }),
+    )
   })
 
   it('saveCell calls onSuccess callback and clears active cell on success', async () => {
@@ -161,6 +201,17 @@ describe('useTableCellEditor', () => {
     expect(onSuccess).not.toHaveBeenCalled()
     expect(mocks.toastError).toHaveBeenCalled()
     expect(editor.activeCellKey.value).toBeNull()
+  })
+
+  it('saveCell clears the matching active cell on failure', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: false, status: 500, json: async () => ({}) } as Response)
+    const editor = useTableCellEditor()
+    editor.activateCell(1, 'title', 'Old')
+
+    await editor.saveCell(1, 'title', 'New', vi.fn<(patch: Partial<BookCard>) => void>())
+
+    expect(editor.activeCellKey.value).toBeNull()
+    expect(editor.editValue.value).toBeNull()
   })
 
   it('saveCell shows metadata lock message on 409 conflict', async () => {
@@ -302,6 +353,16 @@ describe('useTableCellEditor', () => {
     expect(editor.activeCellKey.value).toBeNull()
   })
 
+  it('navigateRow sets null edit value when column accessor is unavailable', () => {
+    const editor = useTableCellEditor()
+    const books = [makeBook({ id: 1, title: 'Book 1' }), makeBook({ id: 2, title: 'Book 2' })]
+
+    editor.navigateRowDown(books, 1, 'unknownColumn' as never)
+
+    expect(editor.activeCellKey.value).toBe('2:unknownColumn')
+    expect(editor.editValue.value).toBeNull()
+  })
+
   it('saveCell sends audioMetadata.narrators for narrators column', async () => {
     ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
     const editor = useTableCellEditor()
@@ -319,6 +380,17 @@ describe('useTableCellEditor', () => {
       }),
     )
     expect(onSuccess).toHaveBeenCalledWith({ narrators })
+  })
+
+  it('saveCell short-circuits unsupported fields with a toast and no API call', async () => {
+    const editor = useTableCellEditor()
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(1, 'notAColumn' as never, 'value', onSuccess)
+
+    expect(mocks.api).not.toHaveBeenCalled()
+    expect(onSuccess).not.toHaveBeenCalled()
+    expect(mocks.toastError).toHaveBeenCalledWith('Cannot save: unsupported field "notAColumn"')
   })
 
   it('saveCell does not clear a different active cell on success', async () => {

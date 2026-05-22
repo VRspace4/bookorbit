@@ -63,6 +63,10 @@ function resolveAccountTitle(to: RouteLocationNormalizedLoaded): string {
   return ACCOUNT_TAB_INFO[tab].titleLabel
 }
 
+function resolveStatisticsTitle(): string {
+  return 'Statistics'
+}
+
 export const routes: RouteRecordRaw[] = [
   {
     path: '/',
@@ -227,7 +231,18 @@ export const routes: RouteRecordRaw[] = [
         path: '/statistics',
         name: 'statistics',
         component: () => import('@/features/statistics/components/StatisticsPage.vue'),
-        meta: { title: 'Statistics' },
+        meta: { title: resolveStatisticsTitle },
+        beforeEnter: (to) => {
+          if (to.query.tab === 'achievements') {
+            return { name: 'achievements' }
+          }
+        },
+      },
+      {
+        path: '/achievements',
+        name: 'achievements',
+        component: () => import('@/views/AchievementsView.vue'),
+        meta: { title: 'Achievements' },
       },
       {
         path: '/library/:id',

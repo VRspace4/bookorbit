@@ -86,6 +86,11 @@ describe('sortItems', () => {
         low: { readStatus: { updatedAt: null, finishedAt: '2024-01-01T00:00:00Z' } as never },
         high: { readStatus: { updatedAt: null, finishedAt: '2024-02-01T00:00:00Z' } as never },
       },
+      {
+        field: 'startedAt',
+        low: { readStatus: { updatedAt: null, startedAt: '2024-01-01T00:00:00Z', finishedAt: null } as never },
+        high: { readStatus: { updatedAt: null, startedAt: '2024-02-01T00:00:00Z', finishedAt: null } as never },
+      },
       { field: 'metadataScore', low: { metadataScore: 2 }, high: { metadataScore: 9 } },
     ]
 
@@ -99,6 +104,28 @@ describe('sortItems', () => {
     const { sortItems } = await import('../useLibraryBooks')
 
     const sorted = sortItems([makeBook({ id: 2, rating: null }), makeBook({ id: 1, rating: 4 })], [{ field: 'rating', dir: 'asc' }])
+
+    expect(sorted.map((book) => book.id)).toEqual([1, 2])
+  })
+
+  it('sorts descending when dir is desc', async () => {
+    const { sortItems } = await import('../useLibraryBooks')
+
+    const sorted = sortItems([makeBook({ id: 1, title: 'Alpha' }), makeBook({ id: 2, title: 'Zulu' })], [{ field: 'title', dir: 'desc' }])
+
+    expect(sorted.map((book) => book.id)).toEqual([2, 1])
+  })
+
+  it('uses subsequent sort specs when the first comparison is equal', async () => {
+    const { sortItems } = await import('../useLibraryBooks')
+
+    const sorted = sortItems(
+      [makeBook({ id: 2, title: 'Same', publishedYear: 2021 }), makeBook({ id: 1, title: 'Same', publishedYear: 2020 })],
+      [
+        { field: 'title', dir: 'asc' },
+        { field: 'publishedYear', dir: 'asc' },
+      ],
+    )
 
     expect(sorted.map((book) => book.id)).toEqual([1, 2])
   })
@@ -219,6 +246,17 @@ describe('useLibraryBooks', () => {
     expect(error.value).toBe('HTTP 500')
   })
 
+  it('uses fallback error text when a non-Error is thrown', async () => {
+    const { useLibraryBooks } = await import('../useLibraryBooks')
+    const libraryId = ref<number | null>(1)
+    const { error, load } = useLibraryBooks(libraryId)
+
+    fetchMock.mockRejectedValueOnce('boom')
+    await load(true)
+
+    expect(error.value).toBe('Failed to load books')
+  })
+
   it('load() (non-reset) is a no-op when a load is already in-flight', async () => {
     const { useLibraryBooks } = await import('../useLibraryBooks')
     const libraryId = ref<number | null>(1)
@@ -275,6 +313,64 @@ describe('useLibraryBooks', () => {
 
     expect(items.value).toHaveLength(1)
     expect(items.value[0]!.title).toBe('Second')
+  })
+
+  it('ignores a stale response when the request was aborted after the response object was received', async () => {
+    const { useLibraryBooks } = await import('../useLibraryBooks')
+    const libraryId = ref<number | null>(1)
+    const { items, error, load } = useLibraryBooks(libraryId)
+
+    let resolveFirstJson!: (page: BooksPage) => void
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        new Promise<BooksPage>((resolve) => {
+          resolveFirstJson = resolve
+        }),
+    })
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makePage([makeBook({ id: 2, title: 'Second' })], 1)),
+    })
+
+    const firstLoad = load(true)
+    await Promise.resolve()
+    await load(true)
+
+    resolveFirstJson(makePage([makeBook({ id: 1, title: 'First' })], 1))
+    await firstLoad
+
+    expect(items.value).toHaveLength(1)
+    expect(items.value[0]!.title).toBe('Second')
+    expect(error.value).toBeNull()
+  })
+
+  it('does not surface errors from requests that were aborted and superseded', async () => {
+    const { useLibraryBooks } = await import('../useLibraryBooks')
+    const libraryId = ref<number | null>(1)
+    const { items, error, load } = useLibraryBooks(libraryId)
+
+    let rejectFirst!: (reason?: unknown) => void
+    fetchMock.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        rejectFirst = reject
+      }),
+    )
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makePage([makeBook({ id: 3, title: 'Third' })], 1)),
+    })
+
+    const firstLoad = load(true)
+    await Promise.resolve()
+    const secondLoad = load(true)
+
+    rejectFirst(new Error('aborted'))
+    await Promise.all([firstLoad, secondLoad])
+
+    expect(items.value).toHaveLength(1)
+    expect(items.value[0]!.title).toBe('Third')
+    expect(error.value).toBeNull()
   })
 
   it('clears items, totals, and pagination state', async () => {

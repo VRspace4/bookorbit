@@ -778,7 +778,7 @@ describe('BookController', () => {
     expect(bookService.refreshMetadata).toHaveBeenCalledWith(7, true, user);
     expect(bookService.getMetadataFromFile).toHaveBeenCalledWith(7, user);
     expect(bookService.getKoboState).toHaveBeenCalledWith(7, user);
-    expect(bookService.setReadStatus).toHaveBeenCalledWith(7, 'reading', user);
+    expect(bookService.setReadStatus).toHaveBeenCalledWith(7, { status: 'reading' }, user);
     expect(bookService.getAudioProgress).toHaveBeenCalledWith(user.id, 7, user);
     expect(bookService.getDetail).toHaveBeenCalledWith(7, user);
   });

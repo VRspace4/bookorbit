@@ -36,6 +36,8 @@ function getBookSortValue(book: BookCard, field: SortField): string | number | n
       return book.readingProgress ?? null
     case 'lastReadAt':
       return book.readStatus?.updatedAt ?? null
+    case 'startedAt':
+      return book.readStatus?.startedAt ?? null
     case 'finishedAt':
       return book.readStatus?.finishedAt ?? null
     case 'metadataScore':

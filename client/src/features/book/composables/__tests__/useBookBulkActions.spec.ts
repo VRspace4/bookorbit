@@ -144,15 +144,15 @@ describe('useBookBulkActions', () => {
     expect(books.value[0]?.readStatus).toEqual({
       status: 'read',
       source: 'manual',
-      startedAt: '2026-04-24T12:00:00.000Z',
-      finishedAt: '2026-04-24T12:00:00.000Z',
+      startedAt: null,
+      finishedAt: null,
       updatedAt: '2026-04-24T12:00:00.000Z',
     })
     expect(books.value[1]?.readStatus).toEqual({
       status: 'read',
       source: 'manual',
       startedAt: '2026-04-01T00:00:00.000Z',
-      finishedAt: '2026-04-24T12:00:00.000Z',
+      finishedAt: null,
       updatedAt: '2026-04-24T12:00:00.000Z',
     })
     expect(books.value[2]?.readStatus).toBeNull()

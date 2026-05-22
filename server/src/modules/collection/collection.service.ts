@@ -3,6 +3,7 @@ import { and } from 'drizzle-orm';
 
 import type { BookQuery, BooksPage } from '@bookorbit/types';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { resolveTimeZone } from '../../common/utils/timezone.utils';
 import type { RequestUser } from '../../common/types/request-user';
 import { BookService } from '../book/book.service';
 import { BookQueryBuilder } from '../book/book-query-builder.service';
@@ -230,10 +231,12 @@ export class CollectionService {
     try {
       await this.findCollectionForUserOrThrow(id, user);
       const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
       const filterWhere = this.queryBuilder.buildWhere(query.filter, {
         accessibleLibraryIds: libraryIds,
         userId: user.id,
         q: query.q,
+        timeZone,
       });
       const where = and(filterWhere, this.collectionRepo.buildMembershipWhere(id));
       const page = await this.bookService.executeBooksQuery(user.id, where, query);

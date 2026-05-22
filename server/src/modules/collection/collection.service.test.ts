@@ -356,6 +356,7 @@ describe('CollectionService', () => {
         accessibleLibraryIds: [100],
         userId: 1,
         q: undefined,
+        timeZone: 'UTC',
       });
       expect(collectionRepo.buildMembershipWhere).toHaveBeenCalledWith(10);
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(1, expect.anything(), {
@@ -386,6 +387,7 @@ describe('CollectionService', () => {
           accessibleLibraryIds: [100, 101],
           userId: 1,
           q: 'science',
+          timeZone: 'UTC',
         },
       );
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(

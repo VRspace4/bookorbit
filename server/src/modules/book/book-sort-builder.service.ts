@@ -65,6 +65,12 @@ export class BookSortBuilder {
           sql`(SELECT ubs.finished_at FROM user_book_status ubs WHERE ubs.book_id = books.id AND ubs.user_id = ${userId}) ${sql.raw(D)} NULLS LAST`,
         );
         break;
+      case 'startedAt':
+        if (userId === undefined) throw new BadRequestException('startedAt sort requires an authenticated user');
+        result.push(
+          sql`(SELECT ubs.started_at FROM user_book_status ubs WHERE ubs.book_id = books.id AND ubs.user_id = ${userId}) ${sql.raw(D)} NULLS LAST`,
+        );
+        break;
       case 'rating':
         if (userId === undefined) throw new BadRequestException('rating sort requires an authenticated user');
         result.push(

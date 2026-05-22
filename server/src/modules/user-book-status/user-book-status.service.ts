@@ -10,6 +10,12 @@ const READING_THRESHOLD = 0.25;
 const MIN_PERCENTAGE = 0;
 const MAX_PERCENTAGE = 100;
 
+type ManualStatusPatch = {
+  status?: ReadStatus;
+  startedAt?: Date | null;
+  finishedAt?: Date | null;
+};
+
 @Injectable()
 export class UserBookStatusService {
   constructor(
@@ -18,17 +24,48 @@ export class UserBookStatusService {
   ) {}
 
   async setManual(userId: number, bookId: number, status: ReadStatus): Promise<void> {
+    await this.updateManual(userId, bookId, { status });
+  }
+
+  async updateManual(userId: number, bookId: number, patch: ManualStatusPatch): Promise<UserBookStatus> {
     const existing = await this.repo.findOne(userId, bookId);
+    const now = new Date();
+    const hasStatus = Object.prototype.hasOwnProperty.call(patch, 'status');
+    const hasStartedAt = Object.prototype.hasOwnProperty.call(patch, 'startedAt');
+    const hasFinishedAt = Object.prototype.hasOwnProperty.call(patch, 'finishedAt');
+
+    const nextStatus = patch.status ?? existing?.status ?? 'unread';
+    const nextStartedAt = hasStartedAt ? (patch.startedAt ?? null) : (existing?.startedAt ?? null);
+    const nextFinishedAt = hasFinishedAt ? (patch.finishedAt ?? null) : (existing?.finishedAt ?? null);
+
+    const shouldPersist = existing !== null || hasStatus || nextStartedAt !== null || nextFinishedAt !== null;
+    if (shouldPersist) {
+      await this.repo.upsertState(userId, bookId, {
+        status: nextStatus,
+        source: 'manual',
+        startedAt: nextStartedAt,
+        finishedAt: nextFinishedAt,
+        updatedAt: now,
+      });
+    }
+
     const previousStatus = existing?.status ?? null;
-    await this.repo.upsert(userId, bookId, status, 'manual', new Date());
-    if (status !== previousStatus) {
+    if (hasStatus && nextStatus !== previousStatus) {
       this.achievementEvents.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, {
         userId,
         bookId,
-        newStatus: status,
+        newStatus: nextStatus,
         previousStatus,
       });
     }
+
+    return {
+      status: nextStatus,
+      source: 'manual',
+      startedAt: nextStartedAt?.toISOString() ?? null,
+      finishedAt: nextFinishedAt?.toISOString() ?? null,
+      updatedAt: now.toISOString(),
+    };
   }
 
   async bulkSetManual(userId: number, bookIds: number[], status: ReadStatus): Promise<void> {
@@ -36,7 +73,18 @@ export class UserBookStatusService {
     const now = new Date();
     const existing = await this.repo.findByBookIds(userId, bookIds);
     const existingMap = new Map(existing.map((row) => [row.bookId, row]));
-    await Promise.all(bookIds.map((bookId) => this.repo.upsert(userId, bookId, status, 'manual', now, existingMap.get(bookId))));
+    await Promise.all(
+      bookIds.map((bookId) => {
+        const current = existingMap.get(bookId) ?? null;
+        return this.repo.upsertState(userId, bookId, {
+          status,
+          source: 'manual',
+          startedAt: current?.startedAt ?? null,
+          finishedAt: current?.finishedAt ?? null,
+          updatedAt: now,
+        });
+      }),
+    );
     for (const bookId of bookIds) {
       const previousStatus = existingMap.get(bookId)?.status ?? null;
       if (status !== previousStatus) {

@@ -4,6 +4,7 @@ import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import type { GroupRule, ReadStatus, Rule, SortSpec } from '@bookorbit/types';
 import { DB } from '../../db';
+import { isDateKey, resolveTimeZone, toDateKeyInTimeZone } from '../../common/utils/timezone.utils';
 import * as schema from '../../db/schema';
 import { BookSortBuilder } from './book-sort-builder.service';
 import {
@@ -37,11 +38,12 @@ export class BookQueryBuilder {
 
   buildWhere(
     filter: GroupRule | null | undefined,
-    ctx: { accessibleLibraryIds: number[]; implicitLibraryId?: number; userId?: number; q?: string },
+    ctx: { accessibleLibraryIds: number[]; implicitLibraryId?: number; userId?: number; q?: string; timeZone?: string },
   ): SQL | undefined {
     if (ctx.accessibleLibraryIds.length === 0) {
       return sql`1 = 0`;
     }
+    const timeZone = resolveTimeZone(ctx.timeZone, 'UTC');
 
     const clauses: SQL[] = [inArray(books.libraryId, ctx.accessibleLibraryIds)];
 
@@ -50,7 +52,7 @@ export class BookQueryBuilder {
     }
 
     if (filter) {
-      clauses.push(this.groupToSql(filter, 0, ctx.userId));
+      clauses.push(this.groupToSql(filter, 0, ctx.userId, timeZone));
     }
 
     if (ctx.q?.trim()) {
@@ -88,13 +90,15 @@ export class BookQueryBuilder {
     return this.sortBuilder.build(sort, userId);
   }
 
-  private groupToSql(node: GroupRule, depth: number, userId?: number): SQL {
+  private groupToSql(node: GroupRule, depth: number, userId?: number, timeZone = 'UTC'): SQL {
     if (depth > 5) throw new BadRequestException('Filter nesting exceeds maximum depth of 5');
-    const clauses = node.rules.map((r) => (r.type === 'group' ? this.groupToSql(r, depth + 1, userId) : this.ruleToSql(r, userId)));
+    const clauses = node.rules.map((r) =>
+      r.type === 'group' ? this.groupToSql(r, depth + 1, userId, timeZone) : this.ruleToSql(r, userId, timeZone),
+    );
     return node.join === 'AND' ? and(...clauses)! : or(...clauses)!;
   }
 
-  private ruleToSql(rule: Rule, userId?: number): SQL {
+  private ruleToSql(rule: Rule, userId?: number, timeZone = 'UTC'): SQL {
     const { field, operator, value, valueTo } = rule;
     switch (field) {
       case 'title':
@@ -134,6 +138,9 @@ export class BookQueryBuilder {
         return this.formatRuleToSql(operator, value as string[]);
       case 'addedAt':
         return this.dateRuleToSql(operator, value as string | number, valueTo as string | undefined);
+      case 'startedAt':
+      case 'finishedAt':
+        return this.readStatusDateRuleToSql(field, operator, value as string | number, valueTo as string | number | undefined, userId, timeZone);
       case 'fileAvailability':
         return this.statusRuleToSql(operator);
       case 'readProgress':
@@ -362,6 +369,73 @@ export class BookQueryBuilder {
       default:
         throw new BadRequestException(`Invalid operator '${operator}' for date field`);
     }
+  }
+
+  private readStatusDateRuleToSql(
+    field: 'startedAt' | 'finishedAt',
+    operator: string,
+    value: string | number | undefined,
+    valueTo: string | number | undefined,
+    userId: number | undefined,
+    timeZone: string,
+  ): SQL {
+    if (userId === undefined) {
+      throw new BadRequestException(`${field} filter requires an authenticated user`);
+    }
+    const dateExpr = this.readStatusDateExpr(field, userId, timeZone);
+    switch (operator) {
+      case 'before':
+        return sql`${dateExpr} < ${this.parseDateKey(value, operator, 'value', timeZone)}`;
+      case 'after':
+        return sql`${dateExpr} > ${this.parseDateKey(value, operator, 'value', timeZone)}`;
+      case 'between': {
+        const from = this.parseDateKey(value, operator, 'value', timeZone);
+        const to = this.parseDateKey(valueTo, operator, 'valueTo', timeZone);
+        return sql`${dateExpr} >= ${from} and ${dateExpr} <= ${to}`;
+      }
+      case 'withinLast': {
+        const days = typeof value === 'string' ? Number(value) : value;
+        this.assertNumber(days, operator, 'value');
+        if (days! < 0) throw new BadRequestException(`Operator '${operator}' requires a non-negative value`);
+        const wholeDays = Math.floor(days!);
+        const shiftDays = wholeDays > 0 ? wholeDays - 1 : 0;
+        return sql`${dateExpr} >= (timezone(${timeZone}, now())::date - ${shiftDays})`;
+      }
+      case 'isEmpty':
+        return sql`${dateExpr} is null`;
+      case 'isNotEmpty':
+        return sql`${dateExpr} is not null`;
+      default:
+        throw new BadRequestException(`Invalid operator '${operator}' for ${field} field`);
+    }
+  }
+
+  private readStatusDateExpr(field: 'startedAt' | 'finishedAt', userId: number, timeZone: string): SQL {
+    const column = field === 'startedAt' ? userBookStatus.startedAt : userBookStatus.finishedAt;
+    return sql`(SELECT (${column} AT TIME ZONE ${timeZone})::date FROM ${userBookStatus} WHERE ${userBookStatus.bookId} = ${books.id} AND ${userBookStatus.userId} = ${userId})`;
+  }
+
+  private parseDateKey(value: string | number | undefined, operator: string, key: 'value' | 'valueTo', timeZone: string): string {
+    if (value === undefined || value === null || value === '') {
+      throw new BadRequestException(`Operator '${operator}' requires a valid date ${key}`);
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        throw new BadRequestException(`Operator '${operator}' requires a valid date ${key}`);
+      }
+      if (isDateKey(trimmed)) return trimmed;
+      const parsed = new Date(trimmed);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException(`Operator '${operator}' requires a valid date ${key}`);
+      }
+      return toDateKeyInTimeZone(parsed, timeZone);
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(`Operator '${operator}' requires a valid date ${key}`);
+    }
+    return toDateKeyInTimeZone(parsed, timeZone);
   }
 
   private assertNumber(value: number | undefined, operator: string, key: 'value' | 'valueTo'): void {
@@ -618,6 +692,9 @@ export class BookQueryBuilder {
           break;
         case 'finishedAt':
           parts.push(`(SELECT ubs.finished_at FROM user_book_status ubs WHERE ubs.book_id = r.id AND ubs.user_id = ${safeUserId}) ${D} NULLS LAST`);
+          break;
+        case 'startedAt':
+          parts.push(`(SELECT ubs.started_at FROM user_book_status ubs WHERE ubs.book_id = r.id AND ubs.user_id = ${safeUserId}) ${D} NULLS LAST`);
           break;
         case 'random': {
           const daySeed = Math.floor(Date.now() / 86_400_000);

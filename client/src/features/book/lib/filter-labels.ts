@@ -18,6 +18,7 @@ export const SORT_FIELD_LABELS: Record<SortField, string> = {
   language: 'Language',
   metadataScore: 'Metadata Score',
   lastReadAt: 'Last Read',
+  startedAt: 'Date Started',
   finishedAt: 'Date Finished',
   random: 'Random',
 }
@@ -37,6 +38,8 @@ export const FIELD_LABELS: Record<RuleField, string> = {
   library: 'Library',
   format: 'Format',
   addedAt: 'Added Date',
+  startedAt: 'Date Started',
+  finishedAt: 'Date Finished',
   fileAvailability: 'File Availability',
   rating: 'Rating',
   readProgress: 'Reading Progress',

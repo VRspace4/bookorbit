@@ -11,6 +11,7 @@ import type { UserBookStatusRow } from '../../db/schema';
 type Db = NodePgDatabase<typeof schema>;
 
 export type UserBookStatusLifecycle = Pick<UserBookStatusRow, 'startedAt' | 'finishedAt'>;
+export type UserBookStatusState = Pick<UserBookStatusRow, 'status' | 'source' | 'startedAt' | 'finishedAt' | 'updatedAt'>;
 
 export function deriveLifecycle(status: ReadStatus, now: Date, existing: UserBookStatusRow | null): UserBookStatusLifecycle {
   switch (status) {
@@ -66,6 +67,30 @@ export class UserBookStatusRepository {
       .onConflictDoUpdate({
         target: [userBookStatus.userId, userBookStatus.bookId],
         set: { status, source, startedAt, finishedAt, updatedAt: now },
+      });
+  }
+
+  async upsertState(userId: number, bookId: number, state: UserBookStatusState): Promise<void> {
+    await this.db
+      .insert(userBookStatus)
+      .values({
+        userId,
+        bookId,
+        status: state.status,
+        source: state.source,
+        startedAt: state.startedAt,
+        finishedAt: state.finishedAt,
+        updatedAt: state.updatedAt,
+      })
+      .onConflictDoUpdate({
+        target: [userBookStatus.userId, userBookStatus.bookId],
+        set: {
+          status: state.status,
+          source: state.source,
+          startedAt: state.startedAt,
+          finishedAt: state.finishedAt,
+          updatedAt: state.updatedAt,
+        },
       });
   }
 }
