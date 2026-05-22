@@ -98,7 +98,7 @@ export const routes: RouteRecordRaw[] = [
             path: 'libraries',
             name: 'settings-libraries',
             component: () => import('@/features/settings/LibrariesSettings.vue'),
-            meta: { maxWidth: 'max-w-3xl', title: 'Libraries' },
+            meta: { maxWidth: 'max-w-[52rem]', title: 'Libraries' },
           },
           {
             path: 'appearance',

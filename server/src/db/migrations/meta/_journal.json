@@ -47,15 +47,22 @@
     {
       "idx": 6,
       "version": "7",
-      "when": 1779285000000,
-      "tag": "0006_add_tts_reading_position",
+      "when": 1779381509015,
+      "tag": "0006_add_file_rename_enabled",
       "breakpoints": true
     },
     {
       "idx": 7,
       "version": "7",
+      "when": 1779285000000,
+      "tag": "0007_add_tts_reading_position",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
       "when": 1779371400000,
-      "tag": "0007_add_tts_usage",
+      "tag": "0008_add_tts_usage",
       "breakpoints": true
     }
   ]

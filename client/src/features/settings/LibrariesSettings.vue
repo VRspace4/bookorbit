@@ -1,7 +1,22 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { FolderOpen, Plus, RefreshCw, Pencil, Trash2, Images, FileEdit, MoreHorizontal, BookOpen, HardDrive, Eye } from 'lucide-vue-next'
+import {
+  FolderOpen,
+  Plus,
+  RefreshCw,
+  Pencil,
+  Trash2,
+  Images,
+  FileEdit,
+  MoreHorizontal,
+  BookOpen,
+  HardDrive,
+  Eye,
+  FileText,
+  Folder,
+  CalendarClock,
+} from 'lucide-vue-next'
 import SettingsPageHeader from './SettingsPageHeader.vue'
 import * as LucideIcons from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
@@ -13,6 +28,8 @@ import { useLibraryCreationRedirect } from '@/features/library/composables/useLi
 import { useLibraryFileSync } from '@/features/library/composables/useLibraryFileSync'
 import { useScanProgress, getSocket } from '@/features/scanner/composables/useScanProgress'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { parseCronToHuman } from '@/features/library/utils/cron'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 
 const route = useRoute()
@@ -277,145 +294,200 @@ function coverRefreshLabel(libraryId: number): string {
   </SettingsPageHeader>
 
   <!-- Library cards -->
-  <div class="space-y-2 md:space-y-4">
-    <div v-for="lib in libraries" :key="lib.id" class="rounded-lg border border-border bg-card overflow-hidden shadow-xs">
-      <div class="px-4 py-3.5 md:px-5 md:py-4">
-        <div class="flex items-center gap-3">
-          <!-- Icon -->
-          <RouterLink
-            :to="{ name: 'library', params: { id: lib.id } }"
-            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 hover:bg-primary/15 transition-colors"
-          >
-            <component :is="getIconComponent(lib.icon)" :size="16" class="text-primary" />
-          </RouterLink>
-
-          <!-- Name + stats -->
-          <div class="flex-1 min-w-0">
+  <TooltipProvider>
+    <div class="space-y-2 md:space-y-4">
+      <div v-for="lib in libraries" :key="lib.id" class="rounded-lg border border-border bg-card overflow-hidden shadow-xs">
+        <div class="px-4 py-3.5 md:px-5 md:py-4">
+          <div class="flex items-center gap-3">
+            <!-- Icon -->
             <RouterLink
               :to="{ name: 'library', params: { id: lib.id } }"
-              class="settings-label hover:text-primary transition-colors truncate block leading-snug"
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 hover:bg-primary/15 transition-colors"
             >
-              {{ lib.name }}
+              <component :is="getIconComponent(lib.icon)" :size="16" class="text-primary" />
             </RouterLink>
-            <div class="flex items-center flex-wrap gap-x-3 gap-y-1 mt-0.5">
-              <span v-if="stats[lib.id]" class="flex items-center gap-1 text-xs text-muted-foreground">
-                <BookOpen :size="11" />
-                {{ stats[lib.id]?.totalBooks }} book{{ stats[lib.id]?.totalBooks === 1 ? '' : 's' }}
-              </span>
-              <span v-if="stats[lib.id] && (stats[lib.id]?.totalSizeBytes ?? 0) > 0" class="flex items-center gap-1 text-xs text-muted-foreground">
-                <HardDrive :size="11" />
-                {{ formatBytes(stats[lib.id]?.totalSizeBytes ?? 0) }}
-              </span>
-              <span v-if="!stats[lib.id]" class="text-xs text-muted-foreground">
-                Added {{ new Date(lib.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) }}
-              </span>
-              <span v-if="lib.watch" class="flex items-center gap-1 text-xs font-medium text-primary/80">
-                <Eye :size="11" />
-                Watching
-              </span>
+
+            <!-- Name + stats -->
+            <div class="flex-1 min-w-0">
+              <RouterLink
+                :to="{ name: 'library', params: { id: lib.id } }"
+                class="settings-label hover:text-primary transition-colors truncate block leading-snug"
+              >
+                {{ lib.name }}
+              </RouterLink>
+              <div class="grid grid-rows-4 grid-cols-2 md:grid-rows-2 md:grid-cols-[90px_100px_200px_96px] grid-flow-col gap-x-4 gap-y-1.5 mt-1.5">
+                <!-- Col 1 -->
+                <span v-if="stats[lib.id]" class="flex items-center gap-1 text-xs text-muted-foreground min-w-0">
+                  <BookOpen :size="11" class="shrink-0" />
+                  <span class="truncate">{{ stats[lib.id]?.totalBooks }} book{{ stats[lib.id]?.totalBooks === 1 ? '' : 's' }}</span>
+                </span>
+                <span v-else class="text-xs text-muted-foreground truncate min-w-0">
+                  Added {{ new Date(lib.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) }}
+                </span>
+
+                <span
+                  v-if="stats[lib.id] && (stats[lib.id]?.totalSizeBytes ?? 0) > 0"
+                  class="flex items-center gap-1 text-xs text-muted-foreground min-w-0"
+                >
+                  <HardDrive :size="11" class="shrink-0" />
+                  <span class="truncate">{{ formatBytes(stats[lib.id]?.totalSizeBytes ?? 0) }}</span>
+                </span>
+                <span v-else class="min-w-0"></span>
+
+                <!-- Col 2 -->
+                <span class="flex items-center gap-1 text-xs text-muted-foreground min-w-0">
+                  <component :is="lib.organizationMode === 'book_per_file' ? FileText : Folder" :size="11" class="shrink-0" />
+                  <span class="truncate">{{ lib.organizationMode === 'book_per_file' ? 'File mode' : 'Folder mode' }}</span>
+                </span>
+
+                <Tooltip v-if="lib.folders.length > 0">
+                  <TooltipTrigger as-child>
+                    <span class="flex items-center gap-1 text-xs text-muted-foreground cursor-default min-w-0">
+                      <FolderOpen :size="11" class="shrink-0" />
+                      <span class="truncate">{{ lib.folders.length }} {{ lib.folders.length === 1 ? 'folder' : 'folders' }}</span>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent class="max-w-xs">
+                    <div class="space-y-0.5">
+                      <p v-for="folder in lib.folders" :key="folder.id" class="font-mono text-xs break-all">{{ folder.path }}</p>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+                <span v-else class="min-w-0"></span>
+
+                <!-- Col 3 -->
+                <span v-if="lib.watch" class="flex items-center gap-1 text-xs font-medium text-primary/80 min-w-0">
+                  <Eye :size="11" class="shrink-0" />
+                  <span class="truncate">Watching</span>
+                </span>
+                <span v-else class="min-w-0"></span>
+
+                <span
+                  v-if="parseCronToHuman(lib.autoScanCronExpression)"
+                  class="flex items-center gap-1 text-xs text-muted-foreground min-w-0"
+                  :title="parseCronToHuman(lib.autoScanCronExpression) || undefined"
+                >
+                  <CalendarClock :size="11" class="shrink-0" />
+                  <span class="truncate">{{ parseCronToHuman(lib.autoScanCronExpression) }}</span>
+                </span>
+                <span v-else class="min-w-0"></span>
+
+                <!-- Col 4 -->
+                <span v-if="lib.fileWriteEnabled" class="flex items-center gap-1 text-xs text-muted-foreground min-w-0">
+                  <FileEdit :size="11" class="shrink-0" />
+                  <span class="truncate">File write</span>
+                </span>
+                <span v-else class="min-w-0"></span>
+
+                <span v-if="lib.fileRenameEnabled" class="flex items-center gap-1 text-xs text-muted-foreground min-w-0">
+                  <Pencil :size="11" class="shrink-0" />
+                  <span class="truncate">File rename</span>
+                </span>
+                <span v-else class="min-w-0"></span>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex items-center gap-2 shrink-0">
+              <button class="settings-btn-outline" :disabled="isScanning(lib.id)" @click="scan(lib)">
+                <RefreshCw :size="14" :class="isScanning(lib.id) ? 'animate-spin' : ''" />
+                {{ isScanning(lib.id) ? 'Scanning...' : 'Scan' }}
+              </button>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger as-child>
+                  <button
+                    class="flex h-11 w-11 md:h-auto md:w-auto md:px-2 md:py-1.5 items-center justify-center rounded-md border border-border hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                  >
+                    <MoreHorizontal :size="16" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" class="w-52">
+                  <DropdownMenuItem @click="openEdit(lib)">
+                    <Pencil />
+                    Edit library
+                  </DropdownMenuItem>
+                  <DropdownMenuItem :disabled="isRefreshingCovers(lib.id)" @click="refreshCovers(lib)">
+                    <Images :class="isRefreshingCovers(lib.id) ? 'animate-pulse' : ''" />
+                    Refresh covers
+                  </DropdownMenuItem>
+                  <DropdownMenuItem :disabled="!!fileSyncingMap[lib.id] || !lib.fileWriteEnabled" @click="promptSyncFiles(lib)">
+                    <FileEdit :class="fileSyncingMap[lib.id] ? 'animate-pulse' : ''" />
+                    <span class="flex-1">Sync metadata to files</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" @click="openDelete(lib)">
+                    <Trash2 />
+                    Delete library
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
+        </div>
 
-          <!-- Actions -->
-          <div class="flex items-center gap-2 shrink-0">
-            <button class="settings-btn-outline" :disabled="isScanning(lib.id)" @click="scan(lib)">
-              <RefreshCw :size="14" :class="isScanning(lib.id) ? 'animate-spin' : ''" />
-              {{ isScanning(lib.id) ? 'Scanning...' : 'Scan' }}
-            </button>
-
-            <DropdownMenu>
-              <DropdownMenuTrigger as-child>
-                <button
-                  class="flex h-11 w-11 md:h-auto md:w-auto md:px-2 md:py-1.5 items-center justify-center rounded-md border border-border hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                >
-                  <MoreHorizontal :size="16" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" class="w-52">
-                <DropdownMenuItem @click="openEdit(lib)">
-                  <Pencil />
-                  Edit library
-                </DropdownMenuItem>
-                <DropdownMenuItem :disabled="isRefreshingCovers(lib.id)" @click="refreshCovers(lib)">
-                  <Images :class="isRefreshingCovers(lib.id) ? 'animate-pulse' : ''" />
-                  Refresh covers
-                </DropdownMenuItem>
-                <DropdownMenuItem :disabled="!!fileSyncingMap[lib.id] || !lib.fileWriteEnabled" @click="promptSyncFiles(lib)">
-                  <FileEdit :class="fileSyncingMap[lib.id] ? 'animate-pulse' : ''" />
-                  <span class="flex-1">Sync metadata to files</span>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" @click="openDelete(lib)">
-                  <Trash2 />
-                  Delete library
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+        <!-- Progress bars (shown below the main row, full width) -->
+        <div
+          v-if="getProgress(lib.id) || getCoverRefreshProgress(lib.id)"
+          class="border-t border-border px-4 py-2.5 space-y-2 md:px-5 md:py-3 md:space-y-2.5"
+        >
+          <div v-if="getProgress(lib.id)">
+            <div class="flex items-center justify-between mb-1.5 min-w-0">
+              <span
+                class="block min-w-0 text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible"
+                :class="getProgress(lib.id)?.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'"
+              >
+                {{ scanProgressLabel(lib.id) }}
+              </span>
+            </div>
+            <div v-if="getProgress(lib.id)?.status === 'running'" class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                class="h-full rounded-full bg-primary transition-all duration-300"
+                :style="{
+                  width:
+                    getProgress(lib.id)!.total > 0 ? `${Math.floor((getProgress(lib.id)!.processed / getProgress(lib.id)!.total) * 100)}%` : '100%',
+                  animation: getProgress(lib.id)!.total === 0 ? 'pulse 1.5s ease-in-out infinite' : 'none',
+                }"
+              />
+            </div>
+          </div>
+          <div v-if="getCoverRefreshProgress(lib.id)">
+            <div class="flex items-center justify-between mb-1.5 min-w-0">
+              <span
+                class="block min-w-0 text-xs font-medium text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible"
+              >
+                {{ coverRefreshLabel(lib.id) }}
+              </span>
+            </div>
+            <div v-if="getCoverRefreshProgress(lib.id)?.status === 'running'" class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                class="h-full rounded-full bg-accent transition-all duration-300"
+                :style="{
+                  width:
+                    getCoverRefreshProgress(lib.id)!.total > 0
+                      ? `${Math.floor((getCoverRefreshProgress(lib.id)!.processed / getCoverRefreshProgress(lib.id)!.total) * 100)}%`
+                      : '0%',
+                }"
+              />
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- Progress bars (shown below the main row, full width) -->
-      <div
-        v-if="getProgress(lib.id) || getCoverRefreshProgress(lib.id)"
-        class="border-t border-border px-4 py-2.5 space-y-2 md:px-5 md:py-3 md:space-y-2.5"
-      >
-        <div v-if="getProgress(lib.id)">
-          <div class="flex items-center justify-between mb-1.5 min-w-0">
-            <span
-              class="block min-w-0 text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible"
-              :class="getProgress(lib.id)?.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'"
-            >
-              {{ scanProgressLabel(lib.id) }}
-            </span>
-          </div>
-          <div v-if="getProgress(lib.id)?.status === 'running'" class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-            <div
-              class="h-full rounded-full bg-primary transition-all duration-300"
-              :style="{
-                width:
-                  getProgress(lib.id)!.total > 0 ? `${Math.floor((getProgress(lib.id)!.processed / getProgress(lib.id)!.total) * 100)}%` : '100%',
-                animation: getProgress(lib.id)!.total === 0 ? 'pulse 1.5s ease-in-out infinite' : 'none',
-              }"
-            />
-          </div>
+      <!-- Empty state -->
+      <div v-if="libraries.length === 0" class="rounded-lg border border-dashed border-border bg-card/50 px-8 py-16 text-center shadow-xs">
+        <div class="flex h-12 w-12 items-center justify-center rounded-lg bg-muted mx-auto mb-4">
+          <FolderOpen :size="22" class="text-muted-foreground/80" />
         </div>
-        <div v-if="getCoverRefreshProgress(lib.id)">
-          <div class="flex items-center justify-between mb-1.5 min-w-0">
-            <span
-              class="block min-w-0 text-xs font-medium text-muted-foreground overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible"
-            >
-              {{ coverRefreshLabel(lib.id) }}
-            </span>
-          </div>
-          <div v-if="getCoverRefreshProgress(lib.id)?.status === 'running'" class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-            <div
-              class="h-full rounded-full bg-accent transition-all duration-300"
-              :style="{
-                width:
-                  getCoverRefreshProgress(lib.id)!.total > 0
-                    ? `${Math.floor((getCoverRefreshProgress(lib.id)!.processed / getCoverRefreshProgress(lib.id)!.total) * 100)}%`
-                    : '0%',
-              }"
-            />
-          </div>
-        </div>
+        <p class="text-sm font-medium text-foreground mb-1">No libraries yet</p>
+        <p class="text-sm text-muted-foreground mb-5">Add a library to start organizing your books.</p>
+        <button class="settings-btn-primary" @click="openCreate">
+          <Plus :size="14" />
+          Add your first library
+        </button>
       </div>
     </div>
-
-    <!-- Empty state -->
-    <div v-if="libraries.length === 0" class="rounded-lg border border-dashed border-border bg-card/50 px-8 py-16 text-center shadow-xs">
-      <div class="flex h-12 w-12 items-center justify-center rounded-lg bg-muted mx-auto mb-4">
-        <FolderOpen :size="22" class="text-muted-foreground/80" />
-      </div>
-      <p class="text-sm font-medium text-foreground mb-1">No libraries yet</p>
-      <p class="text-sm text-muted-foreground mb-5">Add a library to start organizing your books.</p>
-      <button class="settings-btn-primary" @click="openCreate">
-        <Plus :size="14" />
-        Add your first library
-      </button>
-    </div>
-  </div>
+  </TooltipProvider>
 
   <!-- Library creator/editor modal -->
   <LibraryCreatorModal v-if="creatorOpen" :library="editingLibrary" @close="closeCreator" @saved="onSaved" />
