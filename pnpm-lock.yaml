@@ -91,6 +91,9 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
+      cronstrue:
+        specifier: ^3.14.0
+        version: 3.14.0
       dompurify:
         specifier: ^3.4.3
         version: 3.4.3
@@ -8191,6 +8194,13 @@ packages:
         integrity: sha512-fkdfq+b+AHI4cKdhZlppHveI/mgz2qpiYxcm+t5E5TsxX7QrLS1VE0+7GENEk9z0EeGPcpSciGv6ez24duWhwQ==,
       }
     engines: { node: ">=18.x" }
+
+  cronstrue@3.14.0:
+    resolution:
+      {
+        integrity: sha512-XnW4vuK/jPJjmTyDWiej1Zq36Od7ITwxaV2O1pzHZuyMVvdy7NAvyvIBzybt+idqSpfqYuoDG7uf/ocGtJVWxA==,
+      }
+    hasBin: true
 
   cross-spawn@7.0.6:
     resolution:
@@ -20207,6 +20217,8 @@ snapshots:
     dependencies:
       "@types/luxon": 3.7.1
       luxon: 3.7.2
+
+  cronstrue@3.14.0: {}
 
   cross-spawn@7.0.6:
     dependencies:
