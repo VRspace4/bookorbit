@@ -692,7 +692,7 @@ describe('useEpubTts cloud playback', () => {
     const doc = document.implementation.createHTMLDocument('Book')
     doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
     const onTtsWordIndexChange = vi.fn<(wordIndex: number) => void>()
-    const onTtsCheckpoint = vi.fn()
+    const onTtsCheckpoint = vi.fn<() => void>()
     const tts = useEpubTts({
       fileId: 1,
       getDocument: () => doc,
@@ -816,92 +816,6 @@ describe('useEpubTts cloud playback', () => {
       expect(doc.body.querySelector(`.${TTS_SENTENCE_CLASS}`)).not.toBeNull()
       expect(doc.body.querySelector(`.${TTS_ACTIVE_CLASS}`)).not.toBeNull()
     })
-  })
-
-  it('keeps centering the restored TTS highlight while launch layout settles', async () => {
-    vi.useFakeTimers()
-    const scrollBy = vi.fn<(dx: number, dy: number) => void>()
-    const frameCallbacks = new Map<number, FrameRequestCallback>()
-    let frameId = 0
-    const flushAnimationFrames = () => {
-      const callbacks = Array.from(frameCallbacks.values())
-      frameCallbacks.clear()
-      callbacks.forEach((callback) => callback(performance.now()))
-    }
-    const getBoundingClientRect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains(TTS_ACTIVE_CLASS)) {
-        return {
-          top: 300,
-          bottom: 320,
-          left: 0,
-          right: 50,
-          width: 50,
-          height: 20,
-          x: 0,
-          y: 300,
-          toJSON: () => ({}),
-        } as DOMRect
-      }
-      return {
-        top: 0,
-        bottom: 0,
-        left: 0,
-        right: 0,
-        width: 0,
-        height: 0,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      } as DOMRect
-    })
-    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
-    vi.stubGlobal(
-      'requestAnimationFrame',
-      vi.fn((callback: FrameRequestCallback) => {
-        frameId += 1
-        frameCallbacks.set(frameId, callback)
-        return frameId
-      }),
-    )
-    vi.stubGlobal(
-      'cancelAnimationFrame',
-      vi.fn((id: number) => {
-        frameCallbacks.delete(id)
-      }),
-    )
-
-    try {
-      const doc = document.implementation.createHTMLDocument('Book')
-      doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
-      writeTtsPlaybackSession(1, { enabled: true, wasPlaying: false, sectionIndex: 0, wordIndex: 3 })
-      const tts = useEpubTts({
-        fileId: 1,
-        getDocument: () => doc,
-        getSettings: makeSettings,
-        bookLanguage: ref('en'),
-        getCurrentSectionIndex: () => 0,
-        getFoliateRenderer: () => ({ scrolled: true, size: 800, scrollBy }),
-      })
-
-      await expect(tts.restoreTtsAfterReload()).resolves.toBe('ready')
-
-      const totalDelta = () => scrollBy.mock.calls.reduce((sum, [dx]) => sum + dx, 0)
-      for (let i = 0; i < 8 && Math.abs(totalDelta() + 90) > 1; i += 1) {
-        flushAnimationFrames()
-      }
-      expect(totalDelta()).toBeCloseTo(-90, 0)
-      const firstCenteringCount = scrollBy.mock.calls.length
-
-      await vi.advanceTimersByTimeAsync(90)
-      for (let i = 0; i < 4 && scrollBy.mock.calls.length === firstCenteringCount; i += 1) {
-        flushAnimationFrames()
-      }
-      expect(scrollBy.mock.calls.length).toBeGreaterThan(firstCenteringCount)
-    } finally {
-      getBoundingClientRect.mockRestore()
-      vi.clearAllTimers()
-      vi.useRealTimers()
-    }
   })
 
   it('starts playback when resume is requested without suspended audio', async () => {

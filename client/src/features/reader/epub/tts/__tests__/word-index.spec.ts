@@ -105,7 +105,7 @@ describe('TTS word indexing', () => {
     highlightWord(root, words, sentences, 0)
 
     const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
-    const scrollIntoView = vi.fn()
+    const scrollIntoView = vi.fn<(options?: ScrollIntoViewOptions) => void>()
     active.scrollIntoView = scrollIntoView
 
     scrollActiveWordIntoView(root, 'instant', null)
@@ -133,7 +133,7 @@ describe('TTS word indexing', () => {
         toJSON: () => ({}),
       }) as DOMRect
 
-    const scrollBy = vi.fn()
+    const scrollBy = vi.fn<(dx: number, dy: number) => void>()
     scrollActiveWordIntoView(root, 'instant', { scrolled: true, size: 800, scrollBy })
     expect(scrollBy).toHaveBeenCalledWith(8, 0)
   })
@@ -159,7 +159,7 @@ describe('TTS word indexing', () => {
         toJSON: () => ({}),
       }) as DOMRect
 
-    const scrollBy = vi.fn()
+    const scrollBy = vi.fn<(dx: number, dy: number) => void>()
     scrollActiveWordIntoView(root, 'instant', { scrolled: true, size: 1268, start: 1415, scrollBy })
     expect(scrollBy).toHaveBeenCalledWith(-622, 0)
   })

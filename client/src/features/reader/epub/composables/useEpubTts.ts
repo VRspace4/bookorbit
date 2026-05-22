@@ -750,13 +750,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
           prepareCloudAudioSentence(sentence, runtime, ctx, fetchAudio, effectiveProvider),
         )
       } else {
-        for (const sentence of playbackQueue) {
-          if (runtimeIsInactive(activeRuntime) || playbackRunIsStale(runId)) return
-          currentSentenceText.value = sentence.text
-          setActiveWord(sentence.wordStartIdx)
-          status.value = 'loading'
-          await speakSentence(sentence, activeRuntime, effectiveProvider)
-        }
+        await playBrowserQueue(playbackQueue, activeRuntime)
       }
       if (playbackRunIsStale(runId)) return
       if (runtime === activeRuntime && !activeRuntime.stopped) {
@@ -774,20 +768,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
       status.value = 'error'
       syncMediaSession()
     }
-  }
-
-  async function speakSentence(
-    sentence: SentenceInfo,
-    activeRuntime: SpeechRuntime,
-    effectiveProvider = requireConfiguredProvider(settings().ttsProvider),
-  ): Promise<void> {
-    currentProvider.value = effectiveProvider
-    if (effectiveProvider === 'azure') return speakAzureSentence(sentence, activeRuntime)
-    if (effectiveProvider === 'xai') return speakCloudAudioSentence(sentence, activeRuntime, fetchXaiAudio)
-    if (effectiveProvider === 'gcp-chirp3') return speakCloudAudioSentence(sentence, activeRuntime, fetchGcpAudio)
-    if (effectiveProvider === 'kokoro') return speakCloudAudioSentence(sentence, activeRuntime, fetchKokoroAudio)
-    if (effectiveProvider === 'gpt-4o-mini-tts') return speakCloudAudioSentence(sentence, activeRuntime, fetchGpt4oMiniTtsAudio)
-    throw new Error(`${providerDisplayName(effectiveProvider)} is not supported for text-to-speech.`)
   }
 
   function cloudAudioFetcher(provider: TtsProvider): CloudAudioFetcher {
@@ -849,38 +829,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   function runtimeIsInactive(activeRuntime: SpeechRuntime): boolean {
     return runtime !== activeRuntime || activeRuntime.stopped || activeRuntime.abort.signal.aborted
-  }
-
-  function speakBrowserSentence(sentence: SentenceInfo, activeRuntime: SpeechRuntime): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (!window.speechSynthesis) {
-        reject(new Error('Device text-to-speech is not available in this browser.'))
-        return
-      }
-      window.speechSynthesis.cancel()
-      const utterance = new SpeechSynthesisUtterance(sentence.text)
-      const s = settings()
-      const selectedVoice = s.ttsVoice ? window.speechSynthesis.getVoices().find((voice) => voice.name === s.ttsVoice) : null
-      if (selectedVoice) utterance.voice = selectedVoice
-      utterance.rate = s.ttsRate
-      utterance.pitch = s.ttsPitch
-      utterance.volume = s.ttsVolume
-      const wordEnds = localWordEndChars(sentence, words)
-      utterance.onstart = () => {
-        if (!activeRuntime.stopped) {
-          status.value = 'speaking'
-          trackPlayedUsage(sentence)
-        }
-      }
-      utterance.onboundary = (event) => {
-        if (activeRuntime.stopped || typeof event.charIndex !== 'number') return
-        const localIdx = wordIndexForFraction(wordEnds, event.charIndex / Math.max(1, wordEnds[wordEnds.length - 1] ?? 1))
-        setActiveWord(sentence.wordStartIdx + localIdx)
-      }
-      utterance.onerror = (event) => reject(new Error(`Device TTS failed: ${event.error || 'unknown error'}`))
-      utterance.onend = () => resolve()
-      window.speechSynthesis.speak(utterance)
-    })
   }
 
   function createBrowserUtterance(sentence: SentenceInfo, activeRuntime: SpeechRuntime): SpeechSynthesisUtterance {
@@ -951,15 +899,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
         synth.speak(utterance)
       }
     })
-  }
-
-  async function speakCloudAudioSentence(sentence: SentenceInfo, activeRuntime: SpeechRuntime, fetchAudio: CloudAudioFetcher): Promise<void> {
-    const audioData = await fetchAudio(sentence, activeRuntime.abort.signal)
-    const ctx = new AudioContext({ latencyHint: 'playback' })
-    activeRuntime.audioContext = ctx
-    await ctx.resume().catch(() => {})
-    const buffer = trimAudioBufferSilence(ctx, await ctx.decodeAudioData(audioData.slice(0)))
-    await playAudioBufferWithInterpolation(sentence, activeRuntime, ctx, buffer)
   }
 
   function queuePreparedAudio(sentence: SentenceInfo, activeRuntime: SpeechRuntime, ctx: AudioContext, buildAudio: PreparedAudioBuilder) {
@@ -1042,11 +981,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     }
   }
 
-  async function prepareAzureAudioSentence(sentence: SentenceInfo, activeRuntime: SpeechRuntime, ctx: AudioContext): Promise<PreparedAudio> {
-    const sdk = await getAzureSdk()
-    return prepareAzureAudioSentenceWithSdk(sentence, ctx, sdk, activeRuntime)
-  }
-
   async function playAzureAudioQueue(playbackQueue: SentenceInfo[], activeRuntime: SpeechRuntime) {
     const sdk = await getAzureSdk()
     await playPreparedAudioQueue(playbackQueue, activeRuntime, (sentence, runtime, ctx) =>
@@ -1120,14 +1054,6 @@ export function useEpubTts(options: UseEpubTtsOptions) {
       const buffer = trimAudioBufferSilence(ctx, await ctx.decodeAudioData(audioData.slice(0)))
       return { sentence, buffer, boundaries, charStarts }
     })
-  }
-
-  async function speakAzureSentence(sentence: SentenceInfo, activeRuntime: SpeechRuntime): Promise<void> {
-    const ctx = new AudioContext({ latencyHint: 'playback' })
-    activeRuntime.audioContext = ctx
-    await ctx.resume().catch(() => {})
-    const prepared = await prepareAzureAudioSentence(sentence, activeRuntime, ctx)
-    await playPreparedAudio(prepared, activeRuntime, ctx)
   }
 
   function playAudioBufferWithInterpolation(
