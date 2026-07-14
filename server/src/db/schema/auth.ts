@@ -96,6 +96,7 @@ export const refreshTokens = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     tokenHash: varchar('token_hash', { length: 255 }).notNull().unique(),
+    successorTokenHash: varchar('successor_token_hash', { length: 255 }),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -103,6 +104,7 @@ export const refreshTokens = pgTable(
   (t) => [
     index('refresh_tokens_user_id_idx').on(t.userId),
     index('refresh_tokens_expires_at_idx').on(t.expiresAt),
+    index('refresh_tokens_successor_token_hash_idx').on(t.successorTokenHash),
     check('refresh_tokens_expires_after_created_chk', sql`${t.expiresAt} > ${t.createdAt}`),
   ],
 );

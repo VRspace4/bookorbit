@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 import { EPUB_READER_DEFAULTS, migrateFlatEpubDefaultsToV2, type EpubReaderDefaultsStorageV2, type EpubReaderSettings } from '@bookorbit/types'
 import { isReaderSyncEnabled, useReaderSettings } from '../useReaderSettings'
+import { buildThemeHighlightPatch } from '@/features/reader/epub/theme-highlight'
 
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>())
 
@@ -198,6 +199,55 @@ describe('useReaderSettings', () => {
     const epubEffective = effective.value as EpubReaderSettings
     expect(epubEffective.ttsSentenceHighlightColor).toBe('#aa0000')
     expect(epubEffective.ttsWordHighlightColor).toBe('#bb0000')
+  })
+
+  it('persists word-only highlight updates across reload', async () => {
+    const { updateGlobalSettings, load, effective } = useReaderSettings(4, 'epub')
+    await load()
+
+    updateGlobalSettings(
+      buildThemeHighlightPatch(effective.value as EpubReaderSettings, {
+        ttsWordHighlightColor: '#ff00aa',
+      }) as Partial<EpubReaderSettings>,
+    )
+
+    const stored = readEpubDefaults()
+    expect(stored.shared.themeHighlightColors?.default).toEqual({
+      ttsSentenceHighlightColor: '#4f6f7d',
+      ttsWordHighlightColor: '#ff00aa',
+    })
+
+    const { load: reload, effective: reEffective } = useReaderSettings(4, 'epub')
+    await reload()
+
+    expect((reEffective.value as EpubReaderSettings).ttsWordHighlightColor).toBe('#ff00aa')
+  })
+
+  it('repairs partial stored theme highlight colors on reload', async () => {
+    localStorage.setItem(
+      'reader:default:epub',
+      JSON.stringify(
+        migrateFlatEpubDefaultsToV2({
+          ...EPUB_READER_DEFAULTS,
+          themeHighlightColors: {
+            default: {
+              ttsSentenceHighlightColor: '#aa0000',
+            },
+          },
+          ttsSentenceHighlightColor: '#aa0000',
+          ttsWordHighlightColor: '#bb0000',
+        }),
+      ),
+    )
+
+    const { load, effective } = useReaderSettings(4, 'epub')
+    await load()
+
+    expect((effective.value as EpubReaderSettings).ttsWordHighlightColor).toBe('#bb0000')
+    expect(readEpubDefaults().shared.themeHighlightColors?.default).toEqual({
+      ttsSentenceHighlightColor: '#aa0000',
+      ttsWordHighlightColor: '#bb0000',
+    })
   })
 
   it('migrates legacy flat defaults to per-device storage on load', async () => {

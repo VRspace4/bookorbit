@@ -15,6 +15,7 @@ import { ZlibCredentialsService } from './zlib-credentials.service';
 import { ZlibQueueService } from './zlib-queue.service';
 import { ZlibLimitReachedException } from './zlib-limit.exception';
 import { BookDockIngestService } from '../book-dock/book-dock-ingest.service';
+import { AnnaArchiveApiService } from './anna-archive-api.service';
 
 const DAILY_LIMIT = 10;
 
@@ -22,6 +23,7 @@ const DAILY_LIMIT = 10;
 export class ZlibController {
   constructor(
     private readonly zlibApi: ZlibApiService,
+    private readonly annaArchiveApi: AnnaArchiveApiService,
     private readonly credentials: ZlibCredentialsService,
     private readonly queue: ZlibQueueService,
     private readonly bookDockIngest: BookDockIngestService,
@@ -84,6 +86,10 @@ export class ZlibController {
   @Get('search')
   @RequirePermission(Permission.LibraryUpload)
   async search(@Query() dto: ZlibSearchDto, @CurrentUser() user: RequestUser) {
+    if (dto.source === 'anna') {
+      return this.annaArchiveApi.search(dto.q, dto.format, dto.limit);
+    }
+
     const creds = await this.credentials.findByUserId(user.id);
     if (!creds) throw new UnauthorizedException('Z-Library not connected');
     return this.zlibApi.search(creds.remixUserId, creds.remixUserKey, dto.q, dto.format, dto.limit);
@@ -93,6 +99,14 @@ export class ZlibController {
   @HttpCode(HttpStatus.CREATED)
   @RequirePermission(Permission.LibraryUpload)
   async download(@Body() dto: ZlibDownloadDto, @CurrentUser() user: RequestUser) {
+    if (dto.source === 'anna') {
+      const { stream, filename } = dto.mirrorUrls?.length
+        ? await this.annaArchiveApi.downloadMirrorStream(dto.mirrorUrls, dto.filename, dto.format)
+        : await this.annaArchiveApi.downloadStream(dto.bookId, dto.format);
+      const bookDockId = await this.bookDockIngest.ingestUpload(dto.filename || filename, stream, user.id);
+      return { bookDockId };
+    }
+
     const creds = await this.credentials.findByUserId(user.id);
     if (!creds) throw new UnauthorizedException('Z-Library not connected');
 

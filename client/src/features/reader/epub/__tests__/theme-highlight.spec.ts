@@ -38,6 +38,46 @@ describe('theme-highlight', () => {
     })
   })
 
+  it('repairs partial per-theme overrides using top-level effective colors', () => {
+    expect(
+      resolveThemeHighlightColors({
+        ...baseSettings,
+        themeHighlightColors: {
+          default: {
+            ttsSentenceHighlightColor: '#aa0000',
+          },
+        },
+        ttsSentenceHighlightColor: '#aa0000',
+        ttsWordHighlightColor: '#bb0000',
+      }),
+    ).toEqual({
+      ttsSentenceHighlightColor: '#aa0000',
+      ttsWordHighlightColor: '#bb0000',
+    })
+  })
+
+  it('does not apply top-level colors when resolving a different theme', () => {
+    expect(
+      resolveThemeHighlightColors(
+        {
+          ...baseSettings,
+          themeHighlightColors: {
+            sepia: {
+              ttsSentenceHighlightColor: '#aa0000',
+              ttsWordHighlightColor: '#bb0000',
+            },
+          },
+          ttsSentenceHighlightColor: '#111111',
+          ttsWordHighlightColor: '#222222',
+        },
+        'sepia',
+      ),
+    ).toEqual({
+      ttsSentenceHighlightColor: '#aa0000',
+      ttsWordHighlightColor: '#bb0000',
+    })
+  })
+
   it('migrates legacy global highlight colors into the active theme', () => {
     const legacy: EpubReaderSettings = {
       ...baseSettings,

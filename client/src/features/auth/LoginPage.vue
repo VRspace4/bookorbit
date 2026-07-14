@@ -50,7 +50,7 @@ function closeAll() {
 
 const { login } = useAuth()
 const { getPublicProviders, initiateLogin } = useOidc()
-const { setupStatusError } = useSetupStatus()
+const { setupStatusError, fetchSetupStatus } = useSetupStatus()
 
 const username = ref('')
 const password = ref('')
@@ -74,6 +74,11 @@ function resolveLoginError(err: unknown): string {
 }
 
 onMounted(async () => {
+  try {
+    await fetchSetupStatus(true)
+  } catch {
+    // Keep setupStatusError visible when the retry still fails.
+  }
   oidcProviders.value = await getPublicProviders()
 })
 

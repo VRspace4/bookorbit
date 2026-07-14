@@ -7,7 +7,7 @@ import { getAccessToken } from '@/lib/api'
 import { useReaderProgress } from '../shared/composables/useReaderProgress'
 import { useReadingSession } from '../shared/composables/useReadingSession'
 import { useReaderSettings } from '../shared/composables/useReaderSettings'
-import { exitReader } from '../shared/lib/reader-navigation'
+import { leaveReader } from '../shared/lib/reader-navigation'
 import { useThemeStore, ACCENT_OPTIONS } from '@/stores/theme'
 import type { PdfReaderSettings } from '@bookorbit/types'
 import { getIsDark, lookupAccentHex } from './pdf-viewer-utils'
@@ -226,8 +226,7 @@ function setupThemeSync() {
 }
 
 async function handleBack() {
-  await progress.flush()
-  await exitReader(router)
+  await leaveReader(router)
 }
 
 onBeforeRouteLeave(async () => {

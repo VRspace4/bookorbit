@@ -25,6 +25,7 @@ describe('NotificationService', () => {
     emitRead: ReturnType<typeof vi.fn>;
     emitDismissed: ReturnType<typeof vi.fn>;
     emitCleared: ReturnType<typeof vi.fn>;
+    emitAllRead: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -48,6 +49,7 @@ describe('NotificationService', () => {
       emitRead: vi.fn(),
       emitDismissed: vi.fn(),
       emitCleared: vi.fn(),
+      emitAllRead: vi.fn(),
     };
     service = new NotificationService(repo as never, gateway as never);
   });
@@ -272,7 +274,7 @@ describe('NotificationService', () => {
   // ---------- markAllAsRead() ----------
 
   describe('markAllAsRead()', () => {
-    it('marks all as read and emits count update + cleared', async () => {
+    it('marks all as read and emits count update + all-read', async () => {
       repo.setAllRead.mockResolvedValue(undefined);
       repo.countUnread.mockResolvedValue(0);
 
@@ -281,7 +283,8 @@ describe('NotificationService', () => {
       expect(repo.setAllRead).toHaveBeenCalledWith(42);
       expect(repo.countUnread).toHaveBeenCalledWith(42);
       expect(gateway.emitCountUpdate).toHaveBeenCalledWith(42, 0);
-      expect(gateway.emitCleared).toHaveBeenCalledWith(42);
+      expect(gateway.emitAllRead).toHaveBeenCalledWith(42);
+      expect(gateway.emitCleared).not.toHaveBeenCalled();
     });
   });
 

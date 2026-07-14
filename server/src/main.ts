@@ -27,17 +27,29 @@ async function bootstrap() {
 
   // Kobo devices send Content-Type: application/json with empty bodies on GET/DELETE.
   // Fastify's default JSON parser rejects empty bodies, so we inject '{}' before parsing.
+  // Proxies may also attach unsupported Content-Type values to bodyless PATCH/DELETE requests.
   fastify.addHook('preParsing', (request, _reply, payload, done) => {
     const ct = request.headers['content-type'] ?? '';
+    const contentLength = request.headers['content-length'];
+    const isEmpty = contentLength === '0' || contentLength === undefined;
     const isJson = ct.startsWith('application/json');
-    const isEmpty = request.headers['content-length'] === '0' || request.headers['content-length'] === undefined;
+
     if (isJson && isEmpty) {
+      delete request.headers['content-length'];
       const fake = new Readable();
       fake.push('{}');
       fake.push(null);
       done(null, fake);
       return;
     }
+
+    if (isEmpty && ct) {
+      delete request.headers['content-type'];
+      if (contentLength === '0') {
+        delete request.headers['content-length'];
+      }
+    }
+
     done(null, payload);
   });
 

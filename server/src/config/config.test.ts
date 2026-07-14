@@ -61,6 +61,8 @@ describe('config', () => {
       jwtSecret: 'change-me-in-production',
       jwtExpiresIn: '15m',
       jwtRefreshExpiresIn: '7d',
+      refreshReuseWindow: '5m',
+      refreshRotationGraceWindow: '60s',
       setupBootstrapToken: '',
     });
     expect(emailConfig().encryptionKey).toBe('');

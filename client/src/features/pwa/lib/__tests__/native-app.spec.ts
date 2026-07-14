@@ -81,6 +81,7 @@ describe('native app PWA helpers', () => {
       afterEach: vi.fn<(handler: (to: RouteLocationNormalizedLoaded) => void) => void>((handler) => {
         afterEachHandlers.push(handler)
       }),
+      currentRoute: { value: makeRoute({ fullPath: '/', path: '/' }) },
       push: vi.fn<(to: string) => Promise<void>>(() => Promise.resolve()),
     } as unknown as Router
 
@@ -93,6 +94,67 @@ describe('native app PWA helpers', () => {
     await vi.runAllTimersAsync()
 
     expect(router.push).toHaveBeenCalledWith('/read/1/2?format=epub')
+  })
+
+  it('cancels pending standalone restore when the user navigates away from root first', async () => {
+    vi.useFakeTimers()
+    setStandalone(true)
+    localStorage.setItem(
+      'bookorbit:pwa:last-route',
+      JSON.stringify({
+        fullPath: '/read/1/2?format=epub',
+        savedAt: Date.now(),
+      }),
+    )
+
+    const beforeEachHandlers: Array<(to: RouteLocationNormalizedLoaded) => unknown> = []
+    const router = {
+      beforeEach: vi.fn<(handler: (to: RouteLocationNormalizedLoaded) => unknown) => void>((handler) => {
+        beforeEachHandlers.push(handler)
+      }),
+      afterEach: vi.fn(),
+      currentRoute: { value: makeRoute({ fullPath: '/book/9?tab=details', path: '/book/9' }) },
+      push: vi.fn<(to: string) => Promise<void>>(() => Promise.resolve()),
+    } as unknown as Router
+
+    registerPwaRoutePersistence(router)
+
+    expect(beforeEachHandlers[0]?.(makeRoute({ fullPath: '/', path: '/' }))).toBe(true)
+    beforeEachHandlers[0]?.(makeRoute({ fullPath: '/book/9?tab=details', path: '/book/9' }))
+
+    await vi.runAllTimersAsync()
+
+    expect(router.push).not.toHaveBeenCalled()
+  })
+
+  it('does not push a standalone restore when the reader is already active', async () => {
+    vi.useFakeTimers()
+    setStandalone(true)
+    localStorage.setItem(
+      'bookorbit:pwa:last-route',
+      JSON.stringify({
+        fullPath: '/read/1/2?format=epub',
+        savedAt: Date.now(),
+      }),
+    )
+
+    const beforeEachHandlers: Array<(to: RouteLocationNormalizedLoaded) => unknown> = []
+    const router = {
+      beforeEach: vi.fn<(handler: (to: RouteLocationNormalizedLoaded) => unknown) => void>((handler) => {
+        beforeEachHandlers.push(handler)
+      }),
+      afterEach: vi.fn(),
+      currentRoute: { value: makeRoute({ fullPath: '/read/1/2?format=epub', path: '/read/1/2' }) },
+      push: vi.fn<(to: string) => Promise<void>>(() => Promise.resolve()),
+    } as unknown as Router
+
+    registerPwaRoutePersistence(router)
+
+    expect(beforeEachHandlers[0]?.(makeRoute({ fullPath: '/', path: '/' }))).toBe(true)
+
+    await vi.runAllTimersAsync()
+
+    expect(router.push).not.toHaveBeenCalled()
   })
 
   it('does not redirect normal browser root loads', () => {

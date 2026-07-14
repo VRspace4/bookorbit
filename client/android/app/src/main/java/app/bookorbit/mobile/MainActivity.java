@@ -27,6 +27,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         pendingSavedInstanceState = savedInstanceState;
+        registerPlugin(AnnaMirrorResolverPlugin.class);
         super.onCreate(savedInstanceState);
         pendingSavedInstanceState = null;
     }

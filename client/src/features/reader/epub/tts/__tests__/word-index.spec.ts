@@ -164,6 +164,48 @@ describe('TTS word indexing', () => {
     expect(scrollBy).toHaveBeenCalledWith(-622, 0)
   })
 
+  it('uses scrollToAnchor before scrollBy when the highlight is far off-screen', async () => {
+    const root = document.createElement('main')
+    root.innerHTML = '<p>Hello world.</p>'
+    const words = buildWordIndex(root)
+    const sentences = splitIntoSentences(words, 0)
+    highlightWord(root, words, sentences, 0)
+
+    const active = root.querySelector<HTMLElement>(`.${TTS_ACTIVE_CLASS}`)!
+    const foliate: {
+      scrolled: boolean
+      size: number
+      start: number
+      scrollBy: ReturnType<typeof vi.fn<(dx: number, dy: number) => void>>
+      scrollToAnchor: ReturnType<typeof vi.fn<(anchor: Range | Element, select?: boolean) => Promise<void>>>
+    } = {
+      scrolled: true,
+      size: 1268,
+      start: 2861,
+      scrollBy: vi.fn<(dx: number, dy: number) => void>(),
+      scrollToAnchor: vi.fn<(anchor: Range | Element, select?: boolean) => Promise<void>>(async () => {
+        foliate.start = 5343
+      }),
+    }
+
+    active.getBoundingClientRect = () =>
+      ({
+        top: 5343,
+        bottom: 5367,
+        left: 0,
+        right: 40,
+        width: 40,
+        height: 24,
+        x: 5343,
+        y: 5343,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    scrollActiveWordIntoView(root, 'instant', foliate)
+    await vi.waitFor(() => expect(foliate.scrollToAnchor).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(foliate.scrollBy).toHaveBeenCalledWith(-622, 0))
+  })
+
   it('uses foliate viewport metrics for sticky follow detection', () => {
     const root = document.createElement('main')
     root.innerHTML = '<p>Hello world.</p>'

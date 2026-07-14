@@ -59,10 +59,10 @@
       "breakpoints": true
     },
     {
-      "idx": 8,
+      "idx": 9,
       "version": "7",
-      "when": 1779371400000,
-      "tag": "0008_add_tts_usage",
+      "when": 1779574800000,
+      "tag": "0009_add_refresh_token_successor",
       "breakpoints": true
     }
   ]

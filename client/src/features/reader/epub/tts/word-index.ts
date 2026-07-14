@@ -267,6 +267,7 @@ export interface FoliateScrollRenderer {
   /** Foliate paginator scroll offset on the primary reading axis. */
   start?: number
   scrollBy?: (dx: number, dy: number) => void
+  scrollToAnchor?: (anchor: Range | Element, select?: boolean) => Promise<void>
 }
 
 function getActiveWordViewportMetrics(rect: DOMRect, foliate: FoliateScrollRenderer) {
@@ -307,7 +308,7 @@ function scrollFoliateBy(foliate: FoliateScrollRenderer, delta: number, behavior
     return
   }
 
-  const durationMs = 180
+  const durationMs = 280
   const startedAt = performance.now()
   let appliedDelta = 0
 
@@ -328,16 +329,39 @@ function scrollFoliateBy(foliate: FoliateScrollRenderer, delta: number, behavior
   foliateScrollAnimations.set(animationKey, requestAnimationFrame(tick))
 }
 
+function rangeForActiveElement(activeEl: HTMLElement): Range {
+  const range = activeEl.ownerDocument.createRange()
+  range.selectNodeContents(activeEl)
+  return range
+}
+
+function computeCenterDelta(activeEl: HTMLElement, foliate: FoliateScrollRenderer): number {
+  const rect = activeEl.getBoundingClientRect()
+  const { center, viewportSize } = getActiveWordViewportMetrics(rect, foliate)
+  return center - viewportSize / 2
+}
+
+/** Foliate scrollBy is clamped to a local window; large jumps need scrollToAnchor first. */
+function needsAnchorScroll(activeEl: HTMLElement, foliate: FoliateScrollRenderer): boolean {
+  const rect = activeEl.getBoundingClientRect()
+  const { visible, viewportSize } = getActiveWordViewportMetrics(rect, foliate)
+  if (!visible) return true
+  return Math.abs(computeCenterDelta(activeEl, foliate)) > viewportSize * 0.45
+}
+
+async function applyFoliateCentering(activeEl: HTMLElement, foliate: FoliateScrollRenderer, behavior: ScrollBehavior) {
+  if (needsAnchorScroll(activeEl, foliate) && typeof foliate.scrollToAnchor === 'function') {
+    await foliate.scrollToAnchor(rangeForActiveElement(activeEl), false)
+  }
+  scrollFoliateBy(foliate, computeCenterDelta(activeEl, foliate), behavior)
+}
+
 export function scrollActiveWordIntoView(root: HTMLElement, behavior: ScrollBehavior = 'smooth', foliate?: FoliateScrollRenderer | null) {
   const activeEl = getActiveHighlightElement(root)
   if (!activeEl) return
 
   if (foliate && typeof foliate.scrollBy === 'function' && typeof foliate.size === 'number' && foliate.size > 0) {
-    const rect = activeEl.getBoundingClientRect()
-    const { center, viewportSize } = getActiveWordViewportMetrics(rect, foliate)
-    const centerDelta = center - viewportSize / 2
-    // Foliate uses the first scrollBy argument for the primary visible axis in this reader.
-    scrollFoliateBy(foliate, centerDelta, behavior)
+    void applyFoliateCentering(activeEl, foliate, behavior)
     return
   }
 

@@ -21,6 +21,7 @@ export interface ZlibBook {
   extension: string;
   filesize: number;
   cover: string;
+  source?: 'zlib' | 'anna';
 }
 
 export interface ZlibSearchResult {
@@ -99,7 +100,7 @@ export class ZlibApiService {
 
     const json = (await res.json()) as { books?: ZlibBook[]; total?: number };
     return {
-      books: json.books ?? [],
+      books: (json.books ?? []).map((book) => ({ ...book, source: 'zlib' as const })),
       total: json.total ?? 0,
     };
   }

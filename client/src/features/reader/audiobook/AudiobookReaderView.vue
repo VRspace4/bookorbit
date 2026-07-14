@@ -32,7 +32,7 @@ import { useAudioQueue } from './composables/useAudioQueue'
 import { useAudioSettings } from './composables/useAudioSettings'
 import { useAudioBookmarks, type AudioBookmark } from './composables/useAudioBookmarks'
 import { useReadingSession } from '../shared/composables/useReadingSession'
-import { exitReader } from '../shared/lib/reader-navigation'
+import { leaveReader } from '../shared/lib/reader-navigation'
 
 const props = defineProps<{ bookId: number; fileId: number }>()
 const router = useRouter()
@@ -52,8 +52,7 @@ const sleepPopoverStyle = ref<Record<string, string>>({})
 const speedPopoverStyle = ref<Record<string, string>>({})
 
 async function handleBack() {
-  progress.flush()
-  await exitReader(router)
+  await leaveReader(router)
 }
 
 // Reset chapters tab to default when sheet closes

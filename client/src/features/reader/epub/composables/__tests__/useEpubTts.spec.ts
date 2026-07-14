@@ -778,6 +778,46 @@ describe('useEpubTts cloud playback', () => {
     expect(onTtsWordIndexChange).not.toHaveBeenCalled()
   })
 
+  it('keeps a paused highlight anchored to its source section after manual section navigation', async () => {
+    let sectionIndex = 1
+    const sourceDoc = document.implementation.createHTMLDocument('Book')
+    sourceDoc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'
+    let doc = sourceDoc
+    const tts = useEpubTts({
+      fileId: 1,
+      getDocument: () => doc,
+      getSettings: makeSettings,
+      bookLanguage: ref('en'),
+      getResumeKey: () => `book-1:${sectionIndex}`,
+      getCurrentSectionIndex: () => sectionIndex,
+    })
+
+    void tts.start(5)
+    await vi.waitFor(() => expect(FakeAudioContext.sources).toHaveLength(1))
+    tts.pause()
+
+    expect(tts.followTarget.value).toEqual({ sectionIndex: 1, wordIndex: 5 })
+    expect(sourceDoc.body.querySelector(`.${TTS_ACTIVE_CLASS}`)?.textContent).toBe('This')
+
+    sectionIndex = 2
+    const nextDoc = document.implementation.createHTMLDocument('Next')
+    nextDoc.body.innerHTML = '<p>Other section words should not inherit the paused TTS highlight.</p>'
+    doc = nextDoc
+    tts.handleDocumentLoad(nextDoc)
+
+    expect(tts.restoreTtsHighlightNow()).toBe(false)
+    expect(nextDoc.body.querySelector(`.${TTS_SENTENCE_CLASS}`)).toBeNull()
+    expect(nextDoc.body.querySelector(`.${TTS_ACTIVE_CLASS}`)).toBeNull()
+    expect(tts.followTarget.value).toEqual({ sectionIndex: 1, wordIndex: 5 })
+
+    sectionIndex = 1
+    doc = sourceDoc
+    const restored = tts.restoreTtsHighlightNow()
+
+    expect(restored).toBe(true)
+    expect(sourceDoc.body.querySelector(`.${TTS_ACTIVE_CLASS}`)?.textContent).toBe('This')
+  })
+
   it('auto-resumes playback after reload when a session was active', async () => {
     const doc = document.implementation.createHTMLDocument('Book')
     doc.body.innerHTML = '<p>This is the first sentence. This is the second sentence.</p>'

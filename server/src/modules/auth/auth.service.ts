@@ -280,79 +280,77 @@ export class AuthService {
     if (!rawToken) throw new UnauthorizedException();
 
     const tokenHash = sha256(rawToken);
-    const row = await this.db.query.refreshTokens.findFirst({
-      where: eq(schema.refreshTokens.tokenHash, tokenHash),
-    });
+    const reuseWindowMs = this.getRefreshReuseWindowMs();
+    const rotationGraceMs = this.getRefreshRotationGraceMs();
 
-    if (!row) {
-      this.logger.warn('[auth.refresh] [fail] errorClass=UnauthorizedException error="token not found" - refresh failed');
-      throw new UnauthorizedException();
-    }
-
-    // Reuse of a revoked token indicates possible theft.
-    // Revoke refresh sessions and bump tokenVersion to invalidate active access tokens.
-    if (row.revokedAt) {
-      this.logger.warn(
-        `[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="token revoked - reuse attempt" - refresh failed`,
-      );
-      await this.db.transaction(async (tx) => {
-        await tx
-          .update(schema.users)
-          .set({ tokenVersion: sql`${schema.users.tokenVersion} + 1` })
-          .where(eq(schema.users.id, row.userId));
-        await tx.delete(schema.refreshTokens).where(eq(schema.refreshTokens.userId, row.userId));
-      });
-      this.clearRefreshCookie(reply);
-      this.clearAccessCookie(reply);
-      throw new UnauthorizedException();
-    }
-
-    if (row.expiresAt < new Date()) {
-      this.logger.warn(`[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="token expired" - refresh failed`);
-      this.clearRefreshCookie(reply);
-      throw new UnauthorizedException();
-    }
-
-    const userForToken = await this.db.query.users.findFirst({ where: eq(schema.users.id, row.userId) });
-    if (!userForToken) throw new UnauthorizedException();
-    if (!userForToken.active) {
-      this.logger.warn(`[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="account disabled" - refresh failed`);
-      this.clearRefreshCookie(reply);
-      this.clearAccessCookie(reply);
-      throw new UnauthorizedException('Account disabled');
-    }
-
-    if (userForToken.provisioningMethod === 'shared') {
-      const hasActive = await this.magicLinkRepo.hasActiveByUserId(row.userId);
-
-      if (!hasActive) {
-        this.logger.warn(
-          `[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="all magic links revoked" - refresh failed`,
-        );
-        await this.revokeAllUserSessions(row.userId);
-        this.clearRefreshCookie(reply);
-        this.clearAccessCookie(reply);
+    const refreshResult = await this.db.transaction(async (tx) => {
+      const row = await this.lockRefreshTokenRow(tx, tokenHash);
+      if (!row) {
+        this.logger.warn('[auth.refresh] [fail] errorClass=UnauthorizedException error="token not found" - refresh failed');
         throw new UnauthorizedException();
       }
+
+      const userForToken = await this.db.query.users.findFirst({ where: eq(schema.users.id, row.userId) });
+      if (!userForToken) throw new UnauthorizedException();
+
+      if (row.revokedAt) {
+        return this.handleRevokedRefreshToken(tx, row, userForToken, reply, rotationGraceMs);
+      }
+
+      if (row.expiresAt < new Date()) {
+        this.logger.warn(`[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="token expired" - refresh failed`);
+        this.clearRefreshCookie(reply);
+        throw new UnauthorizedException();
+      }
+
+      if (!userForToken.active) {
+        this.logger.warn(`[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="account disabled" - refresh failed`);
+        this.clearRefreshCookie(reply);
+        this.clearAccessCookie(reply);
+        throw new UnauthorizedException('Account disabled');
+      }
+
+      if (userForToken.provisioningMethod === 'shared') {
+        const hasActive = await this.magicLinkRepo.hasActiveByUserId(row.userId);
+
+        if (!hasActive) {
+          this.logger.warn(
+            `[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="all magic links revoked" - refresh failed`,
+          );
+          await this.revokeAllUserSessions(row.userId);
+          this.clearRefreshCookie(reply);
+          this.clearAccessCookie(reply);
+          throw new UnauthorizedException();
+        }
+      }
+
+      const tokenAgeMs = Date.now() - row.createdAt.getTime();
+      if (tokenAgeMs >= 0 && tokenAgeMs < reuseWindowMs) {
+        const accessToken = this.jwtService.sign({ sub: row.userId, ver: userForToken.tokenVersion });
+        return { kind: 'reuse' as const, accessToken, userId: row.userId };
+      }
+
+      return this.rotateRefreshToken(tx, row, userForToken);
+    });
+
+    if (refreshResult.kind === 'reuse') {
+      this.setAccessCookie(reply, refreshResult.accessToken);
+      return { accessToken: refreshResult.accessToken };
     }
 
-    const refreshReuseWindowMs = parseDurationMs(this.config.get<string>('auth.refreshReuseWindow') ?? '5m');
-    const tokenAgeMs = Date.now() - row.createdAt.getTime();
-    if (tokenAgeMs >= 0 && tokenAgeMs < refreshReuseWindowMs) {
-      const accessToken = this.jwtService.sign({ sub: row.userId, ver: userForToken.tokenVersion });
-      this.setAccessCookie(reply, accessToken);
-      return { accessToken };
+    if (refreshResult.kind === 'grace') {
+      this.setAccessCookie(reply, refreshResult.accessToken);
+      return { accessToken: refreshResult.accessToken };
     }
 
-    // Rotate: revoke old, issue new
-    await this.db.update(schema.refreshTokens).set({ revokedAt: new Date() }).where(eq(schema.refreshTokens.id, row.id));
+    if (refreshResult.kind === 'rotate') {
+      await this.oidcSessionRepo.touchActiveByUserId(refreshResult.userId, refreshResult.refreshExpiresAt);
+      this.setRefreshCookie(reply, refreshResult.rawRefreshToken);
+      this.setAccessCookie(reply, refreshResult.accessToken);
+      return { accessToken: refreshResult.accessToken };
+    }
 
-    const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(row.userId, userForToken.tokenVersion);
-    await this.oidcSessionRepo.touchActiveByUserId(row.userId, refreshExpiresAt);
-    this.setRefreshCookie(reply, rawRefreshToken);
-    this.setAccessCookie(reply, accessToken);
-
-    return { accessToken };
+    throw new InternalServerErrorException('Unhandled refresh result');
   }
 
   async logout(req: FastifyRequest, reply: FastifyReply): Promise<{ logoutUrl?: string }> {
@@ -601,14 +599,85 @@ export class AuthService {
     return new Date(baseDate.getTime() + parseDurationMs(this.config.get<string>('auth.jwtRefreshExpiresIn') ?? '7d'));
   }
 
-  private async issueTokenPair(userId: number, tokenVersion: number) {
+  private getRefreshReuseWindowMs(): number {
+    return parseDurationMs(this.config.get<string>('auth.refreshReuseWindow') ?? '5m');
+  }
+
+  private getRefreshRotationGraceMs(): number {
+    return parseDurationMs(this.config.get<string>('auth.refreshRotationGraceWindow') ?? '60s');
+  }
+
+  private async lockRefreshTokenRow(tx: NodePgDatabase<typeof schema>, tokenHash: string) {
+    const rows = await tx.select().from(schema.refreshTokens).where(eq(schema.refreshTokens.tokenHash, tokenHash)).for('update').limit(1);
+    return rows[0] ?? null;
+  }
+
+  private async handleRevokedRefreshToken(
+    tx: NodePgDatabase<typeof schema>,
+    row: schema.RefreshToken,
+    userForToken: { id: number; tokenVersion: number; active: boolean },
+    reply: FastifyReply,
+    rotationGraceMs: number,
+  ) {
+    const revokedAgeMs = Date.now() - row.revokedAt!.getTime();
+    if (revokedAgeMs >= 0 && revokedAgeMs < rotationGraceMs && row.successorTokenHash) {
+      const successor = await tx.query.refreshTokens.findFirst({
+        where: eq(schema.refreshTokens.tokenHash, row.successorTokenHash),
+      });
+      if (successor && !successor.revokedAt && successor.expiresAt >= new Date()) {
+        const accessToken = this.jwtService.sign({ sub: row.userId, ver: userForToken.tokenVersion });
+        return { kind: 'grace' as const, accessToken };
+      }
+    }
+
+    this.logger.warn(
+      `[auth.refresh] [fail] userId=${row.userId} errorClass=UnauthorizedException error="token revoked - reuse attempt" - refresh failed`,
+    );
+    await this.revokeRefreshTokenChain(tx, row);
+    this.clearRefreshCookie(reply);
+    this.clearAccessCookie(reply);
+    throw new UnauthorizedException();
+  }
+
+  private async revokeRefreshTokenChain(tx: NodePgDatabase<typeof schema>, row: schema.RefreshToken) {
+    const now = new Date();
+    let nextHash: string | null = row.successorTokenHash;
+    while (nextHash) {
+      const token = await tx.query.refreshTokens.findFirst({
+        where: eq(schema.refreshTokens.tokenHash, nextHash),
+      });
+      if (!token) break;
+      if (!token.revokedAt) {
+        await tx.update(schema.refreshTokens).set({ revokedAt: now }).where(eq(schema.refreshTokens.id, token.id));
+      }
+      nextHash = token.successorTokenHash;
+    }
+  }
+
+  private async rotateRefreshToken(tx: NodePgDatabase<typeof schema>, row: schema.RefreshToken, userForToken: { id: number; tokenVersion: number }) {
+    const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(row.userId, userForToken.tokenVersion, tx);
+    await tx
+      .update(schema.refreshTokens)
+      .set({ revokedAt: new Date(), successorTokenHash: sha256(rawRefreshToken) })
+      .where(eq(schema.refreshTokens.id, row.id));
+
+    return {
+      kind: 'rotate' as const,
+      accessToken,
+      rawRefreshToken,
+      refreshExpiresAt,
+      userId: row.userId,
+    };
+  }
+
+  private async issueTokenPair(userId: number, tokenVersion: number, db: NodePgDatabase<typeof schema> = this.db) {
     const accessToken = this.jwtService.sign({ sub: userId, ver: tokenVersion });
 
     const rawRefreshToken = randomBytes(32).toString('hex');
     const tokenHash = sha256(rawRefreshToken);
     const expiresAt = this.getRefreshTokenExpiryDate();
 
-    await this.db.insert(schema.refreshTokens).values({ userId, tokenHash, expiresAt });
+    await db.insert(schema.refreshTokens).values({ userId, tokenHash, expiresAt });
 
     return { accessToken, rawRefreshToken, refreshExpiresAt: expiresAt };
   }

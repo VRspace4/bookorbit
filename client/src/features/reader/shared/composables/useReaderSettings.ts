@@ -2,8 +2,14 @@ import { computed, onUnmounted, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
-import { migrateLegacyThemeHighlightColors, resolveThemeHighlightColors } from '@/features/reader/epub/theme-highlight'
-import { useReaderDeviceFormFactor } from '@/features/reader/shared/lib/device-form-factor'
+import {
+  buildThemeHighlightPatch,
+  buildThemeSwitchHighlightPatch,
+  migrateLegacyThemeHighlightColors,
+  mergeThemeHighlightColorMaps,
+  resolveThemeHighlightColors,
+} from '@/features/reader/epub/theme-highlight'
+import { useReaderDeviceFormFactor, getReaderDeviceFormFactor } from '@/features/reader/shared/lib/device-form-factor'
 import {
   CBX_READER_DEFAULTS,
   EPUB_DEVICE_SETTING_KEYS,
@@ -16,6 +22,7 @@ import {
   type EpubSharedSettings,
   type ReaderFormatGroup,
   type ReaderSettings,
+  type ThemeHighlightColors,
   READER_GROUP_DEFAULTS,
   createEmptyEpubDeviceSettingsMap,
   getFormatGroup,
@@ -187,7 +194,10 @@ function sanitizeDefaultSettings(group: ReaderFormatGroup, raw: unknown): Reader
   } as ReaderSettings
 }
 
-function sanitizeEpubDefaultsStorage(raw: unknown): EpubReaderDefaultsStorageV2 | null {
+function sanitizeEpubDefaultsStorage(
+  raw: unknown,
+  deviceFormFactor: ReturnType<typeof useReaderDeviceFormFactor>['deviceFormFactor']['value'],
+): EpubReaderDefaultsStorageV2 | null {
   if (isEpubDefaultsStorageV2(raw)) {
     const shared = isRecord(raw.shared) ? (raw.shared as EpubSharedSettings) : {}
     const devices = createEmptyEpubDeviceSettingsMap()
@@ -195,12 +205,12 @@ function sanitizeEpubDefaultsStorage(raw: unknown): EpubReaderDefaultsStorageV2 
       const deviceRaw = raw.devices[device]
       devices[device] = isRecord(deviceRaw) ? pickEpubDeviceSettings(deviceRaw as Partial<EpubReaderSettings>) : {}
     }
-    return { v: 2, shared, devices }
+    return repairEpubDefaultsHighlightStorage({ v: 2, shared, devices }, deviceFormFactor)
   }
 
   if (!isRecord(raw)) return null
   const migrated = migrateLegacyThemeHighlightColors(raw as unknown as EpubReaderSettings)
-  return migrateFlatEpubDefaultsToV2(migrated)
+  return repairEpubDefaultsHighlightStorage(migrateFlatEpubDefaultsToV2(migrated), deviceFormFactor)
 }
 
 function withResolvedEpubHighlights(settings: ReaderSettings): ReaderSettings {
@@ -231,6 +241,33 @@ function splitEpubDefaultPatch(patch: Partial<ReaderSettings>): { device: EpubDe
   }
 }
 
+function repairEpubDefaultsHighlightStorage(
+  storage: EpubReaderDefaultsStorageV2,
+  deviceFormFactor: ReturnType<typeof useReaderDeviceFormFactor>['deviceFormFactor']['value'],
+): EpubReaderDefaultsStorageV2 {
+  const themeName = storage.devices[deviceFormFactor]?.themeName ?? EPUB_READER_DEFAULTS.themeName
+  const shared = storage.shared
+  const resolved = resolveThemeHighlightColors({
+    themeName,
+    themeHighlightColors: shared.themeHighlightColors,
+    ttsSentenceHighlightColor: shared.ttsSentenceHighlightColor ?? EPUB_READER_DEFAULTS.ttsSentenceHighlightColor,
+    ttsWordHighlightColor: shared.ttsWordHighlightColor ?? EPUB_READER_DEFAULTS.ttsWordHighlightColor,
+  })
+
+  const themeHighlightColors = mergeThemeHighlightColorMaps(shared.themeHighlightColors, {
+    [themeName]: resolved,
+  })
+
+  return {
+    ...storage,
+    shared: {
+      ...shared,
+      ...(themeHighlightColors ? { themeHighlightColors } : {}),
+      ...resolved,
+    },
+  }
+}
+
 function mergeEpubDefaultsStorage(
   current: EpubReaderDefaultsStorageV2 | null,
   deviceFormFactor: ReturnType<typeof useReaderDeviceFormFactor>['deviceFormFactor']['value'],
@@ -238,15 +275,22 @@ function mergeEpubDefaultsStorage(
 ): EpubReaderDefaultsStorageV2 {
   const base = current ?? migrateFlatEpubDefaultsToV2({})
   const { device, shared } = splitEpubDefaultPatch(patch)
+  const mergedShared = { ...base.shared, ...shared }
 
-  return {
+  if (shared.themeHighlightColors) {
+    mergedShared.themeHighlightColors = mergeThemeHighlightColorMaps(base.shared.themeHighlightColors, shared.themeHighlightColors)
+  }
+
+  const merged: EpubReaderDefaultsStorageV2 = {
     v: 2,
-    shared: { ...base.shared, ...shared },
+    shared: mergedShared,
     devices: {
       ...base.devices,
       [deviceFormFactor]: { ...base.devices[deviceFormFactor], ...device },
     },
   }
+
+  return repairEpubDefaultsHighlightStorage(merged, deviceFormFactor)
 }
 
 // -- Per-book settings (used inside the reader) --
@@ -343,7 +387,7 @@ export function useReaderSettings(bookFileId: number, format: string) {
 
     if (group === 'epub') {
       if (lsDefault) {
-        const sanitized = sanitizeEpubDefaultsStorage(lsDefault)
+        const sanitized = sanitizeEpubDefaultsStorage(lsDefault, deviceFormFactor.value)
         if (sanitized) {
           epubDefaults.value = sanitized
           if (!jsonEqual(lsDefault, sanitized)) writeDefaultSettingsToLs()
@@ -419,7 +463,7 @@ export function useReaderSettings(bookFileId: number, format: string) {
 
     if (defRes?.[group]) {
       if (group === 'epub') {
-        const sanitized = sanitizeEpubDefaultsStorage(defRes[group])
+        const sanitized = sanitizeEpubDefaultsStorage(defRes[group], deviceFormFactor.value)
         if (sanitized) {
           epubDefaults.value = sanitized
           writeDefaultSettingsToLs()
@@ -577,7 +621,7 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
 
     if (group === 'epub') {
       if (ls) {
-        const sanitized = sanitizeEpubDefaultsStorage(ls)
+        const sanitized = sanitizeEpubDefaultsStorage(ls, deviceFormFactor.value)
         if (sanitized) {
           epubDefaults.value = sanitized
           if (!jsonEqual(ls, sanitized)) writeDefaultSettingsToLs()
@@ -603,7 +647,7 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
         const data = await res.json()
         if (data[group]) {
           if (group === 'epub') {
-            const sanitized = sanitizeEpubDefaultsStorage(data[group])
+            const sanitized = sanitizeEpubDefaultsStorage(data[group], deviceFormFactor.value)
             if (sanitized) {
               epubDefaults.value = sanitized
               writeDefaultSettingsToLs()
@@ -628,7 +672,19 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
 
   function update(patch: Partial<T>) {
     if (group === 'epub') {
-      epubDefaults.value = mergeEpubDefaultsStorage(epubDefaults.value, deviceFormFactor.value, patch as Partial<ReaderSettings>)
+      let nextPatch = patch as Partial<ReaderSettings>
+      const epubEffective = effective.value as EpubReaderSettings
+
+      if ('themeName' in patch && patch.themeName) {
+        nextPatch = {
+          ...(buildThemeSwitchHighlightPatch(epubEffective, patch.themeName) as Partial<ReaderSettings>),
+          ...patch,
+        }
+      } else if ('ttsSentenceHighlightColor' in patch || 'ttsWordHighlightColor' in patch) {
+        nextPatch = buildThemeHighlightPatch(epubEffective, patch as Partial<ThemeHighlightColors>) as Partial<ReaderSettings>
+      }
+
+      epubDefaults.value = mergeEpubDefaultsStorage(epubDefaults.value, deviceFormFactor.value, nextPatch)
       writeDefaultSettingsToLs()
     } else {
       const next = { ...effective.value, ...patch } as T
@@ -670,7 +726,7 @@ export async function pushLocalReaderPreferencesToBackend(): Promise<void> {
       const raw = readLs<unknown>(lsDefaultKey(group))
       if (!raw) return
 
-      const settings = group === 'epub' ? sanitizeEpubDefaultsStorage(raw) : sanitizeDefaultSettings(group, raw)
+      const settings = group === 'epub' ? sanitizeEpubDefaultsStorage(raw, getReaderDeviceFormFactor()) : sanitizeDefaultSettings(group, raw)
       if (!settings) return
 
       await api(`/api/v1/reader/defaults/${group}`, {

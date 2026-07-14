@@ -40,4 +40,15 @@ describe('TtsSettingsPanel', () => {
     const updates = wrapper.emitted('update') ?? []
     expect(updates[updates.length - 1]).toEqual([{ ttsRate: 1.7 }])
   })
+
+  it('opens the floating color picker when a highlight swatch is tapped', async () => {
+    const wrapper = mountPanel({ ttsProvider: 'kokoro' })
+
+    const sentenceButton = wrapper.findAll('button').find((button) => button.text().includes('Sentence'))
+    expect(sentenceButton).toBeTruthy()
+
+    await sentenceButton!.trigger('click')
+
+    expect(wrapper.emitted('pickColor')?.[0]).toEqual(['sentence'])
+  })
 })

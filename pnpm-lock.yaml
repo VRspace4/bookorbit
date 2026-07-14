@@ -52,6 +52,9 @@ importers:
       "@bookorbit/types":
         specifier: workspace:*
         version: link:../packages/types
+      "@capacitor/app":
+        specifier: 8.0.1
+        version: 8.0.1(@capacitor/core@8.3.4)
       "@capacitor/core":
         specifier: ^8.3.4
         version: 8.3.4
@@ -1515,6 +1518,14 @@ packages:
       }
     peerDependencies:
       "@capacitor/core": ^8.3.0
+
+  "@capacitor/app@8.0.1":
+    resolution:
+      {
+        integrity: sha512-yeG3yyA0ETKqvgqexwHMBlmVOF13A1hRXzv/km0Ptv5TrNIZvZJK4MTI3uiqvnbHrzoJGP5DwWAjEXEfi90v3Q==,
+      }
+    peerDependencies:
+      "@capacitor/core": ">=8.0.0"
 
   "@capacitor/cli@8.3.4":
     resolution:
@@ -16096,6 +16107,10 @@ snapshots:
   "@canvas/image-data@1.1.0": {}
 
   "@capacitor/android@8.3.4(@capacitor/core@8.3.4)":
+    dependencies:
+      "@capacitor/core": 8.3.4
+
+  "@capacitor/app@8.0.1(@capacitor/core@8.3.4)":
     dependencies:
       "@capacitor/core": 8.3.4
 

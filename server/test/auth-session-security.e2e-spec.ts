@@ -412,21 +412,29 @@ describe('Auth session security (e2e)', () => {
   });
 
   describe('revoked refresh token reuse', () => {
-    it('revokes all sessions and invalidates access tokens when a revoked token is reused', async () => {
+    it('revokes only the refresh chain and leaves other device sessions active when a revoked token is reused after grace', async () => {
       const credentials = await createLocalUser(context.db);
-      const initialLogin = await login(context.app, credentials.username, credentials.password);
-      const revokedRefreshToken = initialLogin.refreshToken;
+      const deviceOneLogin = await login(context.app, credentials.username, credentials.password);
+      const deviceTwoLogin = await login(context.app, credentials.username, credentials.password);
+      const revokedRefreshToken = deviceOneLogin.refreshToken;
+
+      expect(await activeSessionCount(context.db, credentials.userId)).toBe(2);
 
       const rotateResponse = await context.app.inject({
         method: 'POST',
         url: '/api/v1/auth/refresh',
         headers: {
-          cookie: cookieHeader(initialLogin.jar),
+          cookie: cookieHeader(deviceOneLogin.jar),
         },
       });
 
       expect(rotateResponse.statusCode).toBe(200);
       const rotatedAccessToken = (rotateResponse.json() as { accessToken: string }).accessToken;
+
+      await context.db
+        .update(schema.refreshTokens)
+        .set({ revokedAt: new Date(Date.now() - 120_000) })
+        .where(eq(schema.refreshTokens.tokenHash, sha256(revokedRefreshToken)));
 
       const reuseResponse = await context.app.inject({
         method: 'POST',
@@ -441,18 +449,23 @@ describe('Auth session security (e2e)', () => {
       expect(cookieValue(reuseCookies, 'refresh_token')).toBe('');
       expect(cookieValue(reuseCookies, 'access_token')).toBe('');
 
-      const remainingSessions = await context.db
-        .select({ id: schema.refreshTokens.id })
-        .from(schema.refreshTokens)
-        .where(eq(schema.refreshTokens.userId, credentials.userId));
-      expect(remainingSessions).toHaveLength(0);
+      expect(await activeSessionCount(context.db, credentials.userId)).toBe(1);
+
+      const deviceTwoRefreshResponse = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/refresh',
+        headers: {
+          cookie: cookieHeader(deviceTwoLogin.jar),
+        },
+      });
+      expect(deviceTwoRefreshResponse.statusCode).toBe(200);
 
       const [userAfterReuse] = await context.db
         .select({ tokenVersion: schema.users.tokenVersion })
         .from(schema.users)
         .where(eq(schema.users.id, credentials.userId))
         .limit(1);
-      expect(userAfterReuse?.tokenVersion).toBeGreaterThan(1);
+      expect(userAfterReuse?.tokenVersion).toBe(1);
 
       const meResponse = await context.app.inject({
         method: 'GET',
@@ -462,7 +475,34 @@ describe('Auth session security (e2e)', () => {
         },
       });
 
-      expect(meResponse.statusCode).toBe(401);
+      expect(meResponse.statusCode).toBe(200);
+    });
+
+    it('allows concurrent refresh requests for the same session during rotation grace', async () => {
+      const credentials = await createLocalUser(context.db);
+      const loginResult = await login(context.app, credentials.username, credentials.password);
+
+      await context.db
+        .update(schema.refreshTokens)
+        .set({ createdAt: new Date(Date.now() - 10 * 60 * 1000) })
+        .where(eq(schema.refreshTokens.tokenHash, sha256(loginResult.refreshToken)));
+
+      const [firstResponse, secondResponse] = await Promise.all([
+        context.app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/refresh',
+          headers: { cookie: cookieHeader(loginResult.jar) },
+        }),
+        context.app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/refresh',
+          headers: { cookie: cookieHeader(loginResult.jar) },
+        }),
+      ]);
+
+      expect(firstResponse.statusCode).toBe(200);
+      expect(secondResponse.statusCode).toBe(200);
+      expect(await activeSessionCount(context.db, credentials.userId)).toBe(1);
     });
   });
 

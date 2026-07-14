@@ -1,4 +1,5 @@
 import type { RouteLocationNormalizedLoaded, Router } from 'vue-router'
+import { isReaderPath } from '@/features/reader/shared/lib/reader-navigation'
 
 const LAST_ROUTE_KEY = 'bookorbit:pwa:last-route'
 const LAST_ROUTE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 30
@@ -103,17 +104,36 @@ export function resolveStandaloneLaunchRedirect(to: RouteLocationNormalizedLoade
 export function registerPwaRoutePersistence(router: Router): void {
   let launchRestoreAttempted = false
   let pendingLaunchRestore: string | null = null
+  let restoreGeneration = 0
+  let restorePushInFlight = false
 
-  router.beforeEach((to) => {
+  router.beforeEach((to, from) => {
+    if (pendingLaunchRestore && to.path !== '/') {
+      pendingLaunchRestore = null
+      restoreGeneration += 1
+    }
+
+    if (launchRestoreAttempted && restorePushInFlight && !isReaderPath(from.path) && isReaderPath(to.path)) {
+      restoreGeneration += 1
+    }
+
     if (launchRestoreAttempted) return true
     const redirect = resolveStandaloneLaunchRedirect(to)
     if (!redirect) return true
     launchRestoreAttempted = true
     pendingLaunchRestore = redirect
+    const generation = restoreGeneration
     window.setTimeout(() => {
+      if (generation !== restoreGeneration) return
       if (pendingLaunchRestore !== redirect) return
       pendingLaunchRestore = null
-      void router.push(redirect)
+      const current = router.currentRoute.value
+      if (current.fullPath === redirect) return
+      if (isReaderPath(current.path) && isReaderPath(redirect.split(/[?#]/, 1)[0] ?? redirect)) return
+      restorePushInFlight = true
+      void router.push(redirect).finally(() => {
+        restorePushInFlight = false
+      })
     }, 0)
     return true
   })

@@ -1,0 +1,17 @@
+# Lessons
+
+- TTS highlights inside EPUB content must account for XHTML/XML chapter documents. Use namespace-aware element creation for injected markup/styles so playback state changes do not silently produce unstyled spans.
+- Cloud TTS should not synthesize strictly one sentence at a time during playback. Prefetch and decode the next sentence while the current audio buffer is speaking to avoid audible handoff delays.
+- Tap-to-read in EPUB TTS mode needs a document-level capture handler attached before normal Foliate click-zone handling so tapped words restart speech instead of triggering page navigation or toolbar toggles.
+- OpenRouter TTS models use the OpenAI-compatible `/api/v1/audio/speech` endpoint and return raw audio bytes. Proxy them like other cloud TTS providers so user API keys stay in local reader credential storage.
+- EPUB iframe touch gestures should classify drag intent using screen-stable coordinates, not iframe-relative `clientX/clientY`, because the iframe can move while the parent scrolled-layout container scrolls.
+- OpenRouter speech `speed` is an optional model/provider-dependent parameter; when adding provider speed controls, keep the reader's shared `ttsRate` as the user-facing setting and forward it through the relevant proxy payload.
+- High-speed cloud TTS needs more than one-sentence lookahead. At 2x, short generated audio can finish before the next request completes, so keep a bounded multi-sentence prefetch window while preserving ordered playback.
+- When applying no-gap TTS behavior across engines, cloud/audio-buffer providers should share a bounded prefetch queue, while browser `speechSynthesis` should queue utterances up front because there is no separate audio fetch/decode step.
+- For installed-reader PWA behavior, avoid `autoUpdate` service-worker reloads and keep reader progress local-first; the server should sync after resume, not be the only source needed to reopen the last reading position.
+- After adding a new Vite client dependency for the remote dev app, refresh the running `bookorbit-dev` install and restart Vite if the app has already cached a failed import transform.
+- EPUB TTS settings that affect audio output need to restart active playback at the current word; saving settings alone is not enough because queued cloud/browser audio keeps using the old engine and voice.
+- Reader exit controls should not rely on `router.back()` alone. A standalone PWA restore or direct `/read/...` launch may have no prior in-app history entry, so reader exits need a deterministic Dashboard fallback and standalone restore should leave Dashboard behind the restored route for native Back.
+- Anna's Archive detail pages contain external Z-Library/Tor MD5 catalog links alongside slow-download links. Treat those external pages as metadata links, not direct file mirrors, and classify non-OK DDoS-Guard slow-download responses from their HTML body before returning generic mirror failures.
+- Openlib's Anna download behavior is native WebView assisted, not server-only scraping. For BookOrbit Android, mirror extraction can happen in a Capacitor-owned native WebView after browser verification; desktop web must keep a user handoff because it cannot read Anna's cross-origin DOM or cookies.
+- Anna's native WebView mirror resolver must tolerate DDoS-Guard's transient `Checking your browser` page. Poll the loaded DOM for mirror links for a bounded period instead of extracting only once on `onPageFinished`.

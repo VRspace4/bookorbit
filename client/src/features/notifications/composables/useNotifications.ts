@@ -109,6 +109,11 @@ function getSocket(): Socket {
       }
     })
 
+    socket.on('notification:all-read', () => {
+      notifications.value.forEach((n) => (n.read = true))
+      unreadCount.value = 0
+    })
+
     socket.on('notification:dismissed', (data: { id: number }) => {
       notifications.value = notifications.value.filter((n) => n.id !== data.id)
       total.value = Math.max(0, total.value - 1)
@@ -163,7 +168,11 @@ export function useNotifications() {
     item.read = true
     unreadCount.value = Math.max(0, unreadCount.value - 1)
     try {
-      const res = await api(`/api/v1/notifications/${id}/read`, { method: 'PATCH' })
+      const res = await api(`/api/v1/notifications/${id}/read`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
       if (!res.ok) {
         item.read = false
         unreadCount.value++
@@ -180,7 +189,11 @@ export function useNotifications() {
     notifications.value.forEach((n) => (n.read = true))
     unreadCount.value = 0
     try {
-      const res = await api('/api/v1/notifications/read-all', { method: 'PATCH' })
+      const res = await api('/api/v1/notifications/read-all', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      })
       if (!res.ok) {
         previousStates.forEach((s) => {
           const item = notifications.value.find((n) => n.id === s.id)

@@ -8,6 +8,7 @@ import { SYSTEM_TAB_INFO, normalizeSystemTab } from '@/features/settings/lib/sys
 import { ACCOUNT_TAB_INFO, normalizeAccountTab } from '@/features/settings/lib/account-tabs'
 import { registerPwaRoutePersistence } from '@/features/pwa/lib/native-app'
 import { registerAuthGuard } from './guards/auth.guard'
+import { registerReaderReturnRoute } from '@/features/reader/shared/lib/reader-navigation'
 import { registerRouteTitleHook } from './title-resolver'
 
 function firstText(value: unknown): string | null {
@@ -373,6 +374,7 @@ const router = createRouter({
 })
 
 registerAuthGuard(router)
+registerReaderReturnRoute(router)
 registerPwaRoutePersistence(router)
 registerRouteTitleHook(router)
 

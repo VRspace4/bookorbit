@@ -15,6 +15,8 @@ export const authConfig = registerAs('auth', () => ({
   jwtSecret: process.env.JWT_SECRET ?? 'change-me-in-production',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? '15m',
   jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN ?? '7d',
+  refreshReuseWindow: process.env.JWT_REFRESH_REUSE_WINDOW ?? '5m',
+  refreshRotationGraceWindow: process.env.JWT_REFRESH_ROTATION_GRACE_WINDOW ?? '60s',
   setupBootstrapToken: process.env.SETUP_BOOTSTRAP_TOKEN ?? '',
 }));
 
@@ -37,6 +39,7 @@ export const migrationConfig = registerAs('migration', () => ({
 
 export const zlibConfig = registerAs('zlib', () => ({
   encryptionKey: process.env.ZLIB_ENCRYPTION_KEY ?? process.env.MIGRATION_ENCRYPTION_KEY ?? '',
+  annaArchiveBaseUrls: parseList(process.env.ANNAS_ARCHIVE_BASE_URLS ?? 'https://annas-archive.gl,https://annas-archive.pk,https://annas-archive.gd'),
 }));
 
 export const oidcRuntimeConfig = registerAs('oidcRuntime', () => ({
@@ -53,4 +56,11 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
     return fallback;
   }
   return Math.floor(parsed);
+}
+
+function parseList(value: string): string[] {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }

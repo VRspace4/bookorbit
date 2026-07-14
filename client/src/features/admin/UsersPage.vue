@@ -192,8 +192,8 @@ function openMagicLinkCreate() {
     </button>
   </div>
 
-  <!-- Mobile CTA (when no tab bar is shown, keep the sticky button) -->
-  <div v-if="!isSuperuser" class="md:hidden sticky top-0 z-20 border border-border/60 bg-card/95 backdrop-blur rounded-lg px-3 py-2 mt-4 mb-3">
+  <!-- Mobile CTA when this page owns its own header (non-embedded route) -->
+  <div v-if="!props.embedded" class="md:hidden sticky top-0 z-20 border border-border/60 bg-card/95 backdrop-blur rounded-lg px-3 py-2 mt-4 mb-3">
     <button class="settings-btn-primary w-full min-h-10 justify-center" @click="openCreate">
       <UserPlus :size="14" />
       Create user
@@ -202,6 +202,13 @@ function openMagicLinkCreate() {
 
   <!-- Users tab content -->
   <template v-if="activeTab === 'users'">
+    <div v-if="props.embedded" class="flex justify-end mb-4">
+      <button class="settings-btn-primary" @click="openCreate">
+        <UserPlus :size="14" />
+        Create user
+      </button>
+    </div>
+
     <div v-if="error" class="mb-4 text-sm text-destructive">{{ error }}</div>
     <div v-if="loading" class="text-sm text-muted-foreground">Loading...</div>
 

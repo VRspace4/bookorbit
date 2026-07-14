@@ -180,6 +180,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   const wordCount = ref(0)
   const currentSentenceText = ref('')
   const scrollFollowEnabled = ref(true)
+  const activeSectionIndex = ref<number | null>(null)
 
   let root: HTMLElement | null = null
   let words: WordEntry[] = []
@@ -210,6 +211,18 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   const progress = computed(() => {
     if (wordCount.value <= 0 || activeIndex.value < 0) return 0
     return Math.min(1, (activeIndex.value + 1) / wordCount.value)
+  })
+
+  const followTarget = computed<TtsPersistedPosition | null>(() => {
+    if (!ttsEnabled.value) return null
+    if (activeIndex.value >= 0 && activeSectionIndex.value !== null) {
+      return { sectionIndex: activeSectionIndex.value, wordIndex: activeIndex.value }
+    }
+    const persisted = options.getPersistedTtsPosition?.()
+    if (persisted) return persisted
+    const session = readTtsPlaybackSession(options.fileId)
+    if (session?.enabled) return { sectionIndex: session.sectionIndex, wordIndex: session.wordIndex }
+    return null
   })
 
   function settings() {
@@ -268,6 +281,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   }
 
   function resolvePrefetchWordIndex(fromWordIndex?: number): number | null {
+    if (!currentSectionMatchesFollowTarget()) return null
     if (!rebuildIndex() || !sentences.length) return null
     const restored = fromWordIndex ?? restoreWordIndex() ?? (activeIndex.value >= 0 ? activeIndex.value : 0)
     return Math.min(Math.max(0, restored), Math.max(0, words.length - 1))
@@ -323,6 +337,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   function trackActiveWordIndex(index: number) {
     savedWordIndex = index
     savedResumeKey = resumeStorageKey()
+    activeSectionIndex.value = currentSectionIndex() ?? activeSectionIndex.value
   }
 
   function persistTtsPosition(wordIndex: number) {
@@ -351,7 +366,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   function scrollToActiveWord(behavior: ScrollBehavior = 'smooth') {
     const currentRoot = root ?? activeRoot()
     if (!currentRoot) return
-    markProgrammaticScroll(behavior === 'instant' ? 120 : 700)
+    markProgrammaticScroll(behavior === 'instant' ? 450 : 900)
     scrollActiveWordIntoView(currentRoot, behavior, options.getFoliateRenderer?.() ?? null)
   }
 
@@ -475,22 +490,26 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   }
 
   function resumeScrollFollow() {
+    if (!currentSectionMatchesFollowTarget()) {
+      detachScrollFollow()
+      return
+    }
     scrollFollowEnabled.value = true
+    if (activeIndex.value < 0) restoreHighlightFromSession()
     const currentRoot = root ?? activeRoot()
     if (!currentRoot || activeIndex.value < 0) return
     scrollToActiveWord('instant')
   }
 
-  function setActiveWord(index: number) {
+  function setActiveWord(index: number, options: { scroll?: boolean } = {}) {
     const currentRoot = root ?? activeRoot()
     if (!currentRoot || !words[index]) return
     activeIndex.value = index
     trackActiveWordIndex(index)
     persistAtSentenceBoundary(index)
     highlightWord(currentRoot, words, sentences, index)
-    if (scrollFollowEnabled.value) {
-      const behavior = status.value === 'speaking' || status.value === 'loading' ? 'instant' : 'smooth'
-      scrollToActiveWord(behavior)
+    if (options.scroll !== false && scrollFollowEnabled.value) {
+      scrollToActiveWord('smooth')
     }
   }
 
@@ -521,10 +540,12 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   function persistEnabledSession(context?: { sectionIndex?: number; wordIndex?: number; wasPlaying?: boolean }) {
     const existing = readTtsPlaybackSession(options.fileId)
-    const section = context?.sectionIndex ?? currentSectionIndex() ?? existing?.sectionIndex
+    const activeSection = activeIndex.value >= 0 ? activeSectionIndex.value : null
+    const section = context?.sectionIndex ?? activeSection ?? currentSectionIndex() ?? existing?.sectionIndex
     if (section === undefined) return false
 
-    const wordIndex = context?.wordIndex ?? (activeIndex.value >= 0 ? activeIndex.value : undefined) ?? restoreWordIndex() ?? existing?.wordIndex ?? 0
+    const activeWordForSection = activeIndex.value >= 0 && activeSectionIndex.value === section ? activeIndex.value : undefined
+    const wordIndex = context?.wordIndex ?? activeWordForSection ?? restoreWordIndex() ?? existing?.wordIndex ?? 0
 
     let wasPlaying = context?.wasPlaying
     if (wasPlaying === undefined) {
@@ -1286,6 +1307,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   function resume() {
     if (userStoppedPlayback || status.value !== 'paused') return
+    if (!currentSectionMatchesFollowTarget()) return
     if (!hasResumablePlayback()) {
       restartFromCurrentWord()
       return
@@ -1310,6 +1332,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     window.speechSynthesis?.cancel()
     status.value = 'idle'
     activeIndex.value = -1
+    activeSectionIndex.value = null
     currentSentenceText.value = ''
     error.value = null
     syncMediaSession()
@@ -1353,6 +1376,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   }
 
   function restartFromCurrentWord() {
+    if (!currentSectionMatchesFollowTarget()) return
     const startIndex = activeIndex.value >= 0 ? activeIndex.value : restoreWordIndex()
     void start(startIndex ?? undefined, { userInitiated: false })
   }
@@ -1396,14 +1420,22 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   }
 
   function resolveRestoreWordIndex(): number | null {
-    if (activeIndex.value >= 0) return activeIndex.value
+    const section = currentSectionIndex()
+    if (activeIndex.value >= 0 && (section === undefined || activeSectionIndex.value === null || activeSectionIndex.value === section)) {
+      return activeIndex.value
+    }
     const restored = restoreWordIndex()
     if (restored !== null) return restored
     const session = readTtsPlaybackSession(options.fileId)
     if (!session?.enabled) return null
-    const section = currentSectionIndex()
     if (section === undefined || session.sectionIndex !== section) return null
     return session.wordIndex
+  }
+
+  function currentSectionMatchesFollowTarget(): boolean {
+    const target = followTarget.value
+    const section = currentSectionIndex()
+    return !target || section === undefined || target.sectionIndex === section
   }
 
   function cancelScheduledHighlightRestore() {
@@ -1419,10 +1451,13 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   function restoreHighlightFromSession(): boolean {
     if (!ttsEnabled.value) return false
+    if (!currentSectionMatchesFollowTarget()) return false
     if (!rebuildIndex(true)) return false
-    const wordIndex = resolveRestoreWordIndex()
-    if (wordIndex === null || wordIndex < 0) return false
-    setActiveWord(wordIndex)
+    const target = followTarget.value
+    const resolvedWordIndex = target?.wordIndex ?? resolveRestoreWordIndex()
+    if (resolvedWordIndex === null || resolvedWordIndex < 0) return false
+    const wordIndex = Math.min(Math.max(0, resolvedWordIndex), Math.max(0, words.length - 1))
+    setActiveWord(wordIndex, { scroll: false })
     if (scrollFollowEnabled.value) {
       requestAnimationFrame(() => scrollToActiveWord('instant'))
     }
@@ -1462,6 +1497,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
   }
 
   function handleDocumentLoad(doc: Document) {
+    root = doc.body
     injectTtsHighlightStyles(doc, settings().ttsSentenceHighlightColor, settings().ttsWordHighlightColor)
     attachTapToRead(doc)
     attachScrollFollowListeners(doc)
@@ -1473,6 +1509,11 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
     if (isSameSectionReload) {
       if (ttsEnabled.value) {
+        if (!currentSectionMatchesFollowTarget()) {
+          if (doc.body) clearTtsHighlight(doc.body)
+          detachScrollFollow()
+          return
+        }
         scheduleTtsHighlightRestore()
         return
       }
@@ -1506,6 +1547,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
       window.speechSynthesis?.cancel()
       status.value = 'idle'
       activeIndex.value = -1
+      activeSectionIndex.value = null
       currentSentenceText.value = ''
       error.value = null
       suppressTtsMediaSession()
@@ -1515,6 +1557,11 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     }
 
     if (ttsEnabled.value) {
+      if (!currentSectionMatchesFollowTarget()) {
+        if (doc.body) clearTtsHighlight(doc.body)
+        detachScrollFollow()
+        return
+      }
       scheduleTtsHighlightRestore()
       void prefetchPlaybackAhead()
       return
@@ -1715,9 +1762,11 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     status,
     error,
     activeIndex,
+    activeSectionIndex,
     wordCount,
     progress,
     scrollFollowEnabled,
+    followTarget,
     resumeScrollFollow,
     evaluateScrollFollow,
     isActive,
@@ -1741,6 +1790,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
     tryAutoResumeAfterReload,
     restoreTtsAfterReload,
     refreshTtsHighlight,
+    restoreTtsHighlightNow: restoreHighlightFromSession,
     warmUp,
     prefetchPlaybackAhead,
   }

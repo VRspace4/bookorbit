@@ -7,9 +7,11 @@ import { createPinia } from 'pinia'
 
 import App from './App.vue'
 import router from './router'
+import { enableAuthFailureHandler } from './lib/api'
 import { useAuth } from './features/auth/composables/useAuth'
 import { useSetupStatus } from './features/auth/composables/useSetupStatus'
 import { initTtsMediaSession } from './features/reader/epub/tts/media-session'
+import { registerNativeBackButton } from './features/pwa/lib/native-back-button'
 
 const app = createApp(App)
 
@@ -32,4 +34,6 @@ if (needsSetup.value !== true) {
 }
 
 app.use(router)
+registerNativeBackButton(router)
+enableAuthFailureHandler()
 app.mount('#app')

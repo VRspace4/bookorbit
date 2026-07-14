@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { BookOpen, Clock, Loader2, Plus, Search, X } from 'lucide-vue-next'
+import { BookOpen, Clock, ExternalLink, Loader2, Plus, Search, X } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
+import { isAnnaMirrorResolverAvailable, resolveAnnaMirrors } from '@/features/zlib/lib/anna-native-resolver'
 
 interface ZlibBook {
   id: string
@@ -15,6 +16,8 @@ interface ZlibBook {
   extension: string
   filesize: number
   cover: string
+  source?: 'zlib' | 'anna'
+  detailUrl?: string
 }
 
 interface ZlibStatus {
@@ -25,30 +28,44 @@ interface ZlibStatus {
   resetsAt: string | null
 }
 
+interface ApiErrorPayload {
+  code?: string
+  message?: string | string[]
+  challengeUrl?: string
+}
+
+interface DownloadResult {
+  limitReached?: boolean
+  blocked?: boolean
+}
+
 const emit = defineEmits<{
   close: []
 }>()
 
 const router = useRouter()
 
+const source = ref<'zlib' | 'anna'>('zlib')
 const query = ref('')
 const formatFilter = ref('')
 const results = ref<ZlibBook[]>([])
 const total = ref(0)
 const searching = ref(false)
 const searchError = ref<string | null>(null)
+const annaSearchChallengeUrl = ref<string | null>(null)
 const notConnected = ref(false)
 const addingId = ref<string | null>(null)
 const queuingId = ref<string | null>(null)
+const challengedAnnaId = ref<string | null>(null)
+const challengedAnnaUrl = ref<string | null>(null)
 const hasSearched = ref(false)
 const status = ref<ZlibStatus | null>(null)
 const queueCount = ref(0)
 
-let searchTimeout: ReturnType<typeof setTimeout> | null = null
-
 onMounted(fetchStatus)
 
 async function fetchStatus() {
+  if (source.value !== 'zlib') return
   try {
     const res = await api('/api/v1/zlib/status')
     if (res.ok) {
@@ -61,6 +78,7 @@ async function fetchStatus() {
 }
 
 async function fetchQueueCount() {
+  if (source.value !== 'zlib') return
   try {
     const res = await api('/api/v1/zlib/queue')
     if (res.ok) {
@@ -107,26 +125,35 @@ async function doSearch() {
   if (!query.value.trim()) return
   searching.value = true
   searchError.value = null
+  annaSearchChallengeUrl.value = null
   notConnected.value = false
+  challengedAnnaId.value = null
+  challengedAnnaUrl.value = null
   hasSearched.value = true
 
   try {
     const params = new URLSearchParams({ q: query.value.trim() })
+    params.set('source', source.value)
     if (formatFilter.value) params.set('format', formatFilter.value)
     params.set('limit', '20')
 
     const res = await api(`/api/v1/zlib/search?${params}`)
-    if (res.status === 401) {
+    if (res.status === 401 && source.value === 'zlib') {
       notConnected.value = true
       return
     }
     if (!res.ok) {
-      const payload = (await res.json().catch(() => null)) as { message?: string } | null
-      searchError.value = payload?.message ?? 'Search failed'
+      const payload = (await res.json().catch(() => null)) as ApiErrorPayload | null
+      const message = formatApiErrorMessage(payload, 'Search failed')
+      if (source.value === 'anna' && isAnnaChallengeResponse(res.status, payload, message)) {
+        annaSearchChallengeUrl.value = payload?.challengeUrl || buildAnnaSearchUrl()
+        return
+      }
+      searchError.value = message
       return
     }
     const data: { books: ZlibBook[]; total: number } = await res.json()
-    results.value = data.books
+    results.value = data.books.map((book) => ({ ...book, source: book.source ?? source.value }))
     total.value = data.total
   } catch (err) {
     searchError.value = err instanceof Error ? err.message : 'Search failed'
@@ -136,17 +163,36 @@ async function doSearch() {
 }
 
 function onQueryInput() {
-  if (searchTimeout) clearTimeout(searchTimeout)
-  if (query.value.trim().length >= 2) {
-    searchTimeout = setTimeout(doSearch, 600)
-  } else {
-    results.value = []
-    hasSearched.value = false
-  }
+  results.value = []
+  total.value = 0
+  searchError.value = null
+  annaSearchChallengeUrl.value = null
+  notConnected.value = false
+  challengedAnnaId.value = null
+  challengedAnnaUrl.value = null
+  hasSearched.value = false
 }
 
 watch(formatFilter, () => {
-  if (hasSearched.value) doSearch()
+  results.value = []
+  total.value = 0
+  searchError.value = null
+  annaSearchChallengeUrl.value = null
+  challengedAnnaId.value = null
+  challengedAnnaUrl.value = null
+  hasSearched.value = false
+})
+
+watch(source, () => {
+  results.value = []
+  total.value = 0
+  searchError.value = null
+  annaSearchChallengeUrl.value = null
+  notConnected.value = false
+  challengedAnnaId.value = null
+  challengedAnnaUrl.value = null
+  hasSearched.value = false
+  if (source.value === 'zlib') fetchStatus()
 })
 
 async function addToLibrary(book: ZlibBook) {
@@ -154,25 +200,9 @@ async function addToLibrary(book: ZlibBook) {
   try {
     const safeName = book.title || 'book'
     const filename = `${safeName.replace(/[^\w\s.-]/g, '').trim()}.${book.extension || 'epub'}`
+    const data = await downloadBookToDock(book, filename)
 
-    const res = await api('/api/v1/zlib/download', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        bookId: String(book.id),
-        hash: book.hash,
-        filename,
-        format: book.extension || 'epub',
-      }),
-    })
-
-    if (!res.ok) {
-      const payload = (await res.json().catch(() => null)) as { message?: string } | null
-      toast.error(payload?.message ?? 'Failed to add book')
-      return
-    }
-
-    const data = await res.json()
+    if (data.blocked) return
 
     if (data.limitReached) {
       // Auto-queue instead
@@ -190,7 +220,100 @@ async function addToLibrary(book: ZlibBook) {
   }
 }
 
+async function downloadBookToDock(book: ZlibBook, filename: string, mirrorUrls?: string[]): Promise<DownloadResult> {
+  const res = await api('/api/v1/zlib/download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: book.source ?? source.value,
+      bookId: String(book.id),
+      hash: book.hash || book.id,
+      filename,
+      format: book.extension || 'epub',
+      ...(mirrorUrls?.length ? { mirrorUrls } : {}),
+    }),
+  })
+
+  if (!res.ok) {
+    const payload = (await res.json().catch(() => null)) as ApiErrorPayload | null
+    if ((book.source ?? source.value) === 'anna' && res.status === 503) {
+      return downloadAnnaWithNativeResolver(book, filename, payload)
+    }
+    throw new Error(formatApiErrorMessage(payload, 'Failed to add book'))
+  }
+
+  return (await res.json()) as DownloadResult
+}
+
+async function downloadAnnaWithNativeResolver(book: ZlibBook, filename: string, payload: ApiErrorPayload | null): Promise<DownloadResult> {
+  const challengeUrl = payload?.challengeUrl || buildAnnaSlowDownloadUrl(book)
+  challengedAnnaId.value = book.id
+  challengedAnnaUrl.value = challengeUrl
+
+  if (!isAnnaMirrorResolverAvailable()) {
+    return { blocked: true }
+  }
+
+  let mirrors: string[]
+  try {
+    mirrors = await resolveAnnaMirrors(challengeUrl)
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : 'Anna’s Archive browser verification was cancelled.')
+  }
+
+  if (mirrors.length === 0) {
+    throw new Error('No Anna’s Archive download mirrors were found after browser verification.')
+  }
+
+  return downloadBookToDock(book, filename, mirrors)
+}
+
+function buildAnnaSlowDownloadUrl(book: ZlibBook): string {
+  const hash = book.hash || book.id
+  let baseUrl = 'https://annas-archive.gl'
+  try {
+    if (book.detailUrl) baseUrl = new URL(book.detailUrl).origin
+  } catch {
+    // Fall back to the default Anna domain.
+  }
+  return `${baseUrl}/slow_download/${encodeURIComponent(hash)}/0/0`
+}
+
+function openAnnaArchive(book: ZlibBook) {
+  const url = challengedAnnaUrl.value || book.detailUrl || `https://annas-archive.gl/md5/${encodeURIComponent(book.id)}`
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function openAnnaSearchChallenge() {
+  window.open(annaSearchChallengeUrl.value || buildAnnaSearchUrl(), '_blank', 'noopener,noreferrer')
+}
+
+function buildAnnaSearchUrl() {
+  const url = new URL('/search', 'https://annas-archive.gl')
+  url.searchParams.set('index', '')
+  url.searchParams.set('page', '1')
+  url.searchParams.set('sort', '')
+  url.searchParams.set('display', '')
+  url.searchParams.set('q', query.value.trim())
+  return url.toString()
+}
+
+function formatApiErrorMessage(payload: ApiErrorPayload | null, fallback: string) {
+  const message = payload?.message
+  if (Array.isArray(message)) return message.join('; ')
+  return message || fallback
+}
+
+function isAnnaChallengeResponse(status: number, payload: ApiErrorPayload | null, message: string) {
+  return status === 503 || payload?.code === 'ANNA_ARCHIVE_CHALLENGE' || /anti-bot|browser (challenge|verification)/i.test(message)
+}
+
 async function addToQueue(book: ZlibBook, silent = false) {
+  if ((book.source ?? source.value) !== 'zlib') {
+    toast.info('Queue is only available for Z-Library downloads')
+    return
+  }
+
   queuingId.value = book.id
   try {
     const res = await api('/api/v1/zlib/queue', {
@@ -227,7 +350,6 @@ async function addToQueue(book: ZlibBook, silent = false) {
 
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') emit('close')
-  if (e.key === 'Enter') doSearch()
 }
 </script>
 
@@ -244,7 +366,7 @@ function handleKeydown(e: KeyboardEvent) {
         <div class="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div class="flex items-center gap-2">
             <BookOpen :size="16" class="text-muted-foreground" />
-            <span class="text-sm font-semibold text-foreground">Search Z-Library</span>
+            <span class="text-sm font-semibold text-foreground">Search Books</span>
           </div>
           <button
             class="flex items-center justify-center w-7 h-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -256,7 +378,7 @@ function handleKeydown(e: KeyboardEvent) {
 
         <!-- Limit banner -->
         <div
-          v-if="status?.isAtLimit"
+          v-if="source === 'zlib' && status?.isAtLimit"
           class="flex items-center justify-between gap-2 px-5 py-2.5 bg-amber-500/10 border-b border-amber-500/20 shrink-0"
         >
           <div class="flex items-center gap-2 min-w-0">
@@ -276,6 +398,29 @@ function handleKeydown(e: KeyboardEvent) {
 
         <!-- Search bar -->
         <div class="px-5 pt-4 pb-3 border-b border-border/50 shrink-0 space-y-2">
+          <div class="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
+            <button
+              type="button"
+              :class="[
+                'h-7 rounded px-3 text-xs font-medium transition-colors',
+                source === 'zlib' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+              ]"
+              @click="source = 'zlib'"
+            >
+              Z-Library
+            </button>
+            <button
+              type="button"
+              :class="[
+                'h-7 rounded px-3 text-xs font-medium transition-colors',
+                source === 'anna' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+              ]"
+              @click="source = 'anna'"
+            >
+              Anna's Archive
+            </button>
+          </div>
+
           <div class="flex items-center gap-2">
             <div class="relative flex-1">
               <Search :size="14" class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
@@ -309,7 +454,7 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
 
           <!-- Download counter -->
-          <div v-if="status?.connected && !status.isAtLimit" class="flex justify-end">
+          <div v-if="source === 'zlib' && status?.connected && !status.isAtLimit" class="flex justify-end">
             <span class="text-xs text-muted-foreground"> {{ status.remainingToday }} of 10 downloads remaining today </span>
           </div>
         </div>
@@ -321,6 +466,23 @@ function handleKeydown(e: KeyboardEvent) {
             <BookOpen :size="32" class="text-muted-foreground/50" />
             <p class="text-sm font-medium text-foreground">Z-Library not connected</p>
             <p class="text-xs text-muted-foreground">Go to Account Settings → Integrations to connect your Z-Library account.</p>
+          </div>
+
+          <!-- Anna search challenge -->
+          <div v-else-if="annaSearchChallengeUrl" class="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm">
+            <p class="font-medium text-amber-800 dark:text-amber-300">Browser verification required</p>
+            <p class="mt-1 text-xs text-amber-700/90 dark:text-amber-200/80">
+              Anna's Archive blocked this search before results were available. Open Anna's Archive, complete the browser check, then return and press
+              Search again.
+            </p>
+            <button
+              type="button"
+              class="mt-3 inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-background/70 px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-background dark:text-amber-200 transition-colors"
+              @click="openAnnaSearchChallenge"
+            >
+              <ExternalLink :size="12" />
+              Open Anna's Archive
+            </button>
           </div>
 
           <!-- Error -->
@@ -383,13 +545,29 @@ function handleKeydown(e: KeyboardEvent) {
                     book.language
                   }}</span>
                 </div>
+
+                <div
+                  v-if="(book.source ?? source) === 'anna' && challengedAnnaId === book.id"
+                  class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs"
+                >
+                  <p class="font-medium text-amber-800 dark:text-amber-300">Browser verification required</p>
+                  <p class="mt-0.5 text-amber-700/90 dark:text-amber-200/80">Open Anna's Archive, complete the browser check, then try Add again.</p>
+                  <button
+                    type="button"
+                    class="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-background/70 px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-background dark:text-amber-200 transition-colors"
+                    @click="openAnnaArchive(book)"
+                  >
+                    <ExternalLink :size="12" />
+                    Open source
+                  </button>
+                </div>
               </div>
 
               <!-- Action buttons -->
               <div class="shrink-0 flex flex-col gap-1.5">
                 <!-- Download Now (hidden when at limit) -->
                 <button
-                  v-if="!status?.isAtLimit"
+                  v-if="(book.source ?? source) !== 'zlib' || !status?.isAtLimit"
                   type="button"
                   class="flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5 text-xs font-medium text-primary hover:bg-primary/15 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   :disabled="addingId !== null || queuingId !== null"
@@ -402,6 +580,7 @@ function handleKeydown(e: KeyboardEvent) {
 
                 <!-- Queue -->
                 <button
+                  v-if="(book.source ?? source) === 'zlib'"
                   type="button"
                   class="flex items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   :disabled="addingId !== null || queuingId !== null"

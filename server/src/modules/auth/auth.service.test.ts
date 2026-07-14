@@ -10,6 +10,19 @@ vi.mock('bcryptjs', () => ({
 import { AuthService } from './auth.service';
 
 function makeDb(overrides?: Record<string, unknown>) {
+  let lockedRefreshTokenRows: unknown[] = [];
+  const limit = vi.fn().mockImplementation(() => Promise.resolve(lockedRefreshTokenRows));
+  const forUpdate = vi.fn().mockReturnValue({ limit });
+  const selectWhere = vi.fn().mockReturnValue({ for: forUpdate });
+  const from = vi.fn().mockImplementation(() => {
+    const tableResult = {
+      where: selectWhere,
+      then: (resolve: (value: Array<{ total: number }>) => void, reject?: (reason: unknown) => void) =>
+        Promise.resolve([{ total: 0 }]).then(resolve, reject),
+    };
+    return tableResult;
+  });
+
   const db: Record<string, unknown> = {
     query: {
       appSettings: { findFirst: vi.fn() },
@@ -23,13 +36,16 @@ function makeDb(overrides?: Record<string, unknown>) {
     values: vi.fn().mockReturnThis(),
     onConflictDoNothing: vi.fn().mockReturnThis(),
     returning: vi.fn().mockResolvedValue([]),
-    select: vi.fn().mockReturnThis(),
-    from: vi.fn().mockResolvedValue([{ total: 0 }]),
+    select: vi.fn().mockReturnValue({ from }),
+    from,
     update: vi.fn().mockReturnThis(),
     set: vi.fn().mockReturnThis(),
     where: vi.fn().mockResolvedValue(undefined),
     delete: vi.fn().mockReturnThis(),
     transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
+    __setLockedRefreshTokenRows: (rows: unknown[]) => {
+      lockedRefreshTokenRows = rows;
+    },
   };
   return { ...db, ...overrides } as never;
 }
@@ -447,24 +463,39 @@ describe('AuthService', () => {
 
     it('throws UnauthorizedException when token not found in db', async () => {
       const { service, db } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue(null);
+      (db as unknown as { __setLockedRefreshTokenRows: (rows: unknown[]) => void }).__setLockedRefreshTokenRows([]);
 
       await expect(service.refresh(makeRequest({ refresh_token: 'unknown-token' }), makeReply())).rejects.toThrow(UnauthorizedException);
     });
 
-    it('throws UnauthorizedException and revokes all sessions when revoked token is reused', async () => {
+    it('throws UnauthorizedException and revokes the refresh chain when revoked token is reused after grace', async () => {
       const { service, db } = makeService();
       const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+      const revokedRow = {
         id: 1,
         userId: 5,
-        revokedAt: new Date(),
+        revokedAt: new Date(Date.now() - 120_000),
+        successorTokenHash: 'successor-hash',
+        expiresAt: new Date(Date.now() + 100000),
+      };
+      (db as unknown as { __setLockedRefreshTokenRows: (rows: unknown[]) => void }).__setLockedRefreshTokenRows([revokedRow]);
+      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+        id: 2,
+        userId: 5,
+        revokedAt: null,
+        successorTokenHash: null,
         expiresAt: new Date(Date.now() + 100000),
       });
 
+      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
+        id: 5,
+        tokenVersion: 2,
+        active: true,
+        provisioningMethod: 'local',
+      });
+
       await expect(service.refresh(makeRequest({ refresh_token: 'revoked-token' }), reply)).rejects.toThrow(UnauthorizedException);
-      expect(db.update).toHaveBeenCalled();
-      expect(db.delete).toHaveBeenCalled();
+      expect(db.delete).not.toHaveBeenCalled();
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
         'refresh_token',
         '',
@@ -477,13 +508,52 @@ describe('AuthService', () => {
       );
     });
 
-    it('throws UnauthorizedException when token is expired', async () => {
+    it('accepts a recently rotated refresh token during the grace window', async () => {
       const { service, db } = makeService();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+      const reply = makeReply();
+      const revokedRow = {
         id: 1,
         userId: 5,
+        revokedAt: new Date(),
+        successorTokenHash: 'successor-hash',
+        expiresAt: new Date(Date.now() + 100000),
+      };
+      (db as unknown as { __setLockedRefreshTokenRows: (rows: unknown[]) => void }).__setLockedRefreshTokenRows([revokedRow]);
+      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
+        id: 2,
+        userId: 5,
         revokedAt: null,
-        expiresAt: new Date(Date.now() - 1000),
+        successorTokenHash: null,
+        expiresAt: new Date(Date.now() + 100000),
+      });
+      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
+        id: 5,
+        tokenVersion: 2,
+        active: true,
+        provisioningMethod: 'local',
+      });
+
+      const result = await service.refresh(makeRequest({ refresh_token: 'revoked-token' }), reply);
+      expect(result).toEqual({ accessToken: 'signed-jwt' });
+      expect(db.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws UnauthorizedException when token is expired', async () => {
+      const { service, db } = makeService();
+      (db as unknown as { __setLockedRefreshTokenRows: (rows: unknown[]) => void }).__setLockedRefreshTokenRows([
+        {
+          id: 1,
+          userId: 5,
+          revokedAt: null,
+          expiresAt: new Date(Date.now() - 1000),
+          createdAt: new Date(Date.now() - 10 * 60 * 1000),
+        },
+      ]);
+      (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
+        id: 5,
+        tokenVersion: 2,
+        active: true,
+        provisioningMethod: 'local',
       });
 
       await expect(service.refresh(makeRequest({ refresh_token: 'expired-token' }), makeReply())).rejects.toThrow(UnauthorizedException);
@@ -492,13 +562,15 @@ describe('AuthService', () => {
     it('rotates token and sets cookies when refresh succeeds', async () => {
       const { service, db, oidcSessionRepo } = makeService();
       const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 11,
-        userId: 5,
-        revokedAt: null,
-        expiresAt: new Date(Date.now() + 60_000),
-        createdAt: new Date(Date.now() - 10 * 60 * 1000),
-      });
+      (db as unknown as { __setLockedRefreshTokenRows: (rows: unknown[]) => void }).__setLockedRefreshTokenRows([
+        {
+          id: 11,
+          userId: 5,
+          revokedAt: null,
+          expiresAt: new Date(Date.now() + 60_000),
+          createdAt: new Date(Date.now() - 10 * 60 * 1000),
+        },
+      ]);
       (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
         id: 5,
         tokenVersion: 2,
@@ -515,13 +587,15 @@ describe('AuthService', () => {
     it('reuses a recent refresh token during short foreground switches', async () => {
       const { service, db } = makeService();
       const reply = makeReply();
-      (db.query as never as Record<string, Record<string, vi.Mock>>).refreshTokens.findFirst.mockResolvedValue({
-        id: 11,
-        userId: 5,
-        revokedAt: null,
-        expiresAt: new Date(Date.now() + 60_000),
-        createdAt: new Date(),
-      });
+      (db as unknown as { __setLockedRefreshTokenRows: (rows: unknown[]) => void }).__setLockedRefreshTokenRows([
+        {
+          id: 11,
+          userId: 5,
+          revokedAt: null,
+          expiresAt: new Date(Date.now() + 60_000),
+          createdAt: new Date(),
+        },
+      ]);
       (db.query as never as Record<string, Record<string, vi.Mock>>).users.findFirst.mockResolvedValue({
         id: 5,
         tokenVersion: 2,

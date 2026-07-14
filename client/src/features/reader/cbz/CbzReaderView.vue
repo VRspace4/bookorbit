@@ -30,7 +30,7 @@ import { useCbz } from './composables/useCbz'
 import { useCbzSettings } from './composables/useCbzSettings'
 import type { BgColor, Direction, FitMode, ScrollMode, SpreadAlignment, ViewMode, WidePageSingletonMode } from './composables/useCbzSettings'
 import { useReaderSettings } from '../shared/composables/useReaderSettings'
-import { exitReader } from '../shared/lib/reader-navigation'
+import { leaveReader } from '../shared/lib/reader-navigation'
 import type { CbxReaderSettings } from '@bookorbit/types'
 import { DEFAULT_WIDE_PAGE_RATIO_THRESHOLD, createCbzSpreadLayout } from './lib/spread-layout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -42,8 +42,7 @@ const props = defineProps<{ bookId: number; fileId: number }>()
 const router = useRouter()
 
 async function handleBack() {
-  await progress.flush()
-  await exitReader(router)
+  await leaveReader(router)
 }
 
 const { headerVisible, footerVisible, handleMiddleTap, showHeader, showFooter, setVisibilityLock } = useVisibility()

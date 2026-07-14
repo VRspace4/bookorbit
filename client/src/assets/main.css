@@ -395,14 +395,25 @@
   .tts-toolbar-play-icon-sm {
     @apply h-6 w-6 sm:h-[30px] sm:w-[30px];
   }
-  .tts-follow-along-btn {
-    @apply fixed right-3 z-[61] inline-flex items-center gap-2 rounded-full border border-white/15 bg-[#1a1a1a]/95 px-3.5 py-2.5 text-white shadow-xl backdrop-blur-md transition-colors hover:bg-[#252525] active:scale-[0.98];
-    bottom: calc(5.75rem + env(safe-area-inset-bottom, 0px));
+  .reader-shell {
+    --reader-tts-toolbar-height: calc(5.75rem + env(safe-area-inset-bottom, 0px));
   }
   @media (min-width: 640px) {
-    .tts-follow-along-btn {
-      bottom: calc(6.25rem + env(safe-area-inset-bottom, 0px));
+    .reader-shell {
+      --reader-tts-toolbar-height: calc(6.25rem + env(safe-area-inset-bottom, 0px));
     }
+  }
+  .reader-shell .reader-content-area {
+    bottom: 0;
+    transition: bottom 300ms ease;
+  }
+  .reader-shell.reader-tts-active .reader-content-area {
+    bottom: var(--reader-tts-toolbar-height);
+  }
+
+  .tts-follow-along-btn {
+    @apply fixed right-3 z-[61] inline-flex items-center gap-2 rounded-full border border-white/15 bg-[#1a1a1a]/95 px-3.5 py-2.5 text-white shadow-xl backdrop-blur-md transition-colors hover:bg-[#252525] active:scale-[0.98];
+    bottom: var(--reader-tts-toolbar-height, calc(5.75rem + env(safe-area-inset-bottom, 0px)));
   }
 
   .tts-follow-fade-enter-active,

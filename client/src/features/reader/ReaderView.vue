@@ -5,7 +5,7 @@ import { toast } from 'vue-sonner'
 import { useFoliate, type RelocateDetail } from './epub/composables/useFoliate'
 import { useReaderProgress } from './shared/composables/useReaderProgress'
 import { useReadingSession } from './shared/composables/useReadingSession'
-import { exitReader } from './shared/lib/reader-navigation'
+import { leaveReader } from './shared/lib/reader-navigation'
 import { useReaderState } from './epub/composables/useReaderState'
 import { useReaderSettings } from './shared/composables/useReaderSettings'
 import { useCustomFonts } from './epub/composables/useCustomFonts'
@@ -26,6 +26,7 @@ import ReaderSettingsPanel from './epub/components/ReaderSettingsPanel.vue'
 import TtsControls from './epub/components/TtsControls.vue'
 import TtsFollowAlongButton from './epub/components/TtsFollowAlongButton.vue'
 import TtsSettingsPanel from './epub/components/TtsSettingsPanel.vue'
+import TtsHighlightColorPanel from './epub/components/TtsHighlightColorPanel.vue'
 import SelectionPopup from './epub/components/SelectionPopup.vue'
 import ReaderSearchPanel from './epub/components/ReaderSearchPanel.vue'
 import NoteDialog from './epub/components/NoteDialog.vue'
@@ -55,10 +56,14 @@ const isPdfFormat = fileFormat === 'pdf'
 const isComicFormat = fileFormat === 'cbz' || fileFormat === 'cbr' || fileFormat === 'cb7'
 
 const containerRef = ref<HTMLElement | null>(null)
+const readerShellRef = ref<HTMLElement | null>(null)
+const ttsToolbarRef = ref<InstanceType<typeof TtsControls> | null>(null)
+let ttsToolbarResizeObserver: ResizeObserver | null = null
 const showSidebar = ref(false)
 const showSettings = ref(false)
 const showSearch = ref(false)
 const showTtsSettings = ref(false)
+const ttsColorPickerTarget = ref<'sentence' | 'word' | null>(null)
 const showTtsResumeDialog = ref(false)
 const pendingTtsResume = ref<{ sectionIndex: number; wordIndex: number } | null>(null)
 const ttsAutoAdvancing = ref(false)
@@ -168,6 +173,8 @@ function closeAnyPanel() {
     showSettings.value = false
   } else if (showTtsSettings.value) {
     showTtsSettings.value = false
+  } else if (ttsColorPickerTarget.value) {
+    ttsColorPickerTarget.value = null
   } else {
     handleMiddleTap()
   }
@@ -286,8 +293,8 @@ const {
   waitForInitialRestore,
 } = useFoliate(() => containerRef.value, onRelocateHandler, onApplyStylesHandler, onMiddleTapHandler, onDocumentLoadHandler)
 
-function alignTtsSessionWithProgress() {
-  const saved = progress.getTtsPosition()
+function alignTtsSessionWithProgress(position = progress.getTtsPosition()) {
+  const saved = position
   if (!saved) return
   const session = readTtsPlaybackSession(fileId)
   if (!session?.enabled) return
@@ -322,7 +329,46 @@ async function ensureReaderAtTtsPosition(saved: { sectionIndex: number; wordInde
     await goToSection(saved.sectionIndex)
   }
   await waitForActiveSection(saved.sectionIndex)
-  alignTtsSessionWithProgress()
+  alignTtsSessionWithProgress(saved)
+}
+
+function measureTtsToolbarHeight(): number {
+  const toolbar = ttsToolbarRef.value?.$el
+  if (!(toolbar instanceof HTMLElement)) return 0
+  return Math.ceil(toolbar.getBoundingClientRect().height)
+}
+
+function updateReaderBottomChromeHeight() {
+  const shell = readerShellRef.value
+  if (!shell) return
+
+  const height = measureTtsToolbarHeight()
+  if (height > 0) {
+    shell.style.setProperty('--reader-tts-toolbar-height', `${height}px`)
+  } else {
+    shell.style.removeProperty('--reader-tts-toolbar-height')
+  }
+}
+
+function refreshReaderLayout() {
+  updateReaderBottomChromeHeight()
+  window.dispatchEvent(new Event('resize'))
+  if (tts.isActive.value) {
+    tts.refreshTtsHighlight()
+  }
+}
+
+function attachTtsToolbarResizeObserver() {
+  ttsToolbarResizeObserver?.disconnect()
+  ttsToolbarResizeObserver = null
+
+  const toolbar = ttsToolbarRef.value?.$el
+  if (!(toolbar instanceof HTMLElement)) return
+
+  ttsToolbarResizeObserver = new ResizeObserver(() => {
+    refreshReaderLayout()
+  })
+  ttsToolbarResizeObserver.observe(toolbar)
 }
 
 const tts = useEpubTts({
@@ -347,6 +393,7 @@ const tts = useEpubTts({
       size?: number
       start?: number
       scrollBy?: (dx: number, dy: number) => void
+      scrollToAnchor?: (anchor: Range | Element, select?: boolean) => Promise<void>
     } | null
     return renderer
   },
@@ -361,9 +408,32 @@ const ttsCurrentProvider = computed(() => tts.currentProvider.value)
 const isLeavingReader = ref(false)
 const ttsIsActive = computed(() => tts.isActive.value && !isLeavingReader.value)
 const ttsScrollFollowEnabled = computed(() => tts.scrollFollowEnabled.value)
+const ttsFollowTarget = computed(() => tts.followTarget.value)
+const ttsFollowTargetAway = computed(() => {
+  const target = ttsFollowTarget.value
+  return Boolean(target && target.sectionIndex !== sectionIndex.value)
+})
 const showTtsFollowAlong = computed(
-  () => ttsIsActive.value && !ttsScrollFollowEnabled.value && ttsStatus.value !== 'idle' && ttsStatus.value !== 'done' && ttsStatus.value !== 'error',
+  () =>
+    ttsIsActive.value &&
+    (!ttsScrollFollowEnabled.value || ttsFollowTargetAway.value) &&
+    ttsStatus.value !== 'idle' &&
+    ttsStatus.value !== 'done' &&
+    ttsStatus.value !== 'error',
 )
+
+watch(ttsIsActive, async (active) => {
+  await nextTick()
+  if (active) {
+    attachTtsToolbarResizeObserver()
+  } else {
+    ttsToolbarResizeObserver?.disconnect()
+    ttsToolbarResizeObserver = null
+  }
+  requestAnimationFrame(() => {
+    refreshReaderLayout()
+  })
+})
 
 setTextSelectedHandler(selection.show)
 
@@ -372,7 +442,11 @@ onMounted(async () => {
     isFullscreen.value = !!document.fullscreenElement
   }
   document.addEventListener('fullscreenchange', onFullscreenChange)
-  onUnmounted(() => document.removeEventListener('fullscreenchange', onFullscreenChange))
+  onUnmounted(() => {
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    ttsToolbarResizeObserver?.disconnect()
+    ttsToolbarResizeObserver = null
+  })
 
   // Specialized readers own their own progress/settings/loading lifecycle.
   if (isAudioFormat || isPdfFormat || isComicFormat) return
@@ -423,7 +497,8 @@ onMounted(async () => {
 
   if (tts.isActive.value) {
     await nextTick()
-    tts.refreshTtsHighlight()
+    attachTtsToolbarResizeObserver()
+    refreshReaderLayout()
   }
 
   await bookmarks.load(bookId)
@@ -542,6 +617,15 @@ function applyTtsUpdate(patch: Partial<EpubReaderSettings>) {
   }
 }
 
+function openTtsColorPicker(target: 'sentence' | 'word') {
+  showTtsSettings.value = false
+  ttsColorPickerTarget.value = target
+}
+
+function closeTtsColorPicker() {
+  ttsColorPickerTarget.value = null
+}
+
 async function handleTtsSectionComplete() {
   if (ttsAutoAdvancing.value) return
   if (sectionIndex.value >= totalSections.value - 1) return
@@ -612,7 +696,7 @@ async function startTtsFromSavedProgress() {
 
 async function startTtsPlayback() {
   if (tts.status.value === 'paused') {
-    tts.resume()
+    await resumeTtsPlayback()
     return
   }
 
@@ -623,10 +707,30 @@ async function startTtsPlayback() {
   await startTtsFromSavedProgress()
 }
 
+async function followTtsPosition() {
+  const target = ttsFollowTarget.value ?? progress.getTtsPosition()
+  if (target && target.sectionIndex !== sectionIndex.value) {
+    await ensureReaderAtTtsPosition(target)
+    await nextTick()
+    tts.restoreTtsHighlightNow()
+  }
+  await nextTick()
+  tts.resumeScrollFollow()
+}
+
+async function resumeTtsPlayback() {
+  const target = ttsFollowTarget.value
+  if (target && target.sectionIndex !== sectionIndex.value) {
+    await followTtsPosition()
+  }
+  tts.resume()
+}
+
 function toggleTts() {
   if (tts.isActive.value) {
     tts.stop()
     showTtsSettings.value = false
+    ttsColorPickerTarget.value = null
     return
   }
   selection.dismiss()
@@ -704,20 +808,22 @@ function navigateSearch(cfiTarget: string) {
 }
 
 async function handleBack() {
-  if (!isAudioFormat && !isPdfFormat && !isComicFormat) {
-    isLeavingReader.value = true
-  }
-  await progress.flush()
-  await exitReader(router)
+  await leaveReader(router, {
+    onLeaving: () => {
+      if (!isAudioFormat && !isPdfFormat && !isComicFormat) {
+        isLeavingReader.value = true
+      }
+    },
+  })
 }
 
 onBeforeRouteLeave(async () => {
   if (isAudioFormat || isPdfFormat || isComicFormat) return true
   isLeavingReader.value = true
-  const savedTts = progress.getTtsPosition()
+  const savedTts = ttsFollowTarget.value ?? progress.getTtsPosition()
   tts.persistForNavigation({
-    sectionIndex: sectionIndex.value,
-    wordIndex: savedTts?.sectionIndex === sectionIndex.value ? savedTts.wordIndex : undefined,
+    sectionIndex: savedTts?.sectionIndex ?? sectionIndex.value,
+    wordIndex: savedTts?.wordIndex,
   })
   await progress.flush()
   return true
@@ -736,7 +842,9 @@ function closeSearch() {
   <AudiobookReaderView v-else-if="isAudioFormat" :bookId="bookId" :fileId="fileId" />
   <div
     v-else
-    class="fixed inset-0 overflow-hidden"
+    ref="readerShellRef"
+    class="reader-shell fixed inset-0 overflow-hidden"
+    :class="{ 'reader-tts-active': ttsIsActive }"
     :style="
       shouldApplyStyles ? { background: activeMode.bg, colorScheme: isDark ? 'dark' : 'light' } : { background: '#ffffff', colorScheme: 'light' }
     "
@@ -770,7 +878,7 @@ function closeSearch() {
       </div>
     </Transition>
 
-    <div class="absolute inset-0">
+    <div class="reader-content-area absolute inset-x-0 top-0">
       <div v-if="loading || restoring" class="absolute inset-0 flex items-center justify-center z-10 bg-background">
         <div class="flex flex-col items-center gap-3">
           <div class="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
@@ -806,10 +914,11 @@ function closeSearch() {
       @seekBookmarkTap="handleSeekBookmarkTap"
     />
 
-    <TtsFollowAlongButton :visible="showTtsFollowAlong" @resume="tts.resumeScrollFollow" />
+    <TtsFollowAlongButton :visible="showTtsFollowAlong" @resume="followTtsPosition" />
 
     <TtsControls
       v-if="ttsIsActive"
+      ref="ttsToolbarRef"
       :status="ttsStatus"
       :progress="ttsProgress"
       :activeIndex="ttsActiveIndex"
@@ -819,7 +928,7 @@ function closeSearch() {
       @start="startTtsPlayback"
       @prefetch="void tts.prefetchPlaybackAhead()"
       @pause="tts.pause"
-      @resume="tts.resume"
+      @resume="resumeTtsPlayback"
       @replay="tts.replay"
       @skipBack="tts.skipBackward"
       @skipForward="tts.skipForward"
@@ -828,7 +937,23 @@ function closeSearch() {
       @updateRate="(rate) => applyTtsUpdate({ ttsRate: rate })"
     />
 
-    <TtsSettingsPanel v-if="showTtsSettings" :settings="effectiveEpubSettings" @update="applyTtsUpdate" @close="showTtsSettings = false" />
+    <TtsSettingsPanel
+      v-if="showTtsSettings"
+      :settings="effectiveEpubSettings"
+      @update="applyTtsUpdate"
+      @pickColor="openTtsColorPicker"
+      @close="showTtsSettings = false"
+    />
+
+    <TtsHighlightColorPanel
+      v-if="ttsColorPickerTarget"
+      :target="ttsColorPickerTarget"
+      :sentenceColor="effectiveEpubSettings.ttsSentenceHighlightColor"
+      :wordColor="effectiveEpubSettings.ttsWordHighlightColor"
+      @update:target="ttsColorPickerTarget = $event"
+      @update="applyTtsUpdate"
+      @close="closeTtsColorPicker"
+    />
 
     <ReaderSidebar
       v-if="showSidebar"

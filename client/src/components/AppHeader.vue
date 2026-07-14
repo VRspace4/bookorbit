@@ -537,7 +537,7 @@ function formatBadgeClass(fmt: string): string {
             </DropdownMenuItem>
             <DropdownMenuItem v-if="hasPermission('library_upload')" @click="zlibOpen = true">
               <Search :size="15" class="mr-2 text-muted-foreground" />
-              Search Z-Library
+              Search Books
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
@@ -672,7 +672,7 @@ function formatBadgeClass(fmt: string): string {
                 </span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Search Z-Library{{ zlibQueueCount > 0 ? ` · ${zlibQueueCount} queued` : '' }}</TooltipContent>
+            <TooltipContent>Search Books{{ zlibQueueCount > 0 ? ` · ${zlibQueueCount} queued` : '' }}</TooltipContent>
           </Tooltip>
 
           <!-- Upload button -->

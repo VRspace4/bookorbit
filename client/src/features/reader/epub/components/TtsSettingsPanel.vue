@@ -14,6 +14,7 @@ defineProps<{
 const emit = defineEmits<{
   close: []
   update: [patch: Partial<EpubReaderSettings>]
+  pickColor: [target: 'sentence' | 'word']
 }>()
 
 const { credentials, ensureLoaded } = useTtsCredentials()
@@ -237,24 +238,22 @@ onUnmounted(() => {
         <div class="space-y-3">
           <p class="settings-group-label">Highlighting</p>
           <div class="grid grid-cols-2 gap-3">
-            <label class="block">
+            <button type="button" class="block rounded-md text-left transition-colors hover:bg-muted/50" @click="emit('pickColor', 'sentence')">
               <span class="settings-label">Sentence</span>
-              <input
-                class="mt-2 h-9 w-full rounded-md border border-border bg-background"
-                type="color"
-                :value="settings.ttsSentenceHighlightColor"
-                @input="emit('update', { ttsSentenceHighlightColor: ($event.target as HTMLInputElement).value })"
+              <span
+                class="mt-2 block h-9 w-full rounded-md border border-border"
+                :style="{ backgroundColor: settings.ttsSentenceHighlightColor }"
+                aria-hidden="true"
               />
-            </label>
-            <label class="block">
+            </button>
+            <button type="button" class="block rounded-md text-left transition-colors hover:bg-muted/50" @click="emit('pickColor', 'word')">
               <span class="settings-label">Word</span>
-              <input
-                class="mt-2 h-9 w-full rounded-md border border-border bg-background"
-                type="color"
-                :value="settings.ttsWordHighlightColor"
-                @input="emit('update', { ttsWordHighlightColor: ($event.target as HTMLInputElement).value })"
+              <span
+                class="mt-2 block h-9 w-full rounded-md border border-border"
+                :style="{ backgroundColor: settings.ttsWordHighlightColor }"
+                aria-hidden="true"
               />
-            </label>
+            </button>
           </div>
         </div>
       </div>

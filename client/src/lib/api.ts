@@ -5,6 +5,7 @@ const ACCESS_TOKEN_STORAGE_KEY = 'bookorbit:access-token'
 let _accessToken: string | null = null
 let _onAuthFailure: (() => void) | null = null
 let _refreshPromise: Promise<string> | null = null
+let _authFailureHandlerEnabled = false
 
 export function setAccessToken(token: string | null): void {
   _accessToken = token
@@ -37,18 +38,36 @@ export function setOnAuthFailure(fn: () => void): void {
   _onAuthFailure = fn
 }
 
+export function enableAuthFailureHandler(): void {
+  _authFailureHandlerEnabled = true
+}
+
+function notifyAuthFailure(): void {
+  if (!_authFailureHandlerEnabled) return
+  _onAuthFailure?.()
+}
+
 function rawFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers)
   if (_accessToken) headers.set('Authorization', `Bearer ${_accessToken}`)
   return fetch(input, { ...init, headers, credentials: 'include' })
 }
 
+async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && 'locks' in navigator && navigator.locks) {
+    return navigator.locks.request('bookorbit-auth-refresh', fn)
+  }
+  return fn()
+}
+
 async function attemptRefresh(): Promise<string> {
-  const res = await rawFetch('/api/v1/auth/refresh', { method: 'POST' })
-  if (!res.ok) throw new Error('refresh failed')
-  const data: RefreshResponse = await res.json()
-  _accessToken = data.accessToken
-  return data.accessToken
+  return withRefreshLock(async () => {
+    const res = await rawFetch('/api/v1/auth/refresh', { method: 'POST' })
+    if (!res.ok) throw new Error('refresh failed')
+    const data: RefreshResponse = await res.json()
+    setAccessToken(data.accessToken)
+    return data.accessToken
+  })
 }
 
 export async function refreshAccessToken(): Promise<string> {
@@ -68,14 +87,14 @@ export async function api(input: RequestInfo | URL, init?: RequestInit & { _isRe
   if (res.status !== 401) return res
 
   if (isRetry) {
-    _onAuthFailure?.()
+    notifyAuthFailure()
     throw new Error('Session expired')
   }
 
   try {
     await refreshAccessToken()
   } catch {
-    _onAuthFailure?.()
+    notifyAuthFailure()
     throw new Error('Session expired')
   }
 

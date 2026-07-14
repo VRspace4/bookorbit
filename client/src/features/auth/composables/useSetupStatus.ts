@@ -17,7 +17,12 @@ export function useSetupStatus() {
         setupStatusError.value = null
         needsSetup.value = data.needsSetup === true
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to load setup status'
+        const message =
+          err instanceof TypeError
+            ? 'Unable to reach the server. Check your connection and try again.'
+            : err instanceof Error && err.message
+              ? err.message
+              : 'Failed to load setup status'
         setupStatusError.value = message
         throw err
       } finally {
