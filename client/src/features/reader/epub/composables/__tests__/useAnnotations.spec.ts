@@ -17,11 +17,16 @@ function makeAnnotation(id: number, cfi = `epubcfi(/6/${id})`): Annotation {
     id,
     bookId: 9,
     cfi,
+    jumpFileId: 33,
+    pageno: null,
     text: `Selection ${id}`,
     color: '#FACC15',
     style: 'highlight',
     note: null,
     chapterTitle: 'Intro',
+    origin: 'web',
+    positionStatus: 'exact',
+    chapterIndex: null,
     createdAt: '2026-01-01T00:00:00.000Z',
   }
 }
@@ -62,11 +67,12 @@ describe('useAnnotations', () => {
 
   it('creates and appends annotation on success', async () => {
     const created = makeAnnotation(3)
+    const createdCfi = created.cfi ?? 'epubcfi(/6/3)'
     apiMock.mockResolvedValueOnce(response(true, created))
 
     const store = useAnnotations()
     const result = await store.create(9, {
-      cfi: created.cfi,
+      cfi: createdCfi,
       text: created.text,
       color: created.color,
       style: created.style,
@@ -78,7 +84,7 @@ describe('useAnnotations', () => {
     expect(url).toBe('/api/v1/books/9/annotations')
     expect(req.method).toBe('POST')
     expect(JSON.parse(String(req.body))).toEqual({
-      cfi: created.cfi,
+      cfi: createdCfi,
       text: created.text,
       color: created.color,
       style: created.style,
@@ -114,7 +120,42 @@ describe('useAnnotations', () => {
 
     await store.updateNote(9, 2, 'New note')
 
+    const [url, req] = apiMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/books/9/annotations/2')
+    expect(req.method).toBe('PATCH')
+    expect(JSON.parse(String(req.body))).toEqual({ note: 'New note' })
     expect(store.annotations.value).toEqual([existing[0], updated])
+  })
+
+  it('patches color and style without appending a duplicate annotation', async () => {
+    const existing = [makeAnnotation(1), makeAnnotation(2)]
+    const updated = { ...existing[0]!, color: '#38BDF8', style: 'underline' }
+    apiMock.mockResolvedValueOnce(response(true, updated))
+
+    const store = useAnnotations()
+    store.annotations.value = existing
+
+    const result = await store.update(9, 1, { color: '#38BDF8', style: 'underline' })
+
+    const [url, req] = apiMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/books/9/annotations/1')
+    expect(req.method).toBe('PATCH')
+    expect(JSON.parse(String(req.body))).toEqual({ color: '#38BDF8', style: 'underline' })
+    expect(result).toEqual(updated)
+    expect(store.annotations.value).toEqual([updated, existing[1]])
+  })
+
+  it('returns null and leaves local annotations unchanged when update fails', async () => {
+    const existing = [makeAnnotation(1), makeAnnotation(2)]
+    apiMock.mockResolvedValueOnce(response(false))
+
+    const store = useAnnotations()
+    store.annotations.value = existing
+
+    const result = await store.update(9, 1, { color: '#38BDF8' })
+
+    expect(result).toBeNull()
+    expect(store.annotations.value).toEqual(existing)
   })
 
   it('removes annotation when delete succeeds', async () => {

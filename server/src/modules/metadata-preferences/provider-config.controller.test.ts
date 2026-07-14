@@ -1,3 +1,5 @@
+import { BadRequestException } from '@nestjs/common';
+import { MetadataProviderKey } from '@bookorbit/types';
 import { ProviderConfigController } from './provider-config.controller';
 import type { Mocked } from 'vitest';
 import { ProviderConfigService } from './provider-config.service';
@@ -11,6 +13,7 @@ describe('ProviderConfigController', () => {
       getConfig: vi.fn(),
       getProviderStatuses: vi.fn(),
       updateConfig: vi.fn(),
+      testProvider: vi.fn(),
     } as unknown as Mocked<ProviderConfigService>;
 
     controller = new ProviderConfigController(service);
@@ -46,5 +49,21 @@ describe('ProviderConfigController', () => {
     await controller.updateConfig(patch as never);
 
     expect(service.updateConfig).toHaveBeenCalledWith(patch);
+  });
+
+  it('delegates provider test requests', async () => {
+    const patch = {
+      hardcover: { apiKey: 'Bearer token' },
+    };
+    const result = { key: MetadataProviderKey.HARDCOVER, ok: true, status: 'success', message: 'Connected as reader.' };
+    service.testProvider.mockResolvedValue(result as never);
+
+    await expect(controller.testProvider('hardcover', patch as never)).resolves.toEqual(result);
+    expect(service.testProvider).toHaveBeenCalledWith(MetadataProviderKey.HARDCOVER, patch);
+  });
+
+  it('rejects unknown provider keys for test requests', () => {
+    expect(() => controller.testProvider('unknown-provider', {} as never)).toThrow(BadRequestException);
+    expect(service.testProvider).not.toHaveBeenCalled();
   });
 });

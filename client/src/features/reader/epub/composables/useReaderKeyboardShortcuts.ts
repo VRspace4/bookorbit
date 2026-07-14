@@ -17,7 +17,7 @@ export function useReaderKeyboardShortcuts(handlers: ShortcutHandlers) {
   const showHelpModal = ref(false)
 
   function onKeyDown(e: KeyboardEvent) {
-    const target = e.target as HTMLElement | null
+    const target = (e.composedPath?.()[0] || e.target) as HTMLElement | null
     if (target && (INTERACTIVE_TAGS.has(target.tagName) || target.isContentEditable)) return
 
     switch (e.key) {

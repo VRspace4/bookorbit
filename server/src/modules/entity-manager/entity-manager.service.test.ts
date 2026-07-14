@@ -4,6 +4,7 @@ import type { EntityType } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import { EntityManagerService } from './entity-manager.service';
 import type { EntityStrategy, RawCandidatePair } from './strategies/entity-strategy.interface';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function mockStrategy(overrides: Partial<EntityStrategy> & { entityType: EntityType; isInline: boolean }): EntityStrategy {
   return {
@@ -56,7 +57,7 @@ function makeService() {
   const narratorStrategy = mockStrategy({ entityType: 'narrator', isInline: false });
   const publisherStrategy = mockStrategy({ entityType: 'publisher', isInline: true });
   const languageStrategy = mockStrategy({ entityType: 'language', isInline: true });
-  const seriesStrategy = mockStrategy({ entityType: 'series', isInline: true });
+  const seriesStrategy = mockStrategy({ entityType: 'series', isInline: false });
 
   const service = new EntityManagerService(
     repo as any,
@@ -90,7 +91,7 @@ function makeService() {
   };
 }
 
-const mockUser: RequestUser = { id: 1, username: 'test', isSuperuser: false, permissions: [] };
+const mockUser: RequestUser = { id: 1, username: 'test', isSuperuser: false, permissions: [], contentFilters: EMPTY_CONTENT_FILTER_RULES };
 
 describe('EntityManagerService', () => {
   describe('getStrategy', () => {
@@ -99,6 +100,7 @@ describe('EntityManagerService', () => {
       expect(service.getStrategy('author')).toBeDefined();
       expect(service.getStrategy('genre')).toBeDefined();
       expect(service.getStrategy('publisher')).toBeDefined();
+      expect(service.getStrategy('series')).toBeDefined();
     });
 
     it('throws for unknown entity type', () => {
@@ -126,7 +128,7 @@ describe('EntityManagerService', () => {
 
       await service.scanDuplicates('publisher', mockUser, 2);
 
-      expect(strategies.publisher.findCandidatePairs).toHaveBeenCalledWith([2], 0.5);
+      expect(strategies.publisher.findCandidatePairs).toHaveBeenCalledWith([2], 0.5, EMPTY_CONTENT_FILTER_RULES);
     });
 
     it('throws when library not accessible', async () => {
@@ -140,7 +142,7 @@ describe('EntityManagerService', () => {
       const { service, strategies } = makeService();
       await service.scanDuplicates('publisher', mockUser, undefined, 0.8);
 
-      expect(strategies.publisher.findCandidatePairs).toHaveBeenCalledWith([1, 2], 0.8);
+      expect(strategies.publisher.findCandidatePairs).toHaveBeenCalledWith([1, 2], 0.8, EMPTY_CONTENT_FILTER_RULES);
     });
 
     it('filters out dismissed pairs for inline entities', async () => {
@@ -296,11 +298,41 @@ describe('EntityManagerService', () => {
 
       const result = await service.scanDuplicates('author', mockUser);
 
-      expect(duplicateCompute.readCandidatePairs).toHaveBeenCalledWith('author', 0.5);
+      expect(duplicateCompute.readCandidatePairs).toHaveBeenCalledWith('author', 0.5, {
+        libraryIds: [1, 2],
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
+      });
       expect(repo.getDismissedPairSet).not.toHaveBeenCalled();
       expect(strategies.author.findCandidatePairs).not.toHaveBeenCalled();
       expect(result.clusters).toHaveLength(1);
       expect(result.clusters[0]!.entities).toHaveLength(3);
+    });
+
+    it('uses only the explicitly requested accessible library for stored candidates and enrichment', async () => {
+      const { service, duplicateCompute, libraryService, strategies } = makeService();
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([4, 7]);
+      duplicateCompute.readCandidatePairs.mockResolvedValue([{ idA: 1, idB: 2, simScore: 0.9 }]);
+      (strategies.author.findEntityById as any).mockImplementation((id: number) => Promise.resolve({ id, name: `Author ${id}` }));
+
+      await service.scanDuplicates('author', mockUser, 7);
+
+      const scope = { libraryIds: [7], contentFilters: EMPTY_CONTENT_FILTER_RULES };
+      expect(duplicateCompute.readCandidatePairs).toHaveBeenCalledWith('author', 0.5, scope);
+      expect(strategies.author.getBookCount).toHaveBeenCalledWith(1, scope);
+      expect(strategies.author.getBookCount).toHaveBeenCalledWith(2, scope);
+      expect(strategies.author.getBookTitles).toHaveBeenCalledWith(1, 5, scope);
+      expect(strategies.author.getBookTitles).toHaveBeenCalledWith(2, 5, scope);
+    });
+
+    it('does not query candidates when the user has no accessible libraries', async () => {
+      const { service, duplicateCompute, libraryService, strategies } = makeService();
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([]);
+
+      await expect(service.scanDuplicates('author', mockUser)).resolves.toMatchObject({ clusters: [], total: 0, totalEntities: 0 });
+
+      expect(duplicateCompute.readCandidatePairs).not.toHaveBeenCalled();
+      expect(duplicateCompute.triggerCompute).not.toHaveBeenCalled();
+      expect(strategies.author.findCandidatePairs).not.toHaveBeenCalled();
     });
 
     it('triggers duplicate compute with the requested threshold when no status exists', async () => {
@@ -522,6 +554,8 @@ describe('EntityManagerService', () => {
         pageSize: 25,
         sortBy: 'name',
         sortOrder: 'asc',
+        bookCount: 'any',
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
       });
       expect(result.items).toHaveLength(1);
       expect(result.total).toBe(1);
@@ -533,7 +567,14 @@ describe('EntityManagerService', () => {
       const { service, strategies } = makeService();
       (strategies.tag.browse as any).mockResolvedValue({ items: [], total: 0 });
 
-      await service.browse('tag', mockUser, { search: 'fic', page: 2, pageSize: 50, sortBy: 'bookCount', sortOrder: 'desc' });
+      await service.browse('tag', mockUser, {
+        search: 'fic',
+        page: 2,
+        pageSize: 50,
+        sortBy: 'bookCount',
+        sortOrder: 'desc',
+        bookCount: 'empty',
+      });
 
       expect(strategies.tag.browse).toHaveBeenCalledWith({
         libraryIds: [1, 2],
@@ -542,7 +583,18 @@ describe('EntityManagerService', () => {
         pageSize: 50,
         sortBy: 'bookCount',
         sortOrder: 'desc',
+        bookCount: 'empty',
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
       });
+    });
+
+    it('does not pass empty book count filtering to inline strategies', async () => {
+      const { service, strategies } = makeService();
+      (strategies.publisher.browse as any).mockResolvedValue({ items: [], total: 0 });
+
+      await service.browse('publisher', mockUser, { bookCount: 'empty' });
+
+      expect(strategies.publisher.browse).toHaveBeenCalledWith(expect.objectContaining({ bookCount: 'any' }));
     });
   });
 
@@ -557,7 +609,7 @@ describe('EntityManagerService', () => {
 
       const result = await service.merge('author', mockUser, 1, [2, 3], false);
 
-      expect(strategies.author.merge).toHaveBeenCalledWith({ targetId: 1, sourceIds: [2, 3], userId: 1 });
+      expect(strategies.author.merge).toHaveBeenCalledWith({ targetId: 1, sourceIds: [2, 3], userId: 1, libraryIds: [1, 2] });
       expect(repo.deleteDismissedPairsForEntity).toHaveBeenCalledTimes(2);
       expect(repo.deleteDismissedPairsForEntity).toHaveBeenCalledWith('author', 2);
       expect(repo.deleteDismissedPairsForEntity).toHaveBeenCalledWith('author', 3);
@@ -664,10 +716,25 @@ describe('EntityManagerService', () => {
     it('does not clean dismissed pairs for soft delete', async () => {
       const { service, strategies, repo } = makeService();
       (strategies.genre.deleteEntity as any).mockResolvedValue({ name: 'Fantasy', affectedBookIds: [] });
+      (strategies.genre.getBookCount as any).mockResolvedValue(2);
 
       await service.deleteEntity('genre', mockUser, 5, 'soft', false);
 
+      expect(strategies.genre.deleteEntity).toHaveBeenCalledWith({ entityId: 5, mode: 'soft', libraryIds: [1, 2] });
       expect(repo.deleteDismissedPairsForEntity).not.toHaveBeenCalled();
+    });
+
+    it('uses hard delete for zero-book first-class entities requested as soft delete', async () => {
+      const { service, strategies, repo, duplicateCompute } = makeService();
+      (strategies.author.deleteEntity as any).mockResolvedValue({ name: 'Unused', affectedBookIds: [] });
+      (strategies.author.getBookCount as any).mockResolvedValue(0);
+
+      const result = await service.deleteEntity('author', mockUser, 5, 'soft', false);
+
+      expect(strategies.author.deleteEntity).toHaveBeenCalledWith({ entityId: 5, mode: 'hard', libraryIds: [1, 2] });
+      expect(repo.deleteDismissedPairsForEntity).toHaveBeenCalledWith('author', 5);
+      expect(duplicateCompute.invalidateCandidatesForEntities).toHaveBeenCalledWith('author', [5]);
+      expect(result.mode).toBe('hard');
     });
 
     it('cleans inline dismissed pairs for inline entities', async () => {
@@ -730,7 +797,7 @@ describe('EntityManagerService', () => {
 
       const result = await service.split('author', mockUser, 5, ['Author A', 'Author B'], false);
 
-      expect(strategies.author.split).toHaveBeenCalledWith({ entityId: 5, newNames: ['Author A', 'Author B'] });
+      expect(strategies.author.split).toHaveBeenCalledWith({ entityId: 5, newNames: ['Author A', 'Author B'], libraryIds: [1, 2] });
       expect(repo.deleteDismissedPairsForEntity).toHaveBeenCalledWith('author', 5);
       expect(result).toEqual({
         originalId: 5,
@@ -850,16 +917,37 @@ describe('EntityManagerService', () => {
       (strategies.author.getBookCount as any).mockResolvedValue(5);
       (strategies.author.getBookTitles as any).mockResolvedValue(['Book 1', 'Book 2']);
 
-      const result = await service.getEntityInfo('author', 1);
+      const result = await service.getEntityInfo('author', mockUser, 1);
 
       expect(result).toEqual({ id: 1, name: 'Author A', bookCount: 5, bookTitles: ['Book 1', 'Book 2'] });
+      expect(strategies.author.getBookCount).toHaveBeenCalledWith(1, {
+        libraryIds: [1, 2],
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
+      });
+      expect(strategies.author.getBookTitles).toHaveBeenCalledWith(1, 5, {
+        libraryIds: [1, 2],
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
+      });
     });
 
     it('throws NotFoundException when entity not found', async () => {
       const { service, strategies } = makeService();
       (strategies.author.findEntityById as any).mockResolvedValue(null);
 
-      await expect(service.getEntityInfo('author', 999)).rejects.toThrow(NotFoundException);
+      await expect(service.getEntityInfo('author', mockUser, 999)).rejects.toThrow(NotFoundException);
+    });
+
+    it('does not expose an entity that has books only outside the accessible scope', async () => {
+      const { service, strategies } = makeService();
+      (strategies.author.findEntityById as any).mockResolvedValue({ id: 1, name: 'Hidden Author' });
+      (strategies.author.getBookCount as any).mockResolvedValueOnce(4).mockResolvedValueOnce(0);
+
+      await expect(service.getEntityInfo('author', mockUser, 1)).rejects.toThrow(NotFoundException);
+
+      expect(strategies.author.getBookTitles).toHaveBeenCalledWith(1, 5, {
+        libraryIds: [1, 2],
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
+      });
     });
   });
 

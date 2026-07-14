@@ -3,43 +3,46 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { ValidationPipe } from '@nestjs/common';
 import { IoAdapter } from '@nestjs/platform-socket.io';
 import { Logger } from 'nestjs-pino';
+import type { ConfigType } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { join } from 'path';
-import { Readable } from 'stream';
 import fastifyCookie from '@fastify/cookie';
 import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyCompress from '@fastify/compress';
-import { parseBooleanEnv, parseTrustProxy, buildCspDirectives } from './common/utils/bootstrap.utils';
+import { appConfig } from './config/config';
+import { setupSwaggerDocs } from './swagger';
+import {
+  parseBooleanEnv,
+  parseTrustProxy,
+  buildCspDirectives,
+  buildEmptyJsonBodyStream,
+  registerEmptyBodyContentTypeParser,
+  shouldInjectEmptyJsonBody,
+} from './common/utils/bootstrap.utils';
 
 const MAX_COVER_BYTES = 20 * 1024 * 1024;
 
 async function bootstrap() {
   const allowCloudflareInsights = parseBooleanEnv(process.env.CSP_ALLOW_CLOUDFLARE_INSIGHTS, false);
 
-  const adapter = new FastifyAdapter({ logger: false, trustProxy: parseTrustProxy(process.env.TRUST_PROXY) });
+  const adapter = new FastifyAdapter({ logger: false, trustProxy: parseTrustProxy(process.env.TRUST_PROXY), maxParamLength: 1000 });
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, adapter, { bufferLogs: true });
   app.useLogger(app.get(Logger));
 
   const fastify = adapter.getInstance();
 
-  // Kobo devices send Content-Type: application/json with empty bodies on GET/DELETE.
   // Fastify's default JSON parser rejects empty bodies, so we inject '{}' before parsing.
   // Proxies may also attach unsupported Content-Type values to bodyless PATCH/DELETE requests.
   fastify.addHook('preParsing', (request, _reply, payload, done) => {
     const ct = request.headers['content-type'] ?? '';
     const contentLength = request.headers['content-length'];
     const isEmpty = contentLength === '0' || contentLength === undefined;
-    const isJson = ct.startsWith('application/json');
 
-    if (isJson && isEmpty) {
-      delete request.headers['content-length'];
-      const fake = new Readable();
-      fake.push('{}');
-      fake.push(null);
-      done(null, fake);
+    if (shouldInjectEmptyJsonBody(request.method, request.headers)) {
+      done(null, buildEmptyJsonBodyStream(request.headers));
       return;
     }
 
@@ -52,6 +55,8 @@ async function bootstrap() {
 
     done(null, payload);
   });
+  // Reverse proxies can forward empty mutating requests with chunked transfer or an unsupported content type.
+  registerEmptyBodyContentTypeParser(fastify);
 
   // Echo pino-http's request ID so clients can correlate errors with server logs.
   fastify.addHook('onSend', (_request, reply, _payload, done) => {
@@ -65,7 +70,7 @@ async function bootstrap() {
   app.useWebSocketAdapter(new IoAdapter(app));
 
   app.setGlobalPrefix('api/v1', {
-    exclude: ['api/kobo/:deviceToken/(.*)'],
+    exclude: ['api/kobo/:deviceToken/(.*)', 'api/v3/(.*)', 'api/UserStorage/(.*)'],
   });
 
   app.useGlobalPipes(
@@ -77,6 +82,11 @@ async function bootstrap() {
   );
 
   app.useGlobalFilters(new GlobalExceptionFilter());
+
+  const appConfiguration = app.get<ConfigType<typeof appConfig>>(appConfig.KEY);
+  if (appConfiguration.swaggerEnabled) {
+    await setupSwaggerDocs(app, appConfiguration);
+  }
 
   await app.register(fastifyHelmet as never, {
     crossOriginOpenerPolicy: false,

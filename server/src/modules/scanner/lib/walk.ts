@@ -3,25 +3,10 @@ import { basename, dirname, join, relative } from 'path';
 
 import { classifyFile, isPrimaryFormat, isAudioFormat, type FileRole } from './classify';
 
-const PG_BIGINT_MAX = 9223372036854775807n; // 2^63 - 1: upper bound of PostgreSQL bigint
-
-/**
- * Convert a raw filesystem inode (bigint from stat with { bigint: true }) to a number
- * safe to store in PostgreSQL's signed bigint column.
- *
- * MergerFS and other synthetic filesystems produce unsigned 64-bit inodes that exceed
- * PostgreSQL's bigint range (2^63 - 1). Those are clamped to 0, which is the existing
- * sentinel value meaning "rename detection disabled for this file".
- */
-export function clampIno(ino: bigint): number {
-  if (ino > PG_BIGINT_MAX) return 0;
-  return Number(ino);
-}
-
 export interface FileStat {
   absolutePath: string;
   relPath: string; // relative to library folder root
-  ino: number;
+  ino: bigint;
   sizeBytes: number;
   mtime: Date;
   format: string | null;
@@ -45,7 +30,7 @@ const DIR_CONCURRENCY_LIMIT = 50;
 
 // Matches common disc subdirectory names: "CD 1", "Disc 2", "Disk03", "Part A", "Side IV"
 // but avoids broad matches like "Discography".
-const DISC_DIR_PATTERN = /^(?:cd|disc|disk|part|side)(?:[\s_-]*(?:\d+|[A-Za-z]|[IVXLCM]+))$/i;
+const DISC_DIR_PATTERN = /^(?:cd|disc|disk|part|pt|side)(?:[\s_-]*(?:\d+|[A-Za-z]|[IVXLCM]+))$/i;
 
 function isDiscDirectory(name: string): boolean {
   return DISC_DIR_PATTERN.test(name);
@@ -110,11 +95,9 @@ async function statFilesIntoAcc(
   for (const entry of statResults) {
     if (!entry) continue;
     const { full, s } = entry;
-    const ino = clampIno(s.ino);
+    const ino = s.ino;
     if (s.ino === 0n) {
       logger?.(`File has inode 0 (likely network mount), rename detection disabled: ${full}`);
-    } else if (ino === 0) {
-      logger?.(`File inode out of range for storage (MergerFS/synthetic inode ${s.ino}), rename detection disabled: ${full}`);
     }
     if (!acc.has(dir)) acc.set(dir, []);
     const { format, role } = classifyFile(full);
@@ -305,9 +288,21 @@ export async function findBookCandidates(
     if (primaryFiles.length === 0) continue;
 
     if (dir === libraryFolderPath) {
-      // Root-level: each primary file is its own book.
+      // Root-level: each primary file is its own book. Sidecar files (non-primary)
+      // are grouped with their primary by matching stem (e.g. book.epub + book.opf + book.jpg).
+      const sidecarsByStem = new Map<string, FileStat[]>();
+      for (const file of files) {
+        if (isPrimaryFormat(file.absolutePath)) continue;
+        const stem = stemOf(basename(file.absolutePath));
+        const existing = sidecarsByStem.get(stem);
+        if (existing) existing.push(file);
+        else sidecarsByStem.set(stem, [file]);
+      }
       for (const file of primaryFiles) {
-        candidates.push({ folderPath: file.absolutePath, files: [file] });
+        const stem = stemOf(basename(file.absolutePath));
+        const sidecars = sidecarsByStem.get(stem) ?? [];
+        sidecarsByStem.delete(stem);
+        candidates.push({ folderPath: file.absolutePath, files: [file, ...sidecars] });
       }
       continue;
     }
@@ -443,14 +438,10 @@ export async function buildSingleBookCandidate(
       const s = await stat(full, { bigint: true }).catch(() => null);
       if (!s) return null;
       const { format, role } = classifyFile(full);
-      const ino = clampIno(s.ino);
-      if (s.ino > PG_BIGINT_MAX) {
-        logger?.(`File inode out of range for storage (MergerFS/synthetic inode ${s.ino}), rename detection disabled: ${full}`);
-      }
       return {
         absolutePath: full,
         relPath: relative(libraryFolderPath, full),
-        ino,
+        ino: s.ino,
         sizeBytes: Number(s.size),
         mtime: s.mtime,
         format,

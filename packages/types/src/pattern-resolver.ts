@@ -1,6 +1,7 @@
-export const DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE = "<{authors:first}|Unknown Author>/<{series}/><{seriesIndex}. >{title}< ({year})>";
+export const DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE =
+  "<{authors:first}|Unknown Author>/<{series}/><{seriesIndex}. ><{title}|{originalFilename}>< ({year})>";
 export const DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER =
-  "<{authors:first}|Unknown Author>/<{series}/><{seriesIndex}. >{title}< ({year})>/<{seriesIndex}. >{title}< ({year})>";
+  "<{authors:first}|Unknown Author>/<{series}/><{seriesIndex}. ><{title}|{originalFilename}>< ({year})>/<{seriesIndex}. ><{title}|{originalFilename}>< ({year})>";
 export const DEFAULT_DOWNLOAD_PATTERN = "{originalFilename}";
 
 export const EXAMPLE_PATTERN_METADATA: Record<string, string> = {
@@ -32,8 +33,39 @@ export const PATTERN_TOKENS = [
 ] as const;
 
 export type PatternToken = (typeof PATTERN_TOKENS)[number]["token"];
+export type PathResolverOptions = {
+  sanitizeForCrossPlatform?: boolean;
+  replacementCharacter?: "_" | "-";
+};
+
+export const MAX_PATH_SEGMENT_BYTES = 255;
 
 const MODIFIER_PLACEHOLDER_REGEX = /\{([^}:]+)(?::([^}]+))?}/g;
+const WINDOWS_RESERVED_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  "COM1",
+  "COM2",
+  "COM3",
+  "COM4",
+  "COM5",
+  "COM6",
+  "COM7",
+  "COM8",
+  "COM9",
+  "LPT1",
+  "LPT2",
+  "LPT3",
+  "LPT4",
+  "LPT5",
+  "LPT6",
+  "LPT7",
+  "LPT8",
+  "LPT9",
+]);
+const INVALID_SEGMENT_CHARS_REGEX = /[<>:"/\\|?*\u0000-\u001F]/g;
 
 export function applyModifier(value: string, modifier: string, fieldName: string): string {
   if (!value) return value;
@@ -97,6 +129,41 @@ export function validatePattern(pattern: string): boolean {
   return validPatternRegex.test(pattern);
 }
 
+function normalizeResolverOptions(options?: PathResolverOptions): Required<PathResolverOptions> {
+  return {
+    sanitizeForCrossPlatform: options?.sanitizeForCrossPlatform ?? false,
+    replacementCharacter: options?.replacementCharacter === "-" ? "-" : "_",
+  };
+}
+
+function sanitizePathSegmentValue(value: string, replacementCharacter: "_" | "-"): string {
+  let sanitized = value
+    .replace(INVALID_SEGMENT_CHARS_REGEX, replacementCharacter)
+    .trim()
+    .replace(/[. ]+$/g, "");
+  if (!sanitized || sanitized === "." || sanitized === "..") {
+    sanitized = replacementCharacter;
+  }
+
+  const leadingStem = sanitized.split(".")[0]?.toUpperCase() ?? "";
+  if (WINDOWS_RESERVED_NAMES.has(leadingStem)) {
+    sanitized = `${sanitized}${replacementCharacter}`;
+  }
+
+  return sanitized;
+}
+
+function sanitizeResolutionValues(values: Record<string, string>, options: Required<PathResolverOptions>): Record<string, string> {
+  if (!options.sanitizeForCrossPlatform) return values;
+
+  const sanitized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(values)) {
+    sanitized[key] = sanitizePathSegmentValue(value, options.replacementCharacter);
+  }
+
+  return sanitized;
+}
+
 function normalizeDotExt(ext: string): string {
   const trimmed = ext.trim();
   if (!trimmed) return "";
@@ -119,6 +186,63 @@ function ensurePathLastSegmentExtension(path: string, dotExt: string): string {
   return segments.join("/");
 }
 
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (const char of value) {
+    const codePoint = char.codePointAt(0) ?? 0;
+    if (codePoint <= 0x7f) bytes += 1;
+    else if (codePoint <= 0x7ff) bytes += 2;
+    else if (codePoint <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let result = "";
+
+  for (const char of value) {
+    const charBytes = utf8ByteLength(char);
+    if (bytes + charBytes > maxBytes) break;
+    result += char;
+    bytes += charBytes;
+  }
+
+  return result;
+}
+
+function hashSegment(value: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of value) {
+    hash = Math.imul(hash ^ (char.codePointAt(0) ?? 0), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+function truncatePathSegment(segment: string, suffixToPreserve = ""): string {
+  if (!segment || utf8ByteLength(segment) <= MAX_PATH_SEGMENT_BYTES) return segment;
+
+  const preservedSuffix =
+    suffixToPreserve && segment.toLowerCase().endsWith(suffixToPreserve.toLowerCase()) ? segment.slice(-suffixToPreserve.length) : "";
+  const stem = preservedSuffix ? segment.slice(0, -preservedSuffix.length) : segment;
+  const truncationSuffix = `~${hashSegment(segment)}`;
+  const suffixBytes = utf8ByteLength(truncationSuffix) + utf8ByteLength(preservedSuffix);
+  const stemBudget = MAX_PATH_SEGMENT_BYTES - suffixBytes;
+
+  if (stemBudget <= 0) {
+    return truncateUtf8(segment, MAX_PATH_SEGMENT_BYTES);
+  }
+
+  return `${truncateUtf8(stem, stemBudget)}${truncationSuffix}${preservedSuffix}`;
+}
+
+function limitPathSegmentBytes(path: string, dotExt: string): string {
+  const segments = path.split("/");
+  const lastIdx = segments.length - 1;
+  return segments.map((segment, index) => truncatePathSegment(segment, index === lastIdx ? dotExt : "")).join("/");
+}
+
 /**
  * Resolves a file naming pattern to a relative path (no leading slash).
  * - Pattern ending with '/' → folder path; original filename is used as the file stem.
@@ -126,18 +250,20 @@ function ensurePathLastSegmentExtension(path: string, dotExt: string): string {
  *
  * Returns null if the pattern resolves to an empty string.
  */
-export function resolveUploadPath(pattern: string, values: Record<string, string>, ext: string): string | null {
-  const resolved = replacePlaceholders(pattern, values);
+export function resolveUploadPath(pattern: string, values: Record<string, string>, ext: string, options?: PathResolverOptions): string | null {
+  const normalizedOptions = normalizeResolverOptions(options);
+  const resolvedValues = sanitizeResolutionValues(values, normalizedOptions);
+  const resolved = replacePlaceholders(pattern, resolvedValues);
   if (!resolved) return null;
 
   const dotExt = normalizeDotExt(ext);
 
   if (resolved.endsWith("/")) {
-    const filename = ensureTrailingExtension(values["originalFilename"] ?? "upload", dotExt);
-    return resolved + filename;
+    const filename = ensureTrailingExtension(resolvedValues["originalFilename"] ?? "upload", dotExt);
+    return limitPathSegmentBytes(resolved + filename, dotExt);
   }
 
-  return ensurePathLastSegmentExtension(resolved, dotExt);
+  return limitPathSegmentBytes(ensurePathLastSegmentExtension(resolved, dotExt), dotExt);
 }
 
 /**
@@ -148,14 +274,16 @@ export function resolveUploadPath(pattern: string, values: Record<string, string
  *
  * Returns null if the pattern resolves to an empty filename.
  */
-export function resolveDownloadFilename(pattern: string, values: Record<string, string>, ext: string): string | null {
-  const resolved = replacePlaceholders(pattern, values);
+export function resolveDownloadFilename(pattern: string, values: Record<string, string>, ext: string, options?: PathResolverOptions): string | null {
+  const normalizedOptions = normalizeResolverOptions(options);
+  const resolvedValues = sanitizeResolutionValues(values, normalizedOptions);
+  const resolved = replacePlaceholders(pattern, resolvedValues);
   if (!resolved) return null;
 
   const dotExt = normalizeDotExt(ext);
-  let stem = resolved.endsWith("/") ? (values["originalFilename"] ?? "") : (resolved.split("/").filter(Boolean).pop() ?? "");
+  let stem = resolved.endsWith("/") ? (resolvedValues["originalFilename"] ?? "") : (resolved.split("/").filter(Boolean).pop() ?? "");
   stem = stem.trim();
   if (!stem) return null;
 
-  return ensureTrailingExtension(stem, dotExt);
+  return truncatePathSegment(ensureTrailingExtension(stem, dotExt), dotExt);
 }

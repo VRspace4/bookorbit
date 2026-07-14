@@ -28,6 +28,17 @@ describe('useReaderState', () => {
     expect(state.currentTheme.value.name).toBe('default')
   })
 
+  it('tracks fixed-layout EPUB spread mode', () => {
+    const state = useReaderState()
+
+    expect(state.fixedLayoutSpread.value).toBe('auto')
+
+    state.setFixedLayoutSpread('none')
+
+    expect(state.fixedLayoutSpread.value).toBe('none')
+    expect(state.state.value.fixedLayoutSpread).toBe('none')
+  })
+
   it('switches active mode between light and dark variants', () => {
     const state = useReaderState()
 
@@ -81,6 +92,24 @@ describe('useReaderState', () => {
 
     expect(renderer.removeAttribute).toHaveBeenCalledWith('margin')
     expect(renderer.setAttribute).toHaveBeenCalledWith('flow', 'scrolled')
+  })
+
+  it('can override renderer flow without changing saved reader state', () => {
+    const state = useReaderState()
+    state.setFlow('scrolled')
+
+    const renderer = {
+      setAttribute: vi.fn<(name: string, value: string) => void>(),
+      removeAttribute: vi.fn<(name: string) => void>(),
+      setStyles: vi.fn<(css: string) => void>(),
+    }
+
+    state.applyToRenderer(renderer, { flow: 'paginated' })
+
+    expect(state.flow.value).toBe('scrolled')
+    expect(renderer.setAttribute).toHaveBeenCalledWith('margin', '40px')
+    expect(renderer.setAttribute).toHaveBeenCalledWith('flow', 'paginated')
+    expect(renderer.removeAttribute).not.toHaveBeenCalledWith('margin')
   })
 
   it('generates CSS with optional font-family override and text controls', () => {

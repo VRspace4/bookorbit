@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
+import type { CustomMetadataFieldSummary } from '@bookorbit/types'
 
 const mockStorage: Record<string, string> = {}
 
@@ -16,9 +17,21 @@ vi.stubGlobal('localStorage', {
   },
 })
 
-import { useTableColumns, COLUMN_DEFS, LOCK_ROW_COLUMN_DEF, type ColumnId } from '../useTableColumns'
+import { useTableColumns, COLUMN_DEFS, LOCK_ROW_COLUMN_DEF } from '../useTableColumns'
 
-const ALL_IDS = COLUMN_DEFS.map((c) => c.id) as ColumnId[]
+const ALL_IDS = COLUMN_DEFS.map((c) => c.id)
+
+function makeField(overrides: Partial<CustomMetadataFieldSummary> = {}): CustomMetadataFieldSummary {
+  return {
+    id: 1,
+    label: 'Award',
+    type: 'text',
+    displayOrder: 0,
+    archivedAt: null,
+    enabledLibraryIds: [1],
+    ...overrides,
+  }
+}
 
 describe('useTableColumns', () => {
   beforeEach(() => {
@@ -72,7 +85,7 @@ describe('useTableColumns', () => {
   it('setColumnOrder reorders columns', () => {
     const { allColumns, setColumnOrder } = useTableColumns('library')
     const ids = allColumns.value.map((c) => c.id)
-    const reversed = [...ids].reverse() as ColumnId[]
+    const reversed = [...ids].reverse() as string[]
 
     setColumnOrder(reversed)
 
@@ -82,7 +95,7 @@ describe('useTableColumns', () => {
   it('setColumnOrder updates visibleColumns order', () => {
     const { visibleColumns, allColumns, setColumnOrder } = useTableColumns('library')
     const unpinnedVisible = allColumns.value.filter((c) => c.pinned === null && c.visible)
-    const reversedAll = allColumns.value.map((c) => c.id).reverse() as ColumnId[]
+    const reversedAll = allColumns.value.map((c) => c.id).reverse() as string[]
 
     setColumnOrder(reversedAll)
 
@@ -93,7 +106,7 @@ describe('useTableColumns', () => {
 
   it('setColumnOrder persists the new order to localStorage', async () => {
     const { allColumns, setColumnOrder } = useTableColumns('library')
-    const ids = allColumns.value.map((c) => c.id) as ColumnId[]
+    const ids = allColumns.value.map((c) => c.id) as string[]
     const swapped = [...ids]
     const unpinnedIdxs = swapped.reduce<number[]>((acc, id, i) => {
       const col = allColumns.value.find((c) => c.id === id)
@@ -118,7 +131,7 @@ describe('useTableColumns', () => {
   })
 
   it('setColumnOrder with unknown IDs: loadLayout filters them out and appends missing', () => {
-    const knownIds = COLUMN_DEFS.map((c) => c.id) as ColumnId[]
+    const knownIds = COLUMN_DEFS.map((c) => c.id) as string[]
     mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
       columnOrder: ['unknown_col', ...knownIds],
       hiddenColumns: [],
@@ -131,7 +144,7 @@ describe('useTableColumns', () => {
   })
 
   it('loadLayout initializes pinnedColumns as empty object when missing from storage', () => {
-    const knownIds = COLUMN_DEFS.map((c) => c.id) as ColumnId[]
+    const knownIds = COLUMN_DEFS.map((c) => c.id) as string[]
     mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
       columnOrder: knownIds,
       hiddenColumns: [],
@@ -144,7 +157,7 @@ describe('useTableColumns', () => {
   })
 
   it('loadLayout filters invalid pinnedColumns entries and keeps explicit null overrides', () => {
-    const knownIds = COLUMN_DEFS.map((c) => c.id) as ColumnId[]
+    const knownIds = COLUMN_DEFS.map((c) => c.id) as string[]
     mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
       columnOrder: knownIds,
       hiddenColumns: [],
@@ -381,5 +394,242 @@ describe('LOCK_ROW_COLUMN_DEF', () => {
 
   it('has a compact width suitable for icon button', () => {
     expect(LOCK_ROW_COLUMN_DEF.defaultWidth).toBeLessThanOrEqual(48)
+  })
+})
+
+describe('useTableColumns with customFields', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    Object.keys(mockStorage).forEach((k) => delete mockStorage[k])
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('includes custom columns in allColumns when customFields is provided', () => {
+    const customFields = ref([makeField({ id: 10, label: 'Award' })])
+    const { allColumns } = useTableColumns('library', customFields)
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+  })
+
+  it('custom columns are hidden by default', () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { allColumns } = useTableColumns('library', customFields)
+    const col = allColumns.value.find((c) => c.id === 'custom:10')
+    expect(col?.visible).toBe(false)
+  })
+
+  it('custom columns do not appear in visibleColumns when hidden', () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { visibleColumns } = useTableColumns('library', customFields)
+    expect(visibleColumns.value.some((c) => c.id === 'custom:10')).toBe(false)
+  })
+
+  it('toggleColumn makes a custom column visible', () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { toggleColumn, visibleColumns } = useTableColumns('library', customFields)
+    toggleColumn('custom:10')
+    expect(visibleColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+  })
+
+  it('custom column header reflects field label', () => {
+    const customFields = ref([makeField({ id: 10, label: 'My Award' })])
+    const { allColumns } = useTableColumns('library', customFields)
+    const col = allColumns.value.find((c) => c.id === 'custom:10')
+    expect(col?.header).toBe('My Award')
+  })
+
+  it('reconciliation: new custom field is appended to columnOrder as hidden', async () => {
+    const customFields = ref<CustomMetadataFieldSummary[]>([])
+    const { allColumns } = useTableColumns('library', customFields)
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(false)
+
+    customFields.value = [makeField({ id: 10 })]
+    await nextTick()
+
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+    const col = allColumns.value.find((c) => c.id === 'custom:10')
+    expect(col?.visible).toBe(false)
+  })
+
+  it('reconciliation: archived custom field is removed from columnOrder', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { allColumns, toggleColumn } = useTableColumns('library', customFields)
+    toggleColumn('custom:10')
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+
+    customFields.value = []
+    await nextTick()
+
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(false)
+  })
+
+  it('reconciliation: archived field is also removed from visible columns', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { toggleColumn, visibleColumns } = useTableColumns('library', customFields)
+    toggleColumn('custom:10')
+    expect(visibleColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+
+    customFields.value = []
+    await nextTick()
+
+    expect(visibleColumns.value.some((c) => c.id === 'custom:10')).toBe(false)
+  })
+
+  it('reconciliation: pinned custom field is also removed from pinnedColumns when archived', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { toggleColumn, pinColumn, layout } = useTableColumns('library', customFields)
+    toggleColumn('custom:10')
+    pinColumn('custom:10', 'right')
+    expect(layout.value.pinnedColumns?.['custom:10']).toBe('right')
+
+    customFields.value = []
+    await nextTick()
+
+    expect(layout.value.pinnedColumns?.['custom:10']).toBeUndefined()
+  })
+
+  it('stale custom:N IDs from localStorage are removed when those fields are gone', async () => {
+    mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
+      columnOrder: [...ALL_IDS, 'custom:99'],
+      hiddenColumns: ['custom:99'],
+      columnWidths: {},
+    })
+    // Start with empty fields, then provide a field set that does NOT include custom:99
+    const customFields = ref<CustomMetadataFieldSummary[]>([])
+    const { allColumns } = useTableColumns('library', customFields)
+    // Even before fields load, allColumns filters out undefined defs
+    expect(allColumns.value.some((c) => c.id === 'custom:99')).toBe(false)
+
+    // When a field set loads (first load trigger), orphaned IDs are cleaned from columnOrder
+    customFields.value = [makeField({ id: 1 })]
+    await nextTick()
+    expect(allColumns.value.some((c) => c.id === 'custom:99')).toBe(false)
+  })
+
+  it('custom:N IDs from localStorage are preserved visible when the field is still active', async () => {
+    mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
+      columnOrder: [...ALL_IDS, 'custom:10'],
+      hiddenColumns: [],
+      columnWidths: {},
+    })
+    const customFields = ref([makeField({ id: 10 })])
+    const { visibleColumns } = useTableColumns('library', customFields)
+    await nextTick()
+    // custom:10 was NOT in hiddenColumns in storage, so it should be visible (no watch clobbering it)
+    expect(visibleColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+  })
+
+  it('resetLayout resets custom columns to hidden but keeps them in the picker', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { allColumns, toggleColumn, resetLayout } = useTableColumns('library', customFields)
+    await nextTick()
+    toggleColumn('custom:10')
+    expect(allColumns.value.find((c) => c.id === 'custom:10')?.visible).toBe(true)
+
+    resetLayout()
+    await nextTick()
+
+    const col = allColumns.value.find((c) => c.id === 'custom:10')
+    expect(col).toBeDefined()
+    expect(col?.visible).toBe(false)
+  })
+
+  it('setLayout validates custom column IDs against active fields', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { setLayout, allColumns } = useTableColumns('library', customFields)
+    await nextTick()
+
+    setLayout({
+      columnOrder: [...ALL_IDS, 'custom:10', 'custom:99'],
+      hiddenColumns: [],
+      columnWidths: {},
+    })
+    await nextTick()
+
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(true)
+    expect(allColumns.value.some((c) => c.id === 'custom:99')).toBe(false)
+  })
+
+  it('setColumnWidth works for a custom column', () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { toggleColumn, setColumnWidth, visibleColumns } = useTableColumns('library', customFields)
+    toggleColumn('custom:10')
+    setColumnWidth('custom:10', 240)
+    const col = visibleColumns.value.find((c) => c.id === 'custom:10')
+    expect(col?.defaultWidth).toBe(240)
+  })
+
+  it('no custom columns when customFields is undefined', () => {
+    const { allColumns } = useTableColumns('library')
+    expect(allColumns.value.every((c) => !c.id.startsWith('custom:'))).toBe(true)
+  })
+
+  it('archived custom fields are excluded from columns', async () => {
+    const customFields = ref([makeField({ id: 10, archivedAt: '2025-01-01T00:00:00Z' })])
+    const { allColumns } = useTableColumns('library', customFields)
+    await nextTick()
+    expect(allColumns.value.some((c) => c.id === 'custom:10')).toBe(false)
+  })
+
+  it('combinedColumnMap includes both static and custom columns', () => {
+    const customFields = ref([makeField({ id: 10 })])
+    const { combinedColumnMap } = useTableColumns('library', customFields)
+    expect(combinedColumnMap.value.has('title')).toBe(true)
+    expect(combinedColumnMap.value.has('custom:10')).toBe(true)
+  })
+})
+
+describe('useTableColumns loadLayout with custom column widths', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    Object.keys(mockStorage).forEach((k) => delete mockStorage[k])
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('loads and preserves a user-set width for a custom:N column from storage', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
+      columnOrder: [...ALL_IDS, 'custom:10'],
+      hiddenColumns: [],
+      columnWidths: { 'custom:10': 300 },
+    })
+    const { visibleColumns } = useTableColumns('library', customFields)
+    await nextTick()
+    const col = visibleColumns.value.find((c) => c.id === 'custom:10')
+    expect(col?.defaultWidth).toBe(300)
+  })
+
+  it('ignores invalid (non-positive) widths for custom:N columns in storage', async () => {
+    const customFields = ref([makeField({ id: 10 })])
+    // hiddenColumns is empty so custom:10 starts visible from storage
+    mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
+      columnOrder: [...ALL_IDS, 'custom:10'],
+      hiddenColumns: [],
+      columnWidths: { 'custom:10': -5 },
+    })
+    const { visibleColumns } = useTableColumns('library', customFields)
+    await nextTick()
+    const col = visibleColumns.value.find((c) => c.id === 'custom:10')
+    // -5 is invalid so it falls back to the def's defaultWidth (160)
+    expect(col?.defaultWidth).toBe(160)
+  })
+
+  it('null-def rows are filtered from visibleColumns when combinedMap is missing an entry', async () => {
+    mockStorage['bookorbit:tableLayout:library'] = JSON.stringify({
+      columnOrder: [...ALL_IDS, 'custom:999'],
+      hiddenColumns: [],
+      columnWidths: {},
+    })
+    const customFields = ref<ReturnType<typeof makeField>[]>([])
+    const { visibleColumns } = useTableColumns('library', customFields)
+    await nextTick()
+    expect(visibleColumns.value.some((c) => c.id === 'custom:999')).toBe(false)
   })
 })

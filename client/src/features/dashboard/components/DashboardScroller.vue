@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, useAttrs } from 'vue'
-import { Aperture, BookMarked, ChevronLeft, ChevronRight, RefreshCw, Shuffle, Sparkles } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { Aperture, BookMarked, BookmarkPlus, ChevronLeft, ChevronRight, Headphones, ListOrdered, RefreshCw, Shuffle, Sparkles } from '@lucide/vue'
 
-import type { BookCard, ScrollerType } from '@bookorbit/types'
+import { isAudioFormat, type BookCard, type CoverAspectRatio, type ScrollerType } from '@bookorbit/types'
 import BookCoverCard from '@/features/book/components/BookCoverCard.vue'
 import BookQuickView from '@/features/book/components/BookQuickView.vue'
 import AddToCollectionSheet from '@/features/collection/components/AddToCollectionSheet.vue'
@@ -22,6 +23,7 @@ const props = defineProps<{
 }>()
 
 const attrs = useAttrs()
+const { t } = useI18n()
 
 const { books, loading, error, refresh } = useDashboardScroller(props.type, props.limit, props.smartScopeId)
 
@@ -33,12 +35,17 @@ function scrollBy(delta: number) {
 
 const typeIcon = computed(() => {
   if (props.type === 'continue-reading') return BookMarked
+  if (props.type === 'continue-listening') return Headphones
+  if (props.type === 'want-to-read') return BookmarkPlus
+  if (props.type === 'up-next-in-series') return ListOrdered
   if (props.type === 'recently-added') return Sparkles
   if (props.type === 'smart-scope') return Aperture
   return Shuffle
 })
 
 const SKELETONS = Array.from({ length: 8 })
+const DEFAULT_COVER_WIDTH_CLASS = 'w-[120px]'
+const SQUARE_AUDIOBOOK_COVER_WIDTH_CLASS = 'w-[150px]'
 
 type BookActionType = 'quick-view' | 'edit-metadata' | 'add-to-collection' | 'delete'
 
@@ -72,6 +79,18 @@ function handleBookAction(book: BookCard, action: BookActionType) {
   if (action === 'delete') {
     promptDelete(book.id)
   }
+}
+
+function isAudiobookCard(book: BookCard): boolean {
+  return book.files.some((file) => (file.format ? isAudioFormat(file.format) : false))
+}
+
+function coverWidthClass(book: BookCard): string {
+  return isAudiobookCard(book) ? SQUARE_AUDIOBOOK_COVER_WIDTH_CLASS : DEFAULT_COVER_WIDTH_CLASS
+}
+
+function coverAspectRatio(book: BookCard): CoverAspectRatio {
+  return isAudiobookCard(book) ? '1/1' : '2/3'
 }
 </script>
 
@@ -116,10 +135,10 @@ function handleBookAction(book: BookCard, action: BookActionType) {
 
     <!-- Error -->
     <div v-else-if="error" class="flex items-center gap-2.5 px-5 pb-4 pt-1 text-sm text-muted-foreground">
-      <span>Failed to load.</span>
+      <span>{{ t('dashboard.scroller.failedToLoad') }}</span>
       <button class="flex items-center gap-1.5 text-xs text-primary hover:underline" @click="refresh">
         <RefreshCw :size="12" />
-        Retry
+        {{ t('dashboard.common.retry') }}
       </button>
     </div>
 
@@ -129,23 +148,27 @@ function handleBookAction(book: BookCard, action: BookActionType) {
         <component :is="typeIcon" :size="20" class="text-muted-foreground/60" />
       </div>
       <p class="text-sm text-muted-foreground">
-        <template v-if="type === 'continue-reading'">No books in progress yet. Start reading one to see it here.</template>
-        <template v-else-if="type === 'recently-added'">No books in your library yet.</template>
-        <template v-else-if="type === 'smart-scope'">No books match this smartScope.</template>
-        <template v-else>No books found.</template>
+        <template v-if="type === 'continue-reading'">{{ t('dashboard.scroller.empty.continueReading') }}</template>
+        <template v-else-if="type === 'continue-listening'">{{ t('dashboard.scroller.empty.continueListening') }}</template>
+        <template v-else-if="type === 'want-to-read'">{{ t('dashboard.scroller.empty.wantToRead') }}</template>
+        <template v-else-if="type === 'up-next-in-series'">{{ t('dashboard.scroller.empty.upNextInSeries') }}</template>
+        <template v-else-if="type === 'recently-added'">{{ t('dashboard.scroller.empty.recentlyAdded') }}</template>
+        <template v-else-if="type === 'smart-scope'">{{ t('dashboard.scroller.empty.smartScope') }}</template>
+        <template v-else>{{ t('dashboard.scroller.empty.default') }}</template>
       </p>
     </div>
 
     <!-- Books row -->
-    <div v-else ref="scrollEl" class="flex gap-5 overflow-x-auto px-5 pb-5 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div v-else ref="scrollEl" class="flex items-end gap-5 overflow-x-auto px-5 pb-5 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       <div
         v-for="(book, index) in books"
         :key="book.id"
-        class="w-[120px] shrink-0"
+        class="shrink-0"
+        :class="coverWidthClass(book)"
         style="animation: dashboardFadeUp 0.35s ease both"
         :style="{ animationDelay: `${index * 35}ms` }"
       >
-        <BookCoverCard :book="book" @action="handleBookAction(book, $event)" />
+        <BookCoverCard :book="book" :cover-aspect-ratio="coverAspectRatio(book)" @action="handleBookAction(book, $event)" />
       </div>
     </div>
   </section>
@@ -154,7 +177,8 @@ function handleBookAction(book: BookCard, action: BookActionType) {
 
   <AddToCollectionSheet
     :open="addToCollectionOpen"
-    :book-ids="addToCollectionBookId ? [addToCollectionBookId] : []"
+    :selection-payload="{ bookIds: addToCollectionBookId ? [addToCollectionBookId] : [] }"
+    :selected-count="addToCollectionBookId ? 1 : 0"
     @update:open="addToCollectionOpen = $event"
   />
 

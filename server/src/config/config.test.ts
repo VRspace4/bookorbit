@@ -9,12 +9,18 @@ function resetEnv(): void {
   delete process.env.NODE_ENV;
   delete process.env.APP_URL;
   delete process.env.APP_VERSION;
+  delete process.env.OIDC_ALLOW_LOCAL_ISSUERS;
+  delete process.env.SWAGGER_ENABLED;
+  delete process.env.KOBO_CLOUDSCRAPER_PYTHON;
+  delete process.env.KOREADER_PLUGIN_PATH;
   delete process.env.DATABASE_URL;
   delete process.env.JWT_SECRET;
   delete process.env.JWT_EXPIRES_IN;
   delete process.env.JWT_REFRESH_EXPIRES_IN;
   delete process.env.SETUP_BOOTSTRAP_TOKEN;
   delete process.env.APP_DATA_PATH;
+  delete process.env.BOOK_DOCK_PATH;
+  delete process.env.LIBRARY_BROWSE_ROOT;
   delete process.env.FILE_WRITE_DEBOUNCE_MS;
   delete process.env.FILE_WRITE_MAX_CONCURRENT_WRITES;
   delete process.env.EMAIL_ENCRYPTION_KEY;
@@ -40,6 +46,12 @@ describe('config', () => {
       nodeEnv: 'development',
       appUrl: 'http://localhost:5173',
       version: 'Local build',
+      githubReleasesRepo: 'bookorbit/bookorbit',
+      githubReleasesToken: undefined,
+      oidcAllowLocalIssuers: false,
+      swaggerEnabled: false,
+      koboCloudscraperPython: undefined,
+      koreaderPluginSourcePath: undefined,
     });
   });
 
@@ -47,12 +59,29 @@ describe('config', () => {
     process.env.NODE_ENV = 'production';
     process.env.APP_URL = 'https://bookorbit.local';
     process.env.APP_VERSION = 'v2.3.4';
+    process.env.OIDC_ALLOW_LOCAL_ISSUERS = 'true';
+    process.env.SWAGGER_ENABLED = 'true';
+    process.env.KOBO_CLOUDSCRAPER_PYTHON = '/opt/bookorbit-python/bin/python';
+    process.env.KOREADER_PLUGIN_PATH = '/opt/koreader/bookorbit.koplugin';
+    process.env.GITHUB_RELEASES_REPO = 'acme/app';
+    process.env.GITHUB_RELEASES_TOKEN = 'ghp_example';
 
     expect(appConfig()).toEqual({
       nodeEnv: 'production',
       appUrl: 'https://bookorbit.local',
       version: 'v2.3.4',
+      githubReleasesRepo: 'acme/app',
+      githubReleasesToken: 'ghp_example',
+      oidcAllowLocalIssuers: true,
+      swaggerEnabled: true,
+      koboCloudscraperPython: '/opt/bookorbit-python/bin/python',
+      koreaderPluginSourcePath: '/opt/koreader/bookorbit.koplugin',
     });
+  });
+
+  it('falls back to false when OIDC_ALLOW_LOCAL_ISSUERS is invalid', () => {
+    process.env.OIDC_ALLOW_LOCAL_ISSUERS = 'maybe';
+    expect(appConfig().oidcAllowLocalIssuers).toBe(false);
   });
 
   it('uses defaults for database, auth, email, and migration config', () => {
@@ -64,6 +93,7 @@ describe('config', () => {
       refreshReuseWindow: '5m',
       refreshRotationGraceWindow: '60s',
       setupBootstrapToken: '',
+      refreshRotationGraceMs: 30_000,
     });
     expect(emailConfig().encryptionKey).toBe('');
     expect(migrationConfig().encryptionKey).toBe('');
@@ -72,10 +102,40 @@ describe('config', () => {
   it('resolves storage path from APP_DATA_PATH', () => {
     process.env.APP_DATA_PATH = './tmp/bookorbit-data';
     expect(storageConfig().appDataPath).toBe(resolve('./tmp/bookorbit-data'));
+    expect(storageConfig().bookDockPath).toBe(resolve('./tmp/bookorbit-data/book-dock'));
+    expect(storageConfig().libraryBrowseRoot).toBe(resolve('/'));
   });
 
   it('falls back storage path to /data when APP_DATA_PATH is not set', () => {
     expect(storageConfig().appDataPath).toBe(resolve('/data'));
+    expect(storageConfig().bookDockPath).toBe(resolve('/data/book-dock'));
+    expect(storageConfig().libraryBrowseRoot).toBe(resolve('/'));
+  });
+
+  it('uses BOOK_DOCK_PATH as the Book Dock storage path when provided', () => {
+    process.env.APP_DATA_PATH = '/data';
+    process.env.BOOK_DOCK_PATH = '/books/bookdrop';
+
+    expect(storageConfig().bookDockPath).toBe(resolve('/books/bookdrop'));
+  });
+
+  it('uses LIBRARY_BROWSE_ROOT as the library folder picker root when provided', () => {
+    process.env.LIBRARY_BROWSE_ROOT = '/books';
+
+    expect(storageConfig().libraryBrowseRoot).toBe(resolve('/books'));
+  });
+
+  it('ignores blank LIBRARY_BROWSE_ROOT values from compose defaults', () => {
+    process.env.LIBRARY_BROWSE_ROOT = '';
+
+    expect(storageConfig().libraryBrowseRoot).toBe(resolve('/'));
+  });
+
+  it('ignores blank BOOK_DOCK_PATH values from compose defaults', () => {
+    process.env.APP_DATA_PATH = '/custom/data';
+    process.env.BOOK_DOCK_PATH = '';
+
+    expect(storageConfig().bookDockPath).toBe(resolve('/custom/data/book-dock'));
   });
 
   it('parses positive integers for file-write config and floors decimal values', () => {

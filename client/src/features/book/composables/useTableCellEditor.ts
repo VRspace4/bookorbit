@@ -1,9 +1,9 @@
 import { ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
-import type { BookCard, ReadStatus } from '@bookorbit/types'
-import type { ColumnId } from './useTableColumns'
-import { COLUMN_DEF_MAP } from './useTableColumns'
+import type { BookCard, CustomMetadataBookValue, ReadStatus } from '@bookorbit/types'
+import type { ColumnId } from './tableColumnSchema'
+import { COLUMN_DEF_MAP, isCustomColumnId, parseCustomFieldId } from './tableColumnSchema'
 
 const METADATA_FIELD_MAP: Partial<Record<ColumnId, string>> = {
   title: 'title',
@@ -36,8 +36,18 @@ async function getApiErrorMessage(response: Response): Promise<string> {
 function getToastErrorMessage(err: unknown): string {
   if (!(err instanceof Error) || !err.message) return 'Failed to save - change reverted'
   if (err.message.startsWith('Metadata fields are locked:')) return err.message
+  if (err.message.includes('is not enabled for this book'))
+    return 'This field is not available for this book - enable it for the library in Settings first'
   if (/^HTTP \d+$/.test(err.message)) return 'Failed to save - change reverted'
   return err.message
+}
+
+function patchCustomMetadata(current: CustomMetadataBookValue[], fieldId: number, value: unknown): CustomMetadataBookValue[] {
+  const exists = current.some((f) => f.fieldId === fieldId)
+  if (exists) {
+    return current.map((f) => (f.fieldId === fieldId ? { ...f, value: value as CustomMetadataBookValue['value'] } : f))
+  }
+  return current
 }
 
 export function useTableCellEditor() {
@@ -45,15 +55,15 @@ export function useTableCellEditor() {
   const editValue = ref<unknown>(null)
   const isSaving = ref(false)
 
-  function cellKey(bookId: number, columnId: ColumnId): string {
+  function cellKey(bookId: number, columnId: string): string {
     return `${bookId}:${columnId}`
   }
 
-  function isActive(bookId: number, columnId: ColumnId): boolean {
+  function isActive(bookId: number, columnId: string): boolean {
     return activeCellKey.value === cellKey(bookId, columnId)
   }
 
-  function activateCell(bookId: number, columnId: ColumnId, currentValue: unknown): void {
+  function activateCell(bookId: number, columnId: string, currentValue: unknown): void {
     if (isSaving.value) return
     activeCellKey.value = cellKey(bookId, columnId)
     editValue.value = Array.isArray(currentValue) ? [...(currentValue as unknown[])] : currentValue
@@ -64,13 +74,13 @@ export function useTableCellEditor() {
     editValue.value = null
   }
 
-  function cancelCellIfActive(bookId: number, columnId: ColumnId): boolean {
+  function cancelCellIfActive(bookId: number, columnId: string): boolean {
     if (!isActive(bookId, columnId)) return false
     cancelCell()
     return true
   }
 
-  async function saveCell(bookId: number, columnId: ColumnId, newValue: unknown, onSuccess: SaveCallback): Promise<void> {
+  async function saveCell(bookId: number, columnId: string, newValue: unknown, onSuccess: SaveCallback, currentBook?: BookCard): Promise<void> {
     if (isSaving.value) return
     isSaving.value = true
     const sourceCellKey = cellKey(bookId, columnId)
@@ -91,6 +101,21 @@ export function useTableCellEditor() {
           updatedReadStatus = { status, source: 'manual', startedAt: null, finishedAt: null, updatedAt: new Date().toISOString() }
         }
         onSuccess({ readStatus: updatedReadStatus })
+      } else if (isCustomColumnId(columnId)) {
+        const fieldId = parseCustomFieldId(columnId)
+        if (fieldId === null) {
+          toast.error(`Cannot save: invalid custom field ID in "${columnId}"`)
+          if (activeCellKey.value === sourceCellKey) cancelCellIfActive(bookId, columnId)
+          return
+        }
+        const res = await api(`/api/v1/books/${bookId}/metadata`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customMetadata: [{ fieldId, value: newValue }] }),
+        })
+        if (!res.ok) throw new Error(await getApiErrorMessage(res as Response))
+        const existing = currentBook?.customMetadata ?? []
+        onSuccess({ customMetadata: patchCustomMetadata(existing, fieldId, newValue) })
       } else {
         if (columnId === 'narrators') {
           const res = await api(`/api/v1/books/${bookId}/metadata`, {
@@ -103,7 +128,7 @@ export function useTableCellEditor() {
           if (activeCellKey.value === sourceCellKey) cancelCellIfActive(bookId, columnId)
           return
         }
-        const metaKey = METADATA_FIELD_MAP[columnId]
+        const metaKey = METADATA_FIELD_MAP[columnId as ColumnId]
         if (!metaKey) {
           toast.error(`Cannot save: unsupported field "${columnId}"`)
           if (activeCellKey.value === sourceCellKey) cancelCellIfActive(bookId, columnId)
@@ -115,7 +140,11 @@ export function useTableCellEditor() {
           body: JSON.stringify({ [metaKey]: newValue }),
         })
         if (!res.ok) throw new Error(await getApiErrorMessage(res as Response))
-        onSuccess({ [columnId as keyof BookCard]: newValue } as Partial<BookCard>)
+        onSuccess(
+          columnId === 'publishedYear'
+            ? ({ publishedDate: null, publishedYear: newValue as number | null } satisfies Partial<BookCard>)
+            : ({ [columnId as keyof BookCard]: newValue } as Partial<BookCard>),
+        )
       }
       if (activeCellKey.value === sourceCellKey) cancelCellIfActive(bookId, columnId)
     } catch (err) {
@@ -126,7 +155,7 @@ export function useTableCellEditor() {
     }
   }
 
-  function navigateCell(direction: 'next' | 'prev', editableColumnIds: ColumnId[], book: BookCard, currentColumnId: ColumnId): void {
+  function navigateCell(direction: 'next' | 'prev', editableColumnIds: string[], book: BookCard, currentColumnId: string): void {
     const idx = editableColumnIds.indexOf(currentColumnId)
     if (idx === -1) return
     const nextIdx = direction === 'next' ? idx + 1 : idx - 1
@@ -137,7 +166,7 @@ export function useTableCellEditor() {
     activateCell(book.id, nextCol, targetValue)
   }
 
-  function navigateRow(direction: 'up' | 'down', books: BookCard[], currentBookId: number, columnId: ColumnId): void {
+  function navigateRow(direction: 'up' | 'down', books: BookCard[], currentBookId: number, columnId: string): void {
     const idx = books.findIndex((book) => book.id === currentBookId)
     if (idx === -1) return
     const nextIdx = direction === 'down' ? idx + 1 : idx - 1
@@ -148,8 +177,8 @@ export function useTableCellEditor() {
     activateCell(nextBook.id, columnId, targetValue)
   }
 
-  const navigateRowUp = (books: BookCard[], currentBookId: number, columnId: ColumnId) => navigateRow('up', books, currentBookId, columnId)
-  const navigateRowDown = (books: BookCard[], currentBookId: number, columnId: ColumnId) => navigateRow('down', books, currentBookId, columnId)
+  const navigateRowUp = (books: BookCard[], currentBookId: number, columnId: string) => navigateRow('up', books, currentBookId, columnId)
+  const navigateRowDown = (books: BookCard[], currentBookId: number, columnId: string) => navigateRow('down', books, currentBookId, columnId)
 
   return {
     activeCellKey,

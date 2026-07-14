@@ -18,6 +18,11 @@ interface TimedProviderResult {
   timedOut: boolean;
 }
 
+export interface StoredProviderContext {
+  libraryId: number;
+  providerIds: Partial<Record<MetadataProviderKey, string>>;
+}
+
 @Injectable()
 export class MetadataFetchService {
   private static readonly PROVIDER_TIMEOUT_MS = PROVIDER_TIMEOUTS.SCRAPE;
@@ -45,6 +50,24 @@ export class MetadataFetchService {
   }
 
   async getStoredProviderIds(bookId: number, user: RequestUser): Promise<Partial<Record<MetadataProviderKey, string>>> {
+    const context = await this.getStoredProviderContext(bookId, user);
+    return context.providerIds;
+  }
+
+  async getStoredProviderContext(bookId: number, user: RequestUser): Promise<StoredProviderContext> {
+    const row = await this.getAccessibleStoredProviderIdsRow(bookId, user);
+    return {
+      libraryId: row.libraryId,
+      providerIds: this.mapStoredProviderIds(row),
+    };
+  }
+
+  async getAccessibleBookLibraryId(bookId: number, user: RequestUser): Promise<number> {
+    const row = await this.getAccessibleStoredProviderIdsRow(bookId, user);
+    return row.libraryId;
+  }
+
+  private async getAccessibleStoredProviderIdsRow(bookId: number, user: RequestUser): Promise<StoredProviderIdsRow> {
     const row = await this.metadataFetchRepository.findStoredProviderIdsRow(bookId);
     if (!row) {
       throw new NotFoundException(`Book ${bookId} not found`);
@@ -57,7 +80,7 @@ export class MetadataFetchService {
       }
     }
 
-    return this.mapStoredProviderIds(row);
+    return row;
   }
 
   private mapStoredProviderIds(row: StoredProviderIdsRow): Partial<Record<MetadataProviderKey, string>> {
@@ -69,7 +92,12 @@ export class MetadataFetchService {
       [MetadataProviderKey.OPEN_LIBRARY]: row.openLibraryId ?? undefined,
       [MetadataProviderKey.ITUNES]: row.itunesId ?? undefined,
       [MetadataProviderKey.AUDIBLE]: row.audibleId ?? undefined,
+      [MetadataProviderKey.LIBROFM]: row.librofmId ?? undefined,
+      [MetadataProviderKey.KOBO]: row.koboId ?? undefined,
       [MetadataProviderKey.COMICVINE]: row.comicvineId ?? undefined,
+      [MetadataProviderKey.RANOBEDB]: row.ranobedbId ?? undefined,
+      [MetadataProviderKey.LUBIMYCZYTAC]: row.lubimyczytacId ?? undefined,
+      [MetadataProviderKey.ALADIN]: row.aladinId ?? undefined,
     };
   }
 
@@ -78,7 +106,7 @@ export class MetadataFetchService {
     this.logger.log(`[metadata_fetch.provider_search] [start] provider=${provider.key} - provider fetch started`);
 
     try {
-      const { results, timedOut } = await this.withTimeout((signal) => this.fetchFromProvider(provider, { ...params, signal }));
+      const { results, timedOut } = await this.withTimeout((signal) => this.fetchFromProvider(provider, { ...params, signal }), provider.timeoutMs);
 
       if (timedOut) {
         this.logger.warn(
@@ -112,24 +140,40 @@ export class MetadataFetchService {
   private async fetchFromProvider(provider: MetadataProvider, params: MetadataSearchParams): Promise<MetadataCandidate[]> {
     const existingProviderId = params.existingProviderIds?.[provider.key];
     if (isIdentifiable(provider) && existingProviderId) {
-      const lookupResult = await provider.lookupById(existingProviderId, params.signal);
-      return lookupResult ? [lookupResult] : [];
+      const lookupResult = await provider.lookupById(existingProviderId, params.signal, params);
+      if (lookupResult) {
+        const rankedLookup = filterAndRank([lookupResult], params, 1);
+        if (rankedLookup.length > 0) return rankedLookup;
+      }
     }
 
-    const primary = filterAndRank(await provider.search(params), params);
-    const hasIsbn = hasText(params.isbn);
-    if (!hasIsbn) return primary;
-
-    if (primary.length > 0) return primary;
-
-    const hasFallbackTerms = hasText(params.title) || hasText(params.author);
-    if (!hasFallbackTerms) return [];
-
-    const fallbackParams: MetadataSearchParams = { ...params, isbn: undefined };
-    return filterAndRank(await provider.search(fallbackParams), fallbackParams);
+    return this.searchAndRankProvider(provider, params);
   }
 
-  private withTimeout(run: (signal: AbortSignal) => Promise<MetadataCandidate[]>): Promise<TimedProviderResult> {
+  private async searchAndRankProvider(provider: MetadataProvider, params: MetadataSearchParams): Promise<MetadataCandidate[]> {
+    const primary = filterAndRank(await provider.search(params), params);
+    if (primary.length > 0) return primary;
+
+    const hasIsbn = hasText(params.isbn);
+    const hasFallbackTerms = hasText(params.title) || hasText(params.author);
+    if (hasIsbn && hasFallbackTerms) {
+      const fallbackParams: MetadataSearchParams = { ...params, isbn: undefined };
+      const fallback = filterAndRank(await provider.search(fallbackParams), fallbackParams);
+      if (fallback.length > 0) return fallback;
+    }
+
+    if (params.maxCandidatesPerProvider === undefined && hasText(params.title) && hasText(params.author)) {
+      const titleOnlyParams: MetadataSearchParams = { ...params, author: undefined, isbn: undefined };
+      return filterAndRank(await provider.search(titleOnlyParams), titleOnlyParams);
+    }
+
+    return [];
+  }
+
+  private withTimeout(
+    run: (signal: AbortSignal) => Promise<MetadataCandidate[]>,
+    timeoutMs: number = MetadataFetchService.PROVIDER_TIMEOUT_MS,
+  ): Promise<TimedProviderResult> {
     let timer: NodeJS.Timeout | undefined;
     const controller = new AbortController();
 
@@ -137,7 +181,7 @@ export class MetadataFetchService {
       timer = setTimeout(() => {
         controller.abort();
         resolve({ results: [], timedOut: true });
-      }, MetadataFetchService.PROVIDER_TIMEOUT_MS);
+      }, timeoutMs);
     });
 
     const providerPromise = run(controller.signal)

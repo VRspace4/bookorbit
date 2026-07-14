@@ -1,5 +1,6 @@
+import { EPUB_BOOK_FILE_WRITE_FIELDS } from '@bookorbit/types';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
-import type { BookWritePayload } from '../../interfaces/book-write-payload.interface';
+import type { BookWritePayload, BookWritePayloadKey } from '../../interfaces/book-write-payload.interface';
 import { EPUB_PROVIDER_IDENTIFIER_SCHEMES } from '../../file-write.constants';
 import { BOOKORBIT_NS_PREFIX as APP_WRITE_NAMESPACE, BOOKORBIT_NS_URI as APP_NS_URI } from '../shared/bookorbit-ns';
 import { resolveFieldsWritten } from '../shared/resolve-fields-written';
@@ -23,6 +24,9 @@ const writerBuilder = new XMLBuilder({
 });
 
 type OrderedNode = Record<string, unknown>;
+
+const EPUB_WRITABLE_FIELDS = new Set<BookWritePayloadKey>(EPUB_BOOK_FILE_WRITE_FIELDS);
+const CUSTOM_METADATA_PREFIX = `${APP_WRITE_NAMESPACE}:custom:`;
 
 function attr(obj: Record<string, unknown>, key: string): string {
   const v = obj[key];
@@ -234,9 +238,9 @@ function buildFreshMetadata(payload: BookWritePayload, epubVersion: 3 | 2, uidNo
     nodes.push(makeTextNode('dc:publisher', payload.publisher));
   }
 
-  // dc:date
-  if (payload.publishedYear != null) {
-    nodes.push(makeTextNode('dc:date', `${payload.publishedYear}-01-01`));
+  const publicationDate = resolvePublicationDate(payload);
+  if (publicationDate != null) {
+    nodes.push(makeTextNode('dc:date', publicationDate));
   }
 
   // dc:language
@@ -318,6 +322,18 @@ function buildFreshMetadata(payload: BookWritePayload, epubVersion: 3 | 2, uidNo
     }
   }
 
+  // Custom metadata
+  for (const entry of payload.customMetadata ?? []) {
+    if (entry.value === null || entry.value === undefined) continue;
+    const property = `${CUSTOM_METADATA_PREFIX}${entry.key}`;
+    const value = String(entry.value);
+    if (epubVersion === 3) {
+      nodes.push({ meta: [{ '#text': value }], ':@': { '@_property': property } } as OrderedNode);
+    } else {
+      nodes.push(makeEmptyNode('meta', { '@_name': property, '@_content': value }));
+    }
+  }
+
   // EPUB3: dcterms:modified is required
   if (epubVersion === 3) {
     nodes.push({ meta: [{ '#text': new Date().toISOString() }], ':@': { '@_property': 'dcterms:modified' } } as OrderedNode);
@@ -366,8 +382,18 @@ export function build(opfXml: string, payload: BookWritePayload): { newOpfXml: s
 
   const newOpfXml = String(writerBuilder.build(parsed));
 
-  return { newOpfXml, fieldsWritten: resolveFieldsWritten(payload) };
+  const customFieldsWritten = (payload.customMetadata ?? [])
+    .filter((entry) => entry.value !== null && entry.value !== undefined)
+    .map((entry) => `customMetadata:${entry.key}`);
+
+  return { newOpfXml, fieldsWritten: [...resolveFieldsWritten(payload, EPUB_WRITABLE_FIELDS), ...customFieldsWritten] };
 }
 
 type EpubProviderIdentifierKey = keyof typeof EPUB_PROVIDER_IDENTIFIER_SCHEMES;
 const EPUB_PROVIDER_IDENTIFIER_KEYS = Object.keys(EPUB_PROVIDER_IDENTIFIER_SCHEMES) as EpubProviderIdentifierKey[];
+
+function resolvePublicationDate(payload: BookWritePayload): string | null {
+  if (payload.publishedDate != null && payload.publishedDate !== '') return payload.publishedDate;
+  if (payload.publishedYear != null) return `${payload.publishedYear}-01-01`;
+  return null;
+}

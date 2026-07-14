@@ -17,13 +17,20 @@ function makeRepo(): jest.Mocked<AppSettingsRepository> {
     listPublic: vi.fn().mockResolvedValue([]),
     findByKey: vi.fn().mockResolvedValue(undefined),
     findMany: vi.fn().mockResolvedValue([]),
+    findExistingLibraryIds: vi.fn().mockResolvedValue([]),
     updateByKey: vi.fn().mockResolvedValue(null),
     upsert: vi.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<AppSettingsRepository>;
 }
 
-function makeConfig(nodeEnv = 'development'): ConfigService {
-  return { get: vi.fn().mockReturnValue(nodeEnv) } as unknown as ConfigService;
+function makeConfig(nodeEnv = 'development', oidcAllowLocalIssuers = false): ConfigService {
+  return {
+    get: vi.fn().mockImplementation((key: string) => {
+      if (key === 'app.nodeEnv') return nodeEnv;
+      if (key === 'app.oidcAllowLocalIssuers') return oidcAllowLocalIssuers;
+      return undefined;
+    }),
+  } as unknown as ConfigService;
 }
 
 describe('AppSettingsService', () => {
@@ -65,6 +72,13 @@ describe('AppSettingsService', () => {
     });
   });
 
+  describe('setValue', () => {
+    it('upserts the key/value pair', async () => {
+      await service.setValue('achievements_backfill_signature', 'abc123');
+      expect(repo.upsert).toHaveBeenCalledWith('achievements_backfill_signature', 'abc123');
+    });
+  });
+
   describe('update', () => {
     it('returns updated setting', async () => {
       const setting = { key: 'allow_registration', value: 'true' };
@@ -98,6 +112,21 @@ describe('AppSettingsService', () => {
     it('returns true when value is unrecognised', async () => {
       repo.findByKey.mockResolvedValue({ key: 'book_dock_auto_fetch_metadata', value: 'yes' } as never);
       expect(await service.isBookDockAutoFetchEnabled()).toBe(true);
+    });
+  });
+
+  describe('Book Dock paused state', () => {
+    it('defaults to false when setting is absent', async () => {
+      repo.findByKey.mockResolvedValue(undefined);
+      expect(await service.isBookDockPaused()).toBe(false);
+    });
+
+    it('reads and writes paused state as string booleans', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'book_dock_paused', value: 'true' } as never);
+      expect(await service.isBookDockPaused()).toBe(true);
+
+      await service.setBookDockPaused(false);
+      expect(repo.upsert).toHaveBeenCalledWith('book_dock_paused', 'false');
     });
   });
 
@@ -215,6 +244,37 @@ describe('AppSettingsService', () => {
     });
   });
 
+  describe('default library access', () => {
+    it('returns an empty list when no setting is stored', async () => {
+      repo.findByKey.mockResolvedValue(undefined);
+      await expect(service.getDefaultLibraryAccess()).resolves.toEqual({ libraryIds: [] });
+    });
+
+    it('normalizes stored IDs and drops IDs for deleted libraries', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'default_library_access', value: JSON.stringify({ libraryIds: [3, 3, 5, -1, '7'] }) } as never);
+      repo.findExistingLibraryIds.mockResolvedValue([5, 3]);
+
+      await expect(service.getDefaultLibraryAccess()).resolves.toEqual({ libraryIds: [3, 5] });
+      expect(repo.findExistingLibraryIds).toHaveBeenCalledWith([3, 5]);
+    });
+
+    it('stores validated default library IDs', async () => {
+      repo.findExistingLibraryIds.mockResolvedValue([2, 4]);
+
+      const result = await service.setDefaultLibraryAccess({ libraryIds: [2, 4] });
+
+      expect(result).toEqual({ libraryIds: [2, 4] });
+      expect(repo.upsert).toHaveBeenCalledWith('default_library_access', JSON.stringify({ libraryIds: [2, 4] }));
+    });
+
+    it('rejects unknown default library IDs', async () => {
+      repo.findExistingLibraryIds.mockResolvedValue([2]);
+
+      await expect(service.setDefaultLibraryAccess({ libraryIds: [2, 9] })).rejects.toThrow(BadRequestException);
+      expect(repo.upsert).not.toHaveBeenCalled();
+    });
+  });
+
   describe('testOidcConnection', () => {
     const discoveryDoc = {
       issuer: 'https://kc.example.com/realms/main',
@@ -285,7 +345,7 @@ describe('AppSettingsService', () => {
     it('passes allowLocal: true when nodeEnv is development', async () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await service.testOidcConnection('https://auth.bookorbit.app:9093');
-      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://auth.bookorbit.app:9093', { allowLocal: true });
+      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://auth.bookorbit.app:9093', { allowLocal: true, allowPrivate: true });
       vi.unstubAllGlobals();
     });
 
@@ -293,7 +353,15 @@ describe('AppSettingsService', () => {
       const prodService = new AppSettingsService(repo, makeConfig('production'));
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await prodService.testOidcConnection('https://kc.example.com/realms/main');
-      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: false });
+      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: false, allowPrivate: false });
+      vi.unstubAllGlobals();
+    });
+
+    it('passes allowLocal: true when production override is enabled', async () => {
+      const prodService = new AppSettingsService(repo, makeConfig('production', true));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
+      await prodService.testOidcConnection('https://kc.example.com/realms/main');
+      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: true, allowPrivate: true });
       vi.unstubAllGlobals();
     });
   });
@@ -399,6 +467,31 @@ describe('AppSettingsService', () => {
       await service.setUploadPatternBookPerFolder('{title}/');
       expect(repo.upsert).toHaveBeenCalledWith('upload_file_pattern_book_per_folder', '{title}/');
     });
+
+    it('cross-platform path sanitization defaults to true when not set', async () => {
+      repo.findByKey.mockResolvedValue(undefined);
+      expect(await service.isCrossPlatformPathSanitizationEnabled()).toBe(true);
+    });
+
+    it('cross-platform path sanitization returns true when enabled', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'cross_platform_path_sanitization_enabled', value: 'true' } as never);
+      expect(await service.isCrossPlatformPathSanitizationEnabled()).toBe(true);
+    });
+
+    it('upserts cross-platform path sanitization setting', async () => {
+      await service.setCrossPlatformPathSanitizationEnabled(true);
+      expect(repo.upsert).toHaveBeenCalledWith('cross_platform_path_sanitization_enabled', 'true');
+    });
+
+    it('cross-platform path sanitization returns false when explicitly set to false', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'cross_platform_path_sanitization_enabled', value: 'false' } as never);
+      expect(await service.isCrossPlatformPathSanitizationEnabled()).toBe(false);
+    });
+
+    it('upserts false when setCrossPlatformPathSanitizationEnabled is called with false', async () => {
+      await service.setCrossPlatformPathSanitizationEnabled(false);
+      expect(repo.upsert).toHaveBeenCalledWith('cross_platform_path_sanitization_enabled', 'false');
+    });
   });
 
   describe('getMetadataScoreWeights', () => {
@@ -446,6 +539,40 @@ describe('AppSettingsService', () => {
     it('returns true when value is "true"', async () => {
       repo.findByKey.mockResolvedValue({ key: 'update_check_enabled', value: 'true' } as never);
       expect(await service.isUpdateCheckEnabled()).toBe(true);
+    });
+  });
+
+  describe('getMaxUploadSizeMb', () => {
+    it('returns 500 by default when setting is absent', async () => {
+      repo.findByKey.mockResolvedValue(undefined);
+      expect(await service.getMaxUploadSizeMb()).toBe(500);
+    });
+
+    it('returns parsed integer value when valid', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '1024' } as never);
+      expect(await service.getMaxUploadSizeMb()).toBe(1024);
+    });
+
+    it('returns 500 when value is invalid or <= 0', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '-50' } as never);
+      expect(await service.getMaxUploadSizeMb()).toBe(500);
+    });
+  });
+
+  describe('update max_upload_size_mb validation', () => {
+    it('allows valid positive integer', async () => {
+      const setting = { key: 'max_upload_size_mb', value: '1000' };
+      repo.updateByKey.mockResolvedValue(setting as never);
+      const result = await service.update('max_upload_size_mb', '1000');
+      expect(result).toEqual(setting);
+      expect(repo.updateByKey).toHaveBeenCalledWith('max_upload_size_mb', '1000');
+    });
+
+    it('throws BadRequestException for invalid integer', async () => {
+      await expect(service.update('max_upload_size_mb', 'invalid')).rejects.toThrow(BadRequestException);
+      await expect(service.update('max_upload_size_mb', '-10')).rejects.toThrow(BadRequestException);
+      await expect(service.update('max_upload_size_mb', '0')).rejects.toThrow(BadRequestException);
+      expect(repo.updateByKey).not.toHaveBeenCalled();
     });
   });
 });

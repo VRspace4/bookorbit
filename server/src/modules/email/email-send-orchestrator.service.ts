@@ -5,6 +5,7 @@ import { NotificationType } from '@bookorbit/types';
 import type { BookFile } from '../../db/schema';
 import type { RequestUser } from '../../common/types/request-user';
 import { NotificationService } from '../notification/notification.service';
+import { BookService } from '../book/book.service';
 import { EmailBookAccessService } from './email-book-access.service';
 import { EmailFileSelector } from './email-file-selector';
 import { EmailPreferencesService } from './email-preferences.service';
@@ -40,6 +41,7 @@ export class EmailSendOrchestrator {
   private readonly logger = new Logger(EmailSendOrchestrator.name);
 
   constructor(
+    private readonly bookService: BookService,
     private readonly bookAccessService: EmailBookAccessService,
     private readonly providerResolver: EmailProviderResolver,
     private readonly fileSelector: EmailFileSelector,
@@ -57,11 +59,12 @@ export class EmailSendOrchestrator {
     const startedAt = Date.now();
     const requestedRecipientCount = (dto.recipientIds?.length ?? 0) + (dto.groupIds?.length ?? 0);
     this.logger.log(
-      `[${EMAIL_SEND_EVENT}] [start] userId=${user.id} bookCount=${dto.bookIds.length} requestedRecipientCount=${requestedRecipientCount} - send enqueue started`,
+      `[${EMAIL_SEND_EVENT}] [start] userId=${user.id} selectionMode=${dto.query ? 'query' : 'ids'} requestedCount=${dto.bookIds?.length ?? 0} requestedRecipientCount=${requestedRecipientCount} - send enqueue started`,
     );
 
     try {
-      await this.bookAccessService.assertUserCanAccessBooks(dto.bookIds, user);
+      const bookIds = [...new Set(await this.bookService.resolveSelectionToIds(dto, user))];
+      await this.bookAccessService.assertUserCanAccessBooks(bookIds, user);
 
       const preferences = await this.preferencesService.getForUser(user.id);
       const tasks = await this.buildTasks(dto, user, preferences?.defaultTemplateId ?? null);
@@ -71,7 +74,7 @@ export class EmailSendOrchestrator {
 
       let queued = 0;
       for (const task of tasks) {
-        for (const bookId of dto.bookIds) {
+        for (const bookId of bookIds) {
           await this.enqueueOne({ ...task, bookId, userId: user.id }, resolved, dto.fileId ?? null, user);
           queued++;
         }

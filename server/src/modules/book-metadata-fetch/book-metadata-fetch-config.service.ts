@@ -56,15 +56,22 @@ export class BookMetadataFetchConfigService {
   }
 
   async getLibraryConfigWithLastRun(libraryId: number): Promise<BookMetadataFetchLibraryConfig> {
-    const [config, library] = await Promise.all([
-      this.getEffectiveConfig(libraryId),
+    const [global, library] = await Promise.all([
+      this.getGlobalConfig(),
       this.db.query.libraries.findFirst({
         where: eq(libraries.id, libraryId),
-        columns: { bookMetadataFetchLastRunAt: true, bookMetadataFetchLastQueuedCount: true },
+        columns: {
+          bookMetadataFetchConfig: true,
+          bookMetadataFetchLastRunAt: true,
+          bookMetadataFetchLastQueuedCount: true,
+        },
       }),
     ]);
+    const override = library?.bookMetadataFetchConfig ?? null;
+    const config = this.deepMerge(global, override);
     return {
       ...config,
+      override,
       lastRunAt: library?.bookMetadataFetchLastRunAt?.toISOString() ?? null,
       lastQueuedCount: library?.bookMetadataFetchLastQueuedCount ?? null,
     };

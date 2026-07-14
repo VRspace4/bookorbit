@@ -15,6 +15,7 @@ import {
   HardDrive,
   Layers,
   ListChecks,
+  MonitorSmartphone,
   PieChart,
   Rabbit,
   ShieldCheck,
@@ -23,7 +24,7 @@ import {
   Users,
   Waypoints,
   Zap,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 import { DEFAULT_LIBRARY_CHART_ORDER, DEFAULT_USER_CHART_ORDER, type StatisticsChartId } from '@bookorbit/types'
 
@@ -156,6 +157,12 @@ export const STATISTICS_CHART_META: Record<StatisticsChartId, StatisticsChartMet
     label: 'Reading Heatmap',
     icon: Calendar,
     size: '2x1',
+    category: 'user',
+  },
+  'reading-source-distribution': {
+    label: 'Where You Read',
+    icon: MonitorSmartphone,
+    size: '1x1',
     category: 'user',
   },
   'peak-reading-hours': {

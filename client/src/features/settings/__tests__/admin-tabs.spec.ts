@@ -3,12 +3,12 @@ import { ADMIN_TABS, ADMIN_TAB_INFO, normalizeAdminTab } from '../lib/admin-tabs
 
 describe('admin-tabs', () => {
   describe('ADMIN_TABS', () => {
-    it('contains exactly users and oidc', () => {
-      expect(ADMIN_TABS).toEqual(['users', 'oidc'])
+    it('contains exactly users, account activity, oidc, and magic-links', () => {
+      expect(ADMIN_TABS).toEqual(['users', 'account-activity', 'oidc', 'magic-links'])
     })
 
-    it('has length 2', () => {
-      expect(ADMIN_TABS.length).toBe(2)
+    it('has length 4', () => {
+      expect(ADMIN_TABS.length).toBe(4)
     })
   })
 
@@ -19,15 +19,9 @@ describe('admin-tabs', () => {
       }
     })
 
-    it('every entry has navLabel, titleLabel, subtitle, and permission', () => {
+    it('every entry has a permission', () => {
       for (const tab of ADMIN_TABS) {
         const info = ADMIN_TAB_INFO[tab]
-        expect(typeof info.navLabel).toBe('string')
-        expect(info.navLabel.length).toBeGreaterThan(0)
-        expect(typeof info.titleLabel).toBe('string')
-        expect(info.titleLabel.length).toBeGreaterThan(0)
-        expect(typeof info.subtitle).toBe('string')
-        expect(info.subtitle.length).toBeGreaterThan(0)
         expect(info.permission === null || typeof info.permission === 'string').toBe(true)
       }
     })
@@ -40,14 +34,13 @@ describe('admin-tabs', () => {
       expect(ADMIN_TAB_INFO.oidc.permission).toBe('manage_app_settings')
     })
 
-    it('users entry has correct labels', () => {
-      expect(ADMIN_TAB_INFO.users.navLabel).toBe('Users')
-      expect(ADMIN_TAB_INFO.users.titleLabel).toBe('Users')
+    it('account activity entry has view_user_activity permission', () => {
+      expect(ADMIN_TAB_INFO['account-activity'].permission).toBe('view_user_activity')
+      expect(ADMIN_TAB_INFO['account-activity'].titleKey).toBe('titles.admin.account-activity')
     })
 
-    it('oidc entry has correct labels', () => {
-      expect(ADMIN_TAB_INFO.oidc.navLabel).toBe('OIDC / SSO')
-      expect(ADMIN_TAB_INFO.oidc.titleLabel).toBe('OIDC / SSO')
+    it('magic-links entry is superuser-only', () => {
+      expect(ADMIN_TAB_INFO['magic-links'].permission).toBeNull()
     })
   })
 
@@ -78,6 +71,14 @@ describe('admin-tabs', () => {
 
     it('returns oidc when given "oidc"', () => {
       expect(normalizeAdminTab('oidc')).toBe('oidc')
+    })
+
+    it('returns account-activity when requested', () => {
+      expect(normalizeAdminTab('account-activity')).toBe('account-activity')
+    })
+
+    it('returns magic-links when given "magic-links"', () => {
+      expect(normalizeAdminTab('magic-links')).toBe('magic-links')
     })
 
     it('is case-sensitive (Users is not valid)', () => {

@@ -19,7 +19,45 @@ function epub3Opf(metadataBody: string): string {
 </package>`;
 }
 
+function epub2OpfFull(parts: { metadata?: string; manifest?: string; guide?: string }): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    ${parts.metadata ?? ''}
+  </metadata>
+  ${parts.manifest != null ? `<manifest>${parts.manifest}</manifest>` : ''}
+  ${parts.guide != null ? `<guide>${parts.guide}</guide>` : ''}
+</package>`;
+}
+
+function epub3OpfFull(parts: { metadata?: string; manifest?: string }): string {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    ${parts.metadata ?? ''}
+  </metadata>
+  ${parts.manifest != null ? `<manifest>${parts.manifest}</manifest>` : ''}
+</package>`;
+}
+
 describe('parseOpf', () => {
+  describe('custom metadata', () => {
+    it('parses BookOrbit custom metadata from named and property meta tags', () => {
+      const xml = epub3Opf(`
+        <meta property="bookorbit:custom:original_title">Le Comte de Monte-Cristo</meta>
+        <meta name="bookorbit:custom:novel_source" content="https://example.test/novel" />
+        <meta property="bookorbit:custom:bad-key">Ignored</meta>
+      `);
+
+      const r = parseOpf(xml);
+
+      expect(r.customMetadata).toEqual({
+        original_title: 'Le Comte de Monte-Cristo',
+        novel_source: 'https://example.test/novel',
+      });
+    });
+  });
+
   describe('title', () => {
     it('parses a single title', () => {
       const r = parseOpf(epub2Opf('<dc:title>Foundation</dc:title>'));
@@ -305,6 +343,14 @@ describe('parseOpf', () => {
       const r = parseOpf(epub2Opf(''));
       expect(r.tags).toHaveLength(0);
     });
+
+    it('parses bookorbit:tags from an EPUB3 property meta with a JSON array value', () => {
+      const xml = epub3Opf(`
+        <meta property="bookorbit:tags">["Science Fiction", "Classic"]</meta>
+      `);
+      const r = parseOpf(xml);
+      expect(r.tags).toEqual(['Science Fiction', 'Classic']);
+    });
   });
 
   describe('provider identifiers', () => {
@@ -338,10 +384,22 @@ describe('parseOpf', () => {
       expect(r.hardcoverId).toBe('new-orleans-rush');
     });
 
+    it('parses Hardcover edition ID from opf:scheme, urn, and prefix formats', () => {
+      expect(parseOpf(epub2Opf(`<dc:identifier opf:scheme="HARDCOVER_EDITION">8941973</dc:identifier>`)).hardcoverEditionId).toBe('8941973');
+      expect(parseOpf(epub2Opf(`<dc:identifier>urn:hardcover_edition:8941974</dc:identifier>`)).hardcoverEditionId).toBe('8941974');
+      expect(parseOpf(epub3Opf(`<dc:identifier>hardcover-edition:8941975</dc:identifier>`)).hardcoverEditionId).toBe('8941975');
+    });
+
     it('parses iTunes ID from opf:scheme attribute', () => {
       const xml = epub2Opf(`<dc:identifier opf:scheme="ITUNES">123456789</dc:identifier>`);
       const r = parseOpf(xml);
       expect(r.itunesId).toBe('123456789');
+    });
+
+    it('parses RanobeDB ID from opf:scheme attribute', () => {
+      const xml = epub2Opf(`<dc:identifier opf:scheme="RANOBEDB">ranobe-1</dc:identifier>`);
+      const r = parseOpf(xml);
+      expect(r.ranobedbId).toBe('ranobe-1');
     });
 
     it('parses provider IDs from legacy urn: format (backward compat)', () => {
@@ -350,16 +408,66 @@ describe('parseOpf', () => {
         <dc:identifier>urn:amazon:198893706X</dc:identifier>
         <dc:identifier>urn:goodreads:42129393</dc:identifier>
         <dc:identifier>urn:openlibrary:OL20652610W</dc:identifier>
+        <dc:identifier>urn:ranobedb:ranobe-legacy</dc:identifier>
       `);
       const r = parseOpf(xml);
       expect(r.googleBooksId).toBe('RPyFDwAAQBAJ');
       expect(r.amazonId).toBe('198893706X');
       expect(r.goodreadsId).toBe('42129393');
       expect(r.openLibraryId).toBe('OL20652610W');
+      expect(r.ranobedbId).toBe('ranobe-legacy');
+    });
+
+    it('normalizes urn-prefixed provider IDs when opf:scheme is present', () => {
+      const xml = epub2Opf(`
+        <dc:identifier opf:scheme="GOOGLE">urn:google:RPyFDwAAQBAJ</dc:identifier>
+        <dc:identifier opf:scheme="AMAZON">urn:amazon:0345415000</dc:identifier>
+        <dc:identifier opf:scheme="GOODREADS">urn:goodreads:42129393</dc:identifier>
+        <dc:identifier opf:scheme="HARDCOVER">urn:hardcover:new-orleans-rush</dc:identifier>
+        <dc:identifier opf:scheme="OPENLIBRARY">urn:openlibrary:OL20652610W</dc:identifier>
+        <dc:identifier opf:scheme="RANOBEDB">urn:ranobedb:ranobe-legacy</dc:identifier>
+        <dc:identifier opf:scheme="KOBO">urn:kobo:kobo-123</dc:identifier>
+        <dc:identifier opf:scheme="LUBIMYCZYTAC">urn:lubimyczytac:lub-99999</dc:identifier>
+        <dc:identifier opf:scheme="ALADIN">urn:aladin:9791190090018</dc:identifier>
+        <dc:identifier opf:scheme="ITUNES">urn:itunes:123456789</dc:identifier>
+      `);
+      const r = parseOpf(xml);
+      expect(r.googleBooksId).toBe('RPyFDwAAQBAJ');
+      expect(r.amazonId).toBe('0345415000');
+      expect(r.goodreadsId).toBe('42129393');
+      expect(r.hardcoverId).toBe('new-orleans-rush');
+      expect(r.openLibraryId).toBe('OL20652610W');
+      expect(r.ranobedbId).toBe('ranobe-legacy');
+      expect(r.koboId).toBe('kobo-123');
+      expect(r.lubimyczytacId).toBe('lub-99999');
+      expect(r.aladinId).toBe('9791190090018');
+      expect(r.itunesId).toBe('123456789');
+    });
+
+    it('normalizes the real-world Amazon URN value that exceeds the amazon_id column when untrimmed', () => {
+      const r = parseOpf(epub2Opf(`<dc:identifier opf:scheme="AMAZON">urn:amazon:0345415000</dc:identifier>`));
+      expect(r.amazonId).toBe('0345415000');
+      expect(r.amazonId).toHaveLength(10);
+    });
+
+    it('normalizes provider URN prefixes case-insensitively', () => {
+      const xml = epub2Opf(`
+        <dc:identifier>URN:GOOGLE:CaseSensitiveGoogleId</dc:identifier>
+        <dc:identifier>URN:AMAZON:B0G3YRNY6Y</dc:identifier>
+      `);
+      const r = parseOpf(xml);
+      expect(r.googleBooksId).toBe('CaseSensitiveGoogleId');
+      expect(r.amazonId).toBe('B0G3YRNY6Y');
+    });
+
+    it('normalizes Amazon alias prefixes when opf:scheme is present', () => {
+      expect(parseOpf(epub2Opf(`<dc:identifier opf:scheme="AMAZON">amazon:B0G3YRNY6Y</dc:identifier>`)).amazonId).toBe('B0G3YRNY6Y');
+      expect(parseOpf(epub2Opf(`<dc:identifier opf:scheme="AMAZON">asin:B0G3YRNY6Y</dc:identifier>`)).amazonId).toBe('B0G3YRNY6Y');
+      expect(parseOpf(epub2Opf(`<dc:identifier opf:scheme="AMAZON">mobi-asin:B0ABCDEFGH</dc:identifier>`)).amazonId).toBe('B0ABCDEFGH');
     });
 
     it('opf:scheme format wins over urn: when both are present for the same provider', () => {
-      // urn: appears first in document order — scheme should still win
+      // urn: appears first in document order; scheme should still win.
       const xml = epub2Opf(`
         <dc:identifier>urn:google:OLD_URN_VALUE</dc:identifier>
         <dc:identifier opf:scheme="GOOGLE">SCHEME_VALUE</dc:identifier>
@@ -384,6 +492,7 @@ describe('parseOpf', () => {
         <dc:identifier opf:scheme="AMAZON">198893706X</dc:identifier>
         <dc:identifier opf:scheme="GOODREADS">42129393</dc:identifier>
         <dc:identifier opf:scheme="OPENLIBRARY">OL20652610W</dc:identifier>
+        <dc:identifier opf:scheme="RANOBEDB">ranobe-1</dc:identifier>
       `);
       const r = parseOpf(xml);
       expect(r.isbn13).toBe('9781635766271');
@@ -391,6 +500,7 @@ describe('parseOpf', () => {
       expect(r.amazonId).toBe('198893706X');
       expect(r.goodreadsId).toBe('42129393');
       expect(r.openLibraryId).toBe('OL20652610W');
+      expect(r.ranobedbId).toBe('ranobe-1');
     });
 
     it('is case-insensitive for opf:scheme values', () => {
@@ -405,8 +515,244 @@ describe('parseOpf', () => {
       expect(r.amazonId).toBeNull();
       expect(r.goodreadsId).toBeNull();
       expect(r.hardcoverId).toBeNull();
+      expect(r.hardcoverEditionId).toBeNull();
       expect(r.openLibraryId).toBeNull();
+      expect(r.ranobedbId).toBeNull();
       expect(r.itunesId).toBeNull();
+    });
+
+    describe('Calibre prefix:value identifiers (opf3 fallback)', () => {
+      it('parses every known provider prefix from bare prefix:value text', () => {
+        const xml = epub3Opf(`
+          <dc:identifier>amazon:B0G3YRNY6Y</dc:identifier>
+          <dc:identifier>goodreads:244564568</dc:identifier>
+          <dc:identifier>google:ABCD1234</dc:identifier>
+          <dc:identifier>openlibrary:OL99999999W</dc:identifier>
+          <dc:identifier>hardcover:test-book-slug</dc:identifier>
+          <dc:identifier>hardcover_edition:8941973</dc:identifier>
+          <dc:identifier>kobo:test-kobo-id</dc:identifier>
+          <dc:identifier>itunes:987654321</dc:identifier>
+          <dc:identifier>lubimyczytac:lub-99999</dc:identifier>
+          <dc:identifier>ranobedb:ranobe-999</dc:identifier>
+        `);
+        const r = parseOpf(xml);
+        expect(r.amazonId).toBe('B0G3YRNY6Y');
+        expect(r.goodreadsId).toBe('244564568');
+        expect(r.googleBooksId).toBe('ABCD1234');
+        expect(r.openLibraryId).toBe('OL99999999W');
+        expect(r.hardcoverId).toBe('test-book-slug');
+        expect(r.hardcoverEditionId).toBe('8941973');
+        expect(r.koboId).toBe('test-kobo-id');
+        expect(r.itunesId).toBe('987654321');
+        expect(r.lubimyczytacId).toBe('lub-99999');
+        expect(r.ranobedbId).toBe('ranobe-999');
+      });
+
+      it('maps both asin: and mobi-asin: to amazonId', () => {
+        expect(parseOpf(epub3Opf(`<dc:identifier>asin:B0G3YRNY6Y</dc:identifier>`)).amazonId).toBe('B0G3YRNY6Y');
+        expect(parseOpf(epub3Opf(`<dc:identifier>mobi-asin:B0ABCDEFGH</dc:identifier>`)).amazonId).toBe('B0ABCDEFGH');
+      });
+
+      it('lets opf:scheme win over prefix:value for the same provider', () => {
+        const xml = epub2Opf(`
+          <dc:identifier>amazon:PREFIX_ASIN</dc:identifier>
+          <dc:identifier opf:scheme="AMAZON">SCHEME_ASIN</dc:identifier>
+        `);
+        expect(parseOpf(xml).amazonId).toBe('SCHEME_ASIN');
+      });
+
+      it('lets urn: win over prefix:value for the same provider', () => {
+        const xml = epub2Opf(`
+          <dc:identifier>amazon:PREFIX_ASIN</dc:identifier>
+          <dc:identifier>urn:amazon:URN_ASIN</dc:identifier>
+        `);
+        expect(parseOpf(xml).amazonId).toBe('URN_ASIN');
+      });
+
+      it('uses prefix:value only as a fallback when scheme and urn are absent', () => {
+        const xml = epub3Opf(`<dc:identifier>amazon:ONLY_PREFIX</dc:identifier>`);
+        expect(parseOpf(xml).amazonId).toBe('ONLY_PREFIX');
+      });
+
+      it('ignores unknown prefixes', () => {
+        const xml = epub3Opf(`
+          <dc:identifier>uuid:123e4567-e89b-12d3-a456-426614174000</dc:identifier>
+          <dc:identifier>calibre:12345</dc:identifier>
+          <dc:identifier>doi:10.1000/xyz123</dc:identifier>
+        `);
+        const r = parseOpf(xml);
+        expect(r.amazonId).toBeNull();
+        expect(r.googleBooksId).toBeNull();
+        expect(r.goodreadsId).toBeNull();
+        expect(r.openLibraryId).toBeNull();
+      });
+
+      it('still parses isbn:VALUE as an ISBN, not a provider id', () => {
+        const r = parseOpf(epub3Opf(`<dc:identifier>isbn:9780441013593</dc:identifier>`));
+        expect(r.isbn13).toBe('9780441013593');
+        expect(r.amazonId).toBeNull();
+        expect(r.googleBooksId).toBeNull();
+      });
+
+      it('splits on the first colon only, keeping colons in the id', () => {
+        const r = parseOpf(epub3Opf(`<dc:identifier>hardcover:some:slug</dc:identifier>`));
+        expect(r.hardcoverId).toBe('some:slug');
+      });
+
+      it('matches the prefix case-insensitively while preserving the id case', () => {
+        const r = parseOpf(epub3Opf(`<dc:identifier>AMAZON:B0G3YRNY6Y</dc:identifier>`));
+        expect(r.amazonId).toBe('B0G3YRNY6Y');
+      });
+
+      it('ignores a known prefix with an empty value', () => {
+        const r = parseOpf(epub3Opf(`<dc:identifier>amazon:</dc:identifier>`));
+        expect(r.amazonId).toBeNull();
+      });
+
+      it('ignores a bare identifier with no colon', () => {
+        const r = parseOpf(epub3Opf(`<dc:identifier>SOMEBAREID</dc:identifier>`));
+        expect(r.amazonId).toBeNull();
+        expect(r.googleBooksId).toBeNull();
+      });
+
+      it('parses a full real-world Calibre 9.x opf3 identifier block', () => {
+        const xml = epub3Opf(`
+          <dc:identifier>urn:uuid:5f3c2b1a-0000-4444-8888-aaaabbbbcccc</dc:identifier>
+          <dc:identifier>amazon:B0G3YRNY6Y</dc:identifier>
+          <dc:identifier>goodreads:244564568</dc:identifier>
+          <dc:identifier>google:ABCD1234</dc:identifier>
+        `);
+        const r = parseOpf(xml);
+        expect(r.amazonId).toBe('B0G3YRNY6Y');
+        expect(r.goodreadsId).toBe('244564568');
+        expect(r.googleBooksId).toBe('ABCD1234');
+      });
+    });
+  });
+
+  describe('Calibre user_metadata (pageCount & subtitle)', () => {
+    it('parses page count from a #pagecount custom column', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#pagecount":{"#value#":353}}</meta>`);
+      expect(parseOpf(xml).pageCount).toBe(353);
+    });
+
+    it('parses page count from a #page_count custom column', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#page_count":{"#value#":400}}</meta>`);
+      expect(parseOpf(xml).pageCount).toBe(400);
+    });
+
+    it('parses a string numeric page count value', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#page_count":{"#value#":"400"}}</meta>`);
+      expect(parseOpf(xml).pageCount).toBe(400);
+    });
+
+    it('parses subtitle from a #subtitle custom column', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#subtitle":{"#value#":"A Subtitle"}}</meta>`);
+      expect(parseOpf(xml).subtitle).toBe('A Subtitle');
+    });
+
+    it('parses page count and subtitle together from one blob (issue sample)', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#pagecount":{"#value#":353},"#subtitle":{"#value#":"TEST-SUBTITLE"}}</meta>`);
+      const r = parseOpf(xml);
+      expect(r.pageCount).toBe(353);
+      expect(r.subtitle).toBe('TEST-SUBTITLE');
+    });
+
+    it('prefers bookorbit:page_count over the Calibre user_metadata page count', () => {
+      const xml = epub3Opf(`
+        <meta property="bookorbit:page_count">100</meta>
+        <meta property="calibre:user_metadata">{"#pagecount":{"#value#":353}}</meta>
+      `);
+      expect(parseOpf(xml).pageCount).toBe(100);
+    });
+
+    it('prefers the EPUB3 title-type subtitle over the Calibre user_metadata subtitle', () => {
+      const xml = epub3Opf(`
+        <dc:title id="t1">Main Title</dc:title>
+        <dc:title id="t2">Real Subtitle</dc:title>
+        <meta refines="#t2" property="title-type">subtitle</meta>
+        <meta property="calibre:user_metadata">{"#subtitle":{"#value#":"Calibre Subtitle"}}</meta>
+      `);
+      expect(parseOpf(xml).subtitle).toBe('Real Subtitle');
+    });
+
+    it('ignores a malformed user_metadata JSON blob without throwing', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{not valid json}</meta>`);
+      const r = parseOpf(xml);
+      expect(r.pageCount).toBeNull();
+      expect(r.subtitle).toBeNull();
+    });
+
+    it('ignores a zero or negative page count value', () => {
+      expect(parseOpf(epub3Opf(`<meta property="calibre:user_metadata">{"#pagecount":{"#value#":0}}</meta>`)).pageCount).toBeNull();
+      expect(parseOpf(epub3Opf(`<meta property="calibre:user_metadata">{"#pagecount":{"#value#":-5}}</meta>`)).pageCount).toBeNull();
+    });
+
+    it('ignores a non-string subtitle value', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#subtitle":{"#value#":42}}</meta>`);
+      expect(parseOpf(xml).subtitle).toBeNull();
+    });
+
+    it('leaves fields null when the blob has only unrelated columns', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#myrating":{"#value#":5}}</meta>`);
+      const r = parseOpf(xml);
+      expect(r.pageCount).toBeNull();
+      expect(r.subtitle).toBeNull();
+    });
+
+    it('ignores a blob that is a JSON array rather than an object', () => {
+      const r = parseOpf(epub3Opf(`<meta property="calibre:user_metadata">[1,2,3]</meta>`));
+      expect(r.pageCount).toBeNull();
+      expect(r.subtitle).toBeNull();
+    });
+
+    it('ignores a column whose value is not an object with a #value# key', () => {
+      const r = parseOpf(epub3Opf(`<meta property="calibre:user_metadata">{"#pagecount":353,"#subtitle":{}}</meta>`));
+      expect(r.pageCount).toBeNull();
+      expect(r.subtitle).toBeNull();
+    });
+
+    it('ignores a non-numeric page count value', () => {
+      const r = parseOpf(epub3Opf(`<meta property="calibre:user_metadata">{"#pagecount":{"#value#":"lots"}}</meta>`));
+      expect(r.pageCount).toBeNull();
+    });
+
+    it('parses extra tags from a #extra_tags column with a JSON array value', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#extra_tags":{"#value#":["Horror","Historical Fiction"]}}</meta>`);
+      expect(parseOpf(xml).tags).toEqual(['Horror', 'Historical Fiction']);
+    });
+
+    it('parses extra tags from a #extra_tags column with a pipe-delimited string value', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#extra_tags":{"#value#":"Horror|Historical Fiction"}}</meta>`);
+      expect(parseOpf(xml).tags).toEqual(['Horror', 'Historical Fiction']);
+    });
+
+    it('parses extra tags from a #extra_tags column with a comma-delimited string value (Calibre tags column format)', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#extra_tags":{"#value#":"Horror, Historical Fiction"}}</meta>`);
+      expect(parseOpf(xml).tags).toEqual(['Horror', 'Historical Fiction']);
+    });
+
+    it('prefers pipe over comma when both are present in a #extra_tags string value', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#extra_tags":{"#value#":"History, Modern|Fantasy"}}</meta>`);
+      expect(parseOpf(xml).tags).toEqual(['History, Modern', 'Fantasy']);
+    });
+
+    it('merges #extra_tags with bookorbit:tags and deduplicates', () => {
+      const xml = epub3Opf(`
+        <meta property="bookorbit:tags">["Horror","Classic"]</meta>
+        <meta property="calibre:user_metadata">{"#extra_tags":{"#value#":["Classic","Historical Fiction"]}}</meta>
+      `);
+      expect(parseOpf(xml).tags).toEqual(['Horror', 'Classic', 'Historical Fiction']);
+    });
+
+    it('contributes nothing when #extra_tags value is an empty array', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#extra_tags":{"#value#":[]}}</meta>`);
+      expect(parseOpf(xml).tags).toHaveLength(0);
+    });
+
+    it('ignores a non-string, non-array #extra_tags value', () => {
+      const xml = epub3Opf(`<meta property="calibre:user_metadata">{"#extra_tags":{"#value#":42}}</meta>`);
+      expect(parseOpf(xml).tags).toHaveLength(0);
     });
   });
 
@@ -422,6 +768,92 @@ describe('parseOpf', () => {
       const r = parseOpf('<package/>');
       expect(r.title).toBeNull();
       expect(r.authors).toHaveLength(0);
+    });
+  });
+
+  describe('coverHref', () => {
+    it('returns null when no guide, manifest cover-image, or calibre cover meta is present', () => {
+      const r = parseOpf(epub2Opf('<dc:title>No Cover</dc:title>'));
+      expect(r.coverHref).toBeNull();
+    });
+
+    it('extracts href from EPUB2 guide reference with type="cover"', () => {
+      const xml = epub2OpfFull({
+        metadata: '<dc:title>Test</dc:title>',
+        guide: '<reference type="cover" title="Cover" href="cover.jpg"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('cover.jpg');
+    });
+
+    it('is case-insensitive for the guide reference type attribute', () => {
+      const xml = epub2OpfFull({
+        guide: '<reference type="Cover" href="COVER.JPG"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('COVER.JPG');
+    });
+
+    it('ignores guide references whose type is not "cover"', () => {
+      const xml = epub2OpfFull({
+        guide: '<reference type="toc" href="toc.html"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBeNull();
+    });
+
+    it('skips guide references with an empty href and continues to next source', () => {
+      const xml = epub2OpfFull({
+        guide: '<reference type="cover" href=""/>',
+        manifest: '<item id="cover-img" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('images/cover.jpg');
+    });
+
+    it('extracts href from EPUB3 manifest item with properties="cover-image"', () => {
+      const xml = epub3OpfFull({
+        manifest: '<item id="cover-img" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('images/cover.jpg');
+    });
+
+    it('extracts href when "cover-image" is one of multiple space-separated manifest item properties', () => {
+      const xml = epub3OpfFull({
+        manifest: '<item id="cover-img" href="cover.png" media-type="image/png" properties="cover-image mathml"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('cover.png');
+    });
+
+    it('resolves Calibre meta name="cover" through manifest item id lookup', () => {
+      const xml = epub2OpfFull({
+        metadata: '<meta name="cover" content="cover-image-id"/>',
+        manifest: '<item id="cover-image-id" href="images/cover.jpg" media-type="image/jpeg"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('images/cover.jpg');
+    });
+
+    it('returns null when Calibre cover meta points to a manifest item id that does not exist', () => {
+      const xml = epub2OpfFull({
+        metadata: '<meta name="cover" content="missing-id"/>',
+        manifest: '<item id="other-id" href="other.jpg" media-type="image/jpeg"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBeNull();
+    });
+
+    it('guide reference takes priority over EPUB3 manifest cover-image', () => {
+      const xml = epub2OpfFull({
+        manifest: '<item id="cover-img" href="manifest-cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
+        guide: '<reference type="cover" href="guide-cover.jpg"/>',
+      });
+      expect(parseOpf(xml).coverHref).toBe('guide-cover.jpg');
+    });
+
+    it('manifest cover-image takes priority over Calibre meta lookup', () => {
+      const xml = epub3OpfFull({
+        metadata: '<meta name="cover" content="calibre-img"/>',
+        manifest: `
+          <item id="calibre-img" href="calibre-cover.jpg" media-type="image/jpeg"/>
+          <item id="epub3-cover" href="epub3-cover.jpg" media-type="image/jpeg" properties="cover-image"/>
+        `,
+      });
+      expect(parseOpf(xml).coverHref).toBe('epub3-cover.jpg');
     });
   });
 });

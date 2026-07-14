@@ -2,22 +2,46 @@ import { computed, ref } from 'vue'
 import { api } from '@/lib/api'
 import { BOOK_METADATA_LOCK_FIELDS, type BookDetail, type BookMetadataLockField } from '@bookorbit/types'
 
+interface UseMetadataLocksOptions {
+  deferred?: boolean
+}
+
 function normalizeLockedFields(fields: readonly BookMetadataLockField[]): BookMetadataLockField[] {
   const unique = new Set(fields)
   return BOOK_METADATA_LOCK_FIELDS.filter((field) => unique.has(field))
 }
 
-export function useMetadataLocks() {
+function lockKey(fields: readonly BookMetadataLockField[]): string {
+  return JSON.stringify(normalizeLockedFields(fields))
+}
+
+export function useMetadataLocks(options: UseMetadataLocksOptions = {}) {
   const lockedFields = ref<BookMetadataLockField[]>([])
+  const persistedLockedFields = ref<BookMetadataLockField[]>([])
   const updatingField = ref<BookMetadataLockField | 'all' | null>(null)
   const error = ref<string | null>(null)
 
   const updating = computed(() => updatingField.value !== null)
   const lockedFieldSet = computed(() => new Set(lockedFields.value))
   const areAllLocked = computed(() => BOOK_METADATA_LOCK_FIELDS.every((field) => lockedFieldSet.value.has(field)))
+  const locksDirty = computed(() => lockKey(lockedFields.value) !== lockKey(persistedLockedFields.value))
 
   function load(book: BookDetail) {
-    lockedFields.value = normalizeLockedFields(book.lockedFields)
+    const normalized = normalizeLockedFields(book.lockedFields)
+    lockedFields.value = [...normalized]
+    persistedLockedFields.value = [...normalized]
+    error.value = null
+  }
+
+  function reset() {
+    lockedFields.value = [...persistedLockedFields.value]
+    error.value = null
+  }
+
+  function markPersisted(fields: readonly BookMetadataLockField[]) {
+    const normalized = normalizeLockedFields(fields)
+    lockedFields.value = [...normalized]
+    persistedLockedFields.value = [...normalized]
     error.value = null
   }
 
@@ -34,6 +58,10 @@ export function useMetadataLocks() {
     error.value = null
     try {
       const normalized = normalizeLockedFields(nextLockedFields)
+      if (options.deferred) {
+        lockedFields.value = normalized
+        return null
+      }
       const res = await api(`/api/v1/books/${bookId}/metadata-locks`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -41,7 +69,7 @@ export function useMetadataLocks() {
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const updated: BookDetail = await res.json()
-      lockedFields.value = normalizeLockedFields(updated.lockedFields)
+      markPersisted(updated.lockedFields)
       return updated
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to update locks'
@@ -73,7 +101,10 @@ export function useMetadataLocks() {
     updating,
     error,
     areAllLocked,
+    locksDirty,
     load,
+    reset,
+    markPersisted,
     isLocked,
     isUpdating,
     replace,

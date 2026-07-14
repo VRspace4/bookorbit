@@ -13,6 +13,9 @@ const baseConfig: ProviderConfigurations = {
   audible: { enabled: false, domain: 'com' },
   audnexus: { enabled: false },
   comicvine: { enabled: false, apiKey: '' },
+  ranobedb: { enabled: false },
+  kobo: { enabled: false, country: 'us', language: 'en' },
+  lubimyczytac: { enabled: false },
 };
 
 function mockJsonResponse(body: unknown, status = 200): Response {
@@ -48,6 +51,28 @@ describe('ITunesCoverProvider', () => {
 
     await expect(provider.search({ title: 'Dune' })).resolves.toEqual([]);
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('searches when an explicit cover-provider request overrides disabled metadata provider config', async () => {
+    vi.spyOn(providerConfig, 'getConfig').mockResolvedValue({
+      ...baseConfig,
+      itunes: { enabled: false, coverResolution: 'high' },
+    });
+    global.fetch = vi.fn().mockResolvedValue(
+      mockJsonResponse({
+        resultCount: 1,
+        results: [{ artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/Music/v4/id/cover.jpg/100x100bb.jpg' }],
+      }),
+    );
+
+    const results = await provider.search({ title: 'The Martian', author: 'Andy Weir', isAudiobook: true, ignoreProviderEnabled: true });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].url).toBe('https://is1-ssl.mzstatic.com/image/thumb/Music/v4/id/cover.jpg/10000x10000bb.jpg');
+    const [requestUrl] = (global.fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls[0];
+    const parsed = new URL(requestUrl);
+    expect(parsed.searchParams.get('entity')).toBe('audiobook');
+    expect(parsed.searchParams.get('term')).toBe('The Martian Andy Weir');
   });
 
   it('uses ebook entity and high resolution mapping by default', async () => {

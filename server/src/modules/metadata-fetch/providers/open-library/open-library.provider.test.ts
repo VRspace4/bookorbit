@@ -17,6 +17,9 @@ describe('OpenLibraryProvider', () => {
     audible: { enabled: false, domain: 'com' },
     audnexus: { enabled: false },
     comicvine: { enabled: false, apiKey: '' },
+    ranobedb: { enabled: false },
+    kobo: { enabled: false, country: 'us', language: 'en' },
+    lubimyczytac: { enabled: false },
   };
 
   beforeEach(() => {

@@ -6,7 +6,7 @@
   --book-cover-spine-width: 6%;
   position: relative;
   isolation: isolate;
-  background-color: white;
+  background-color: color-mix(in oklch, var(--foreground) 12%, var(--background));
   background-size: cover;
   box-shadow: var(--book-cover-shadow);
 }
@@ -31,6 +31,17 @@
   box-shadow: var(--book-cover-mini-shadow);
 }
 
+.book-cover-surface[data-cover-fit='natural-bottom']:has(.book-cover-artwork-frame--natural),
+.book-cover-surface[data-cover-fit='natural-bottom']:has(.book-cover-artwork-placeholder-natural) {
+  background-color: transparent;
+  box-shadow: none;
+  /* The cover shadow moves to the inner artwork frame (which is anchored flush
+     to this surface's edges). The surface's own overflow:hidden would clip that
+     shadow, so let it render. The frame keeps its own overflow:hidden, so the
+     image stays clipped to its rounded rect. */
+  overflow: visible;
+}
+
 .book-cover-surface--interactive {
   transition: box-shadow 180ms ease;
 }
@@ -39,10 +50,52 @@
   box-shadow: var(--book-cover-shadow-hover);
 }
 
+.group:hover .book-cover-surface--interactive[data-cover-fit='natural-bottom']:has(.book-cover-artwork-frame--natural),
+.group:hover .book-cover-surface--interactive[data-cover-fit='natural-bottom']:has(.book-cover-artwork-placeholder-natural) {
+  box-shadow: none;
+}
+
+.book-cover-artwork-frame {
+  position: absolute;
+  border-radius: inherit;
+  overflow: hidden;
+}
+
+.book-cover-artwork-frame--full {
+  inset: 0;
+}
+
+.book-cover-artwork-frame--natural,
+.book-cover-artwork-placeholder-natural {
+  box-shadow: var(--book-cover-shadow);
+}
+
+.book-cover-surface--mini .book-cover-artwork-frame--natural,
+.book-cover-surface--mini .book-cover-artwork-placeholder-natural {
+  box-shadow: var(--book-cover-mini-shadow);
+}
+
+.group:hover .book-cover-surface--interactive .book-cover-artwork-frame--natural,
+.group:hover .book-cover-surface--interactive .book-cover-artwork-placeholder-natural {
+  box-shadow: var(--book-cover-shadow-hover);
+}
+
 .book-cover-spine-layer {
+  --book-cover-spine-opacity: 0;
+  --book-cover-spine-width: 6%;
   pointer-events: none;
   border-radius: inherit;
   overflow: hidden;
+}
+
+.book-cover-spine-layer[data-cover-spine='subtle'] {
+  --book-cover-spine-opacity: 0.7;
+  --book-cover-spine-width: 6%;
+}
+
+.book-cover-spine-layer[data-cover-spine='strong'] {
+  --book-cover-spine-opacity: 1;
+  --book-cover-spine-width: 8%;
 }
 
 .book-cover-surface::before,
@@ -87,5 +140,12 @@
 
 .book-cover-surface.book-cover-surface--spine-fitted::before,
 .book-cover-surface.book-cover-surface--spine-fitted::after {
+  opacity: 0;
+}
+
+.book-cover-surface[data-cover-fit='natural-bottom']:has(.book-cover-artwork-frame--natural)::before,
+.book-cover-surface[data-cover-fit='natural-bottom']:has(.book-cover-artwork-frame--natural)::after,
+.book-cover-surface[data-cover-fit='natural-bottom']:has(.book-cover-artwork-placeholder-natural)::before,
+.book-cover-surface[data-cover-fit='natural-bottom']:has(.book-cover-artwork-placeholder-natural)::after {
   opacity: 0;
 }

@@ -81,6 +81,7 @@ export class AmazonProvider implements IdentifiableProvider {
       isbn13: data.isbn13,
       isbn10: data.isbn10,
       publisher: data.publisher,
+      publishedDate: data.publishedDate,
       publishedYear: data.publishedYear,
       language: data.language,
       pageCount: data.pageCount,
@@ -89,6 +90,8 @@ export class AmazonProvider implements IdentifiableProvider {
       coverUrl: data.coverUrl,
       genres: data.tags?.length ? data.tags : undefined,
       sourceUrl: `https://www.${domain}/dp/${asin}`,
+      ...(data.communityRating !== undefined ? { communityRating: data.communityRating } : {}),
+      ...(data.communityRatingCount !== undefined ? { communityRatingCount: data.communityRatingCount } : {}),
     };
   }
 

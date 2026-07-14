@@ -143,10 +143,11 @@ const structuralScenarios: StructuralScenario[] = [
     operations: [{ type: 'move', from: 'lib-a/Old', to: 'lib-a/New' }],
     expected: {
       a: {
-        statusByFolder: { Old: 'missing', New: 'present' },
+        statusByFolder: { New: 'present' },
+        absentFolders: ['Old'],
         fileOwners: { 'New/book.epub': 'New' },
         presentCount: 1,
-        missingCount: 1,
+        missingCount: 0,
       },
     },
   },
@@ -158,10 +159,11 @@ const structuralScenarios: StructuralScenario[] = [
     operations: [{ type: 'move', from: 'lib-a/book.epub', to: 'lib-a/Shelf/book.epub' }],
     expected: {
       a: {
-        statusByFolder: { 'book.epub': 'missing', Shelf: 'present' },
+        statusByFolder: { Shelf: 'present' },
+        absentFolders: ['book.epub'],
         fileOwners: { 'Shelf/book.epub': 'Shelf' },
         presentCount: 1,
-        missingCount: 1,
+        missingCount: 0,
       },
     },
   },
@@ -173,10 +175,11 @@ const structuralScenarios: StructuralScenario[] = [
     operations: [{ type: 'move', from: 'lib-a/Shelf/book.epub', to: 'lib-a/book.epub' }],
     expected: {
       a: {
-        statusByFolder: { Shelf: 'missing', 'book.epub': 'present' },
+        statusByFolder: { 'book.epub': 'present' },
+        absentFolders: ['Shelf'],
         fileOwners: { 'book.epub': 'book.epub' },
         presentCount: 1,
-        missingCount: 1,
+        missingCount: 0,
       },
     },
   },
@@ -233,16 +236,16 @@ const structuralScenarios: StructuralScenario[] = [
       a: {
         statusByFolder: {
           'A/One': 'missing',
-          'A/Two': 'missing',
           'B/Two': 'present',
           C: 'present',
         },
+        absentFolders: ['A/Two'],
         fileOwners: {
           'B/Two/two.epub': 'B/Two',
           'C/three.epub': 'C',
         },
         presentCount: 2,
-        missingCount: 2,
+        missingCount: 1,
       },
     },
   },
@@ -258,13 +261,13 @@ const structuralScenarios: StructuralScenario[] = [
     expected: {
       a: {
         statusByFolder: {
-          'track1.mp3': 'missing',
           'track2.mp3': 'missing',
           'Archive/track1.mp3': 'present',
         },
+        absentFolders: ['track1.mp3'],
         fileOwners: { 'Archive/track1.mp3': 'Archive/track1.mp3' },
         presentCount: 1,
-        missingCount: 2,
+        missingCount: 1,
       },
     },
   },
@@ -355,17 +358,16 @@ const structuralScenarios: StructuralScenario[] = [
     expected: {
       a: {
         statusByFolder: {
-          'Batch/one.mp3': 'missing',
-          'Batch/two.mp3': 'missing',
           'Archive/Batch/one.mp3': 'present',
           'Archive/Batch/two.mp3': 'present',
         },
+        absentFolders: ['Batch/one.mp3', 'Batch/two.mp3'],
         fileOwners: {
           'Archive/Batch/one.mp3': 'Archive/Batch/one.mp3',
           'Archive/Batch/two.mp3': 'Archive/Batch/two.mp3',
         },
         presentCount: 2,
-        missingCount: 2,
+        missingCount: 0,
       },
     },
   },

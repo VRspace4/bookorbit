@@ -1,5 +1,7 @@
-import { IsArray, IsBoolean, IsInt, IsNumber, IsOptional, IsString, Max, MaxLength, Min, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { MetadataProviderKey } from '@bookorbit/types';
+import { CustomMetadataValueDto } from '../../custom-metadata/dto/custom-metadata-value.dto';
 
 export class AudiobookChapterDto {
   @IsString() title!: string;
@@ -28,19 +30,34 @@ export class ComicMetadataDto {
   @IsOptional() @IsArray() @IsString({ each: true }) storyArcs?: string[];
 }
 
+export class BookSeriesMembershipDto {
+  @IsString() @MaxLength(500) seriesName!: string;
+  @IsOptional() @IsNumber() seriesIndex?: number | null;
+}
+
+export class CommunityRatingDto {
+  @IsIn(Object.values(MetadataProviderKey)) provider!: MetadataProviderKey;
+  @IsNumber() @Min(0) @Max(5) rating!: number;
+  @IsOptional() @IsInt() @Min(0) ratingCount?: number | null;
+}
+
 export class UpdateBookMetadataDto {
   @IsOptional() @IsString() @MaxLength(1000) title?: string | null;
   @IsOptional() @IsString() @MaxLength(1000) subtitle?: string | null;
   @IsOptional() @IsString() description?: string | null;
   @IsOptional() @IsString() @MaxLength(500) publisher?: string | null;
+  @IsOptional() @IsString() @Matches(/^\d{4}-\d{2}-\d{2}$/) publishedDate?: string | null;
   @IsOptional() @IsInt() @Min(1000) @Max(2200) publishedYear?: number | null;
-  @IsOptional() @IsString() @MaxLength(10) language?: string | null;
-  @IsOptional() @IsInt() @Min(1) pageCount?: number | null;
+  @IsOptional() @IsString() @MaxLength(100) language?: string | null;
+  // A provider page count of 0 (e.g. Google Books returns 0 when unknown) means "unknown"; normalize it to null instead of rejecting it (issue #329).
+  @IsOptional() @Transform(({ value }) => (value === 0 ? null : value)) @IsInt() @Min(1) pageCount?: number | null;
   @IsOptional() @IsString() @MaxLength(500) seriesName?: string | null;
   @IsOptional() @IsNumber() seriesIndex?: number | null;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => BookSeriesMembershipDto) seriesMemberships?: BookSeriesMembershipDto[] | null;
   @IsOptional() @IsString() @MaxLength(10) isbn10?: string | null;
   @IsOptional() @IsString() @MaxLength(13) isbn13?: string | null;
   @IsOptional() @IsInt() @Min(1) @Max(5) rating?: number | null;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CommunityRatingDto) communityRatings?: CommunityRatingDto[] | null;
   @IsOptional() @IsArray() @IsString({ each: true }) authors?: string[];
   @IsOptional() @IsArray() @IsString({ each: true }) genres?: string[];
   @IsOptional() @IsArray() @IsString({ each: true }) tags?: string[];
@@ -48,10 +65,17 @@ export class UpdateBookMetadataDto {
   @IsOptional() @IsString() @MaxLength(50) goodreadsId?: string | null;
   @IsOptional() @IsString() @MaxLength(20) amazonId?: string | null;
   @IsOptional() @IsString() @MaxLength(255) hardcoverId?: string | null;
+  @IsOptional() @IsString() @MaxLength(50) hardcoverEditionId?: string | null;
   @IsOptional() @IsString() @MaxLength(50) openLibraryId?: string | null;
   @IsOptional() @IsString() @MaxLength(50) itunesId?: string | null;
   @IsOptional() @IsString() @MaxLength(20) audibleId?: string | null;
+  @IsOptional() @IsString() @MaxLength(50) librofmId?: string | null;
+  @IsOptional() @IsString() @MaxLength(255) koboId?: string | null;
   @IsOptional() @ValidateNested() @Type(() => AudioMetadataDto) audioMetadata?: AudioMetadataDto;
   @IsOptional() @IsString() @MaxLength(50) comicvineId?: string | null;
+  @IsOptional() @IsString() @MaxLength(50) ranobedbId?: string | null;
+  @IsOptional() @IsString() @MaxLength(512) lubimyczytacId?: string | null;
+  @IsOptional() @IsString() @MaxLength(20) aladinId?: string | null;
   @IsOptional() @ValidateNested() @Type(() => ComicMetadataDto) comicMetadata?: ComicMetadataDto;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CustomMetadataValueDto) customMetadata?: CustomMetadataValueDto[];
 }

@@ -1,10 +1,15 @@
 import { BadRequestException, ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-vi.mock('../../common/utils/ssrf.utils', () => ({
-  ensureSafeUrl: vi.fn().mockImplementation((url: string) => Promise.resolve(new URL(url.replace(/\/$/, '')))),
-}));
+vi.mock('../../common/utils/ssrf.utils', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../common/utils/ssrf.utils')>();
+  return {
+    ...actual,
+    ensureSafeUrl: vi.fn().mockImplementation((url: string) => Promise.resolve(new URL(url.replace(/\/$/, '')))),
+  };
+});
 
+import { ensureSafeUrl, PrivateAddressException } from '../../common/utils/ssrf.utils';
 import { OidcProviderRepository } from './oidc-provider.repository';
 import { OidcProviderService } from './oidc-provider.service';
 
@@ -27,8 +32,14 @@ function makeRepo(): jest.Mocked<OidcProviderRepository> {
   } as unknown as jest.Mocked<OidcProviderRepository>;
 }
 
-function makeConfig(nodeEnv = 'development'): ConfigService {
-  return { get: vi.fn().mockReturnValue(nodeEnv) } as unknown as ConfigService;
+function makeConfig(nodeEnv = 'development', oidcAllowLocalIssuers = false): ConfigService {
+  return {
+    get: vi.fn().mockImplementation((key: string) => {
+      if (key === 'app.nodeEnv') return nodeEnv;
+      if (key === 'app.oidcAllowLocalIssuers') return oidcAllowLocalIssuers;
+      return undefined;
+    }),
+  } as unknown as ConfigService;
 }
 
 describe('OidcProviderService', () => {
@@ -168,6 +179,51 @@ describe('OidcProviderService', () => {
       repo.findBySlug.mockResolvedValue({ id: 1, slug: 'keycloak' } as never);
       repo.deleteGroupMapping.mockResolvedValue(null as never);
       await expect(service.deleteGroupMapping('keycloak', 999)).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('testConnection', () => {
+    const discoveryDoc = {
+      issuer: 'https://kc.example.com/realms/main',
+      authorization_endpoint: 'https://kc.example.com/realms/main/protocol/openid-connect/auth',
+    };
+
+    it('passes allowLocal/allowPrivate=true in development', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
+      await service.testConnection('https://kc.example.com/realms/main');
+      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: true, allowPrivate: true });
+      vi.unstubAllGlobals();
+    });
+
+    it('passes allowLocal/allowPrivate=false in production by default', async () => {
+      const prodService = new OidcProviderService(repo, makeConfig('production'));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
+      await prodService.testConnection('https://kc.example.com/realms/main');
+      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: false, allowPrivate: false });
+      vi.unstubAllGlobals();
+    });
+
+    it('passes allowLocal/allowPrivate=true in production when override is enabled', async () => {
+      const prodService = new OidcProviderService(repo, makeConfig('production', true));
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
+      await prodService.testConnection('https://kc.example.com/realms/main');
+      expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: true, allowPrivate: true });
+      vi.unstubAllGlobals();
+    });
+
+    it('re-throws PrivateAddressException as BadRequestException with OIDC_ALLOW_LOCAL_ISSUERS hint', async () => {
+      vi.mocked(ensureSafeUrl).mockRejectedValueOnce(new PrivateAddressException());
+      const err = await service.testConnection('https://192.168.1.50/realms/main').catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.getResponse()).toMatchObject({
+        message: expect.stringContaining('OIDC_ALLOW_LOCAL_ISSUERS=true'),
+      });
+    });
+
+    it('re-throws non-PrivateAddress BadRequestException as-is', async () => {
+      const original = new BadRequestException('Invalid URL');
+      vi.mocked(ensureSafeUrl).mockRejectedValueOnce(original);
+      await expect(service.testConnection('https://bad-url')).rejects.toBe(original);
     });
   });
 });

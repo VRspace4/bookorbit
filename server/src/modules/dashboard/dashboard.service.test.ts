@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import type { RequestUser } from '../../common/types/request-user';
 import { DashboardService } from './dashboard.service';
 import { ScrollerType } from './dto/scroller-type.enum';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
   return {
@@ -19,6 +20,8 @@ function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -26,6 +29,9 @@ function makeService() {
   const dashboardRepo = {
     findRecentlyAddedBookIds: vi.fn(),
     findContinueReadingBookIds: vi.fn(),
+    findContinueListeningBookIds: vi.fn(),
+    findWantToReadBookIds: vi.fn(),
+    findUpNextInSeriesBookIds: vi.fn(),
     findRandomBookIds: vi.fn(),
   };
   const bookReadService = {
@@ -127,7 +133,7 @@ describe('DashboardService', () => {
 
     const result = await service.getScroller(ScrollerType.RECENTLY_ADDED, user, 0);
 
-    expect(dashboardRepo.findRecentlyAddedBookIds).toHaveBeenCalledWith([100, 200], 1);
+    expect(dashboardRepo.findRecentlyAddedBookIds).toHaveBeenCalledWith([100, 200], 1, EMPTY_CONTENT_FILTER_RULES);
     expect(bookReadService.findCardsByBookIds).toHaveBeenCalledWith([9, 3], 5);
     expect(result.map((card) => card.id)).toEqual([9, 3]);
     expect(result[0]?.readStatus?.status).toBe('reading');
@@ -142,8 +148,72 @@ describe('DashboardService', () => {
 
     const result = await service.getScroller(ScrollerType.CONTINUE_READING, user, 500);
 
-    expect(dashboardRepo.findContinueReadingBookIds).toHaveBeenCalledWith([301], 9, 50);
+    expect(dashboardRepo.findContinueReadingBookIds).toHaveBeenCalledWith([301], 9, 50, EMPTY_CONTENT_FILTER_RULES);
     expect(result.map((card) => card.id)).toEqual([4]);
+  });
+
+  it('routes continue listening requests to repository with user scope and content filters', async () => {
+    const { service, dashboardRepo, bookReadService, libraryService } = makeService();
+    const user = makeUser({ id: 14 });
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([302, 303]);
+    dashboardRepo.findContinueListeningBookIds.mockResolvedValue([6]);
+    bookReadService.findCardsByBookIds.mockResolvedValue(makeFindCardsResult([6]));
+
+    const result = await service.getScroller(ScrollerType.CONTINUE_LISTENING, user, 500);
+
+    expect(dashboardRepo.findContinueListeningBookIds).toHaveBeenCalledWith([302, 303], 14, 50, EMPTY_CONTENT_FILTER_RULES);
+    expect(bookReadService.findCardsByBookIds).toHaveBeenCalledWith([6], 14);
+    expect(result.map((card) => card.id)).toEqual([6]);
+  });
+
+  it('routes want-to-read requests to repository and preserves response order', async () => {
+    const { service, dashboardRepo, bookReadService, libraryService } = makeService();
+    const user = makeUser({ id: 21 });
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([404]);
+    dashboardRepo.findWantToReadBookIds.mockResolvedValue([31, 22]);
+    bookReadService.findCardsByBookIds.mockResolvedValue(makeFindCardsResult([22, 31]));
+
+    const result = await service.getScroller(ScrollerType.WANT_TO_READ, user, 7);
+
+    expect(dashboardRepo.findWantToReadBookIds).toHaveBeenCalledWith([404], 21, 7, EMPTY_CONTENT_FILTER_RULES);
+    expect(result.map((card) => card.id)).toEqual([31, 22]);
+  });
+
+  it('routes up-next-in-series requests to repository and preserves response order', async () => {
+    const { service, dashboardRepo, bookReadService, libraryService } = makeService();
+    const user = makeUser({ id: 11 });
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([707]);
+    dashboardRepo.findUpNextInSeriesBookIds.mockResolvedValue([19, 8]);
+    bookReadService.findCardsByBookIds.mockResolvedValue(makeFindCardsResult([8, 19]));
+
+    const result = await service.getScroller(ScrollerType.UP_NEXT_IN_SERIES, user, 25);
+
+    expect(dashboardRepo.findUpNextInSeriesBookIds).toHaveBeenCalledWith([707], 11, 25, EMPTY_CONTENT_FILTER_RULES);
+    expect(result.map((card) => card.id)).toEqual([19, 8]);
+  });
+
+  it('passes undefined content filters for up-next-in-series when user is superuser', async () => {
+    const { service, dashboardRepo, bookReadService, libraryService } = makeService();
+    const superuser = makeUser({ id: 17, isSuperuser: true, contentFilters: EMPTY_CONTENT_FILTER_RULES });
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([1]);
+    dashboardRepo.findUpNextInSeriesBookIds.mockResolvedValue([55]);
+    bookReadService.findCardsByBookIds.mockResolvedValue(makeFindCardsResult([55]));
+
+    await service.getScroller(ScrollerType.UP_NEXT_IN_SERIES, superuser, 20);
+
+    expect(dashboardRepo.findUpNextInSeriesBookIds).toHaveBeenCalledWith([1], 17, 20, undefined);
+  });
+
+  it('clamps up-next-in-series limit to minimum of 1', async () => {
+    const { service, dashboardRepo, bookReadService, libraryService } = makeService();
+    const user = makeUser({ id: 18 });
+    libraryService.findAccessibleLibraryIds.mockResolvedValue([91]);
+    dashboardRepo.findUpNextInSeriesBookIds.mockResolvedValue([3]);
+    bookReadService.findCardsByBookIds.mockResolvedValue(makeFindCardsResult([3]));
+
+    await service.getScroller(ScrollerType.UP_NEXT_IN_SERIES, user, 0);
+
+    expect(dashboardRepo.findUpNextInSeriesBookIds).toHaveBeenCalledWith([91], 18, 1, EMPTY_CONTENT_FILTER_RULES);
   });
 
   it('routes random requests to repository and skips card fetch when no ids are returned', async () => {
@@ -153,7 +223,7 @@ describe('DashboardService', () => {
 
     const result = await service.getScroller(ScrollerType.RANDOM, makeUser({ id: 3 }), 20);
 
-    expect(dashboardRepo.findRandomBookIds).toHaveBeenCalledWith([901], 3, 20);
+    expect(dashboardRepo.findRandomBookIds).toHaveBeenCalledWith([901], 3, 20, EMPTY_CONTENT_FILTER_RULES);
     expect(result).toEqual([]);
     expect(bookReadService.findCardsByBookIds).not.toHaveBeenCalled();
   });

@@ -17,6 +17,7 @@ export type ProvisioningMethod = (typeof ProvisioningMethod)[keyof typeof Provis
 
 export interface UserSettings {
   syncReaderPreferences?: boolean;
+  syncThemePreferences?: boolean;
   statisticsConfig?: import("./statistics").StatisticsSettings;
   onboarding?: {
     tourCompleted?: boolean;
@@ -24,6 +25,9 @@ export interface UserSettings {
   notificationPreferences?: import("./notification").NotificationPreferences;
   seriesCollapsePreferences?: import("./series-collapse").SeriesCollapsePreferences;
   dashboardConfig?: import("./dashboard").DashboardConfig;
+  achievementPreferences?: {
+    enabled?: boolean;
+  };
   timezone?: string;
 }
 

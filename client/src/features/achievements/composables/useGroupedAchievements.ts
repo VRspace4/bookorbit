@@ -28,9 +28,10 @@ export function groupAchievements(achievements: AchievementItem[]): DisplayItem[
     const earnedTiers = tiers.filter((tier) => tier.earned)
     const highestEarnedTier = earnedTiers[earnedTiers.length - 1] ?? null
     const nextUnearned = tiers.find((tier) => !tier.earned) ?? null
+    const displayTier = highestEarnedTier ?? firstTier
 
-    const displayName = highestEarnedTier?.name ?? firstTier.name
-    const displayDescription = nextUnearned?.description ?? 'All tiers complete!'
+    const displayName = displayTier.name
+    const displayDescription = displayTier.description
     const rarity = highestEarnedTier?.rarity ?? firstTier.rarity
     const iconName = highestEarnedTier?.iconName ?? firstTier.iconName
 

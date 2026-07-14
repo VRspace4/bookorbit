@@ -1,9 +1,3 @@
-import { ArrayMinSize, IsArray, IsInt, Min } from 'class-validator';
+import { BulkSelectionDto } from '../../../common/dto/bulk-selection.dto';
 
-export class CollectionBooksDto {
-  @IsArray()
-  @ArrayMinSize(1)
-  @IsInt({ each: true })
-  @Min(1, { each: true })
-  bookIds: number[];
-}
+export class CollectionBooksDto extends BulkSelectionDto {}

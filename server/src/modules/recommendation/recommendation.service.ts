@@ -6,6 +6,7 @@ import { BookEmbedderService } from '../embedding/book-embedder.service';
 import { BookReadService } from '../book/book-read.service';
 import { LibraryService } from '../library/library.service';
 import { AnnCandidate, CandidateMetadata, RecommendationRepository, TargetBookData } from './recommendation.repository';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 const RECOMMENDATION_EVENT = 'book.recommendations';
 const SERIES_BOOKS_EVENT = 'book.series_books';
@@ -55,7 +56,12 @@ export class RecommendationService {
       const accessibleLibraries = await this.libraryService.findAll(user);
       const accessibleLibraryIds = accessibleLibraries.map((library) => library.id);
 
-      const candidates = await this.recRepo.findAnnCandidates(embedding, bookId, accessibleLibraryIds);
+      const candidates = await this.recRepo.findAnnCandidates(
+        embedding,
+        bookId,
+        accessibleLibraryIds,
+        user.isSuperuser ? undefined : user.contentFilters,
+      );
       if (candidates.length === 0) {
         this.logger.log(
           `[${RECOMMENDATION_EVENT}] [end] bookId=${bookId} userId=${user.id} libraryId=${libraryId} durationMs=${Date.now() - startedAt} accessibleLibraryCount=${accessibleLibraryIds.length} candidateCount=0 resultCount=0 - recommendation lookup completed`,
@@ -86,7 +92,19 @@ export class RecommendationService {
       const rowMap = new Map(rows.map((row) => [row.id, row]));
       const recommendations = rescored
         .map((rescoredCandidate) => rowMap.get(rescoredCandidate.bookId))
-        .filter((row): row is { id: number; title: string | null; hasCover: boolean; authors: string[] } => row != null);
+        .filter(
+          (
+            row,
+          ): row is {
+            id: number;
+            title: string | null;
+            updatedAt: string | null;
+            hasCover: boolean;
+            authors: string[];
+            isAudiobook: boolean;
+            isComic: boolean;
+          } => row != null,
+        );
 
       this.logger.log(
         `[${RECOMMENDATION_EVENT}] [end] bookId=${bookId} userId=${user.id} libraryId=${libraryId} durationMs=${Date.now() - startedAt} accessibleLibraryCount=${accessibleLibraryIds.length} candidateCount=${candidates.length} rescoredCount=${rescored.length} resultCount=${recommendations.length} - recommendation lookup completed`,
@@ -111,8 +129,8 @@ export class RecommendationService {
       if (libraryId === null) throw new NotFoundException(`Book ${bookId} not found`);
       await this.libraryService.verifyUserAccess(user.id, libraryId, user.isSuperuser);
 
-      const meta = await this.recRepo.getSeriesName(bookId);
-      if (!meta) {
+      const series = await this.recRepo.getSeriesIdentity(bookId);
+      if (!series) {
         this.logger.log(
           `[${SERIES_BOOKS_EVENT}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} reason=no_series - series books lookup completed`,
         );
@@ -120,18 +138,21 @@ export class RecommendationService {
       }
 
       const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-      const rows = await this.recRepo.findSeriesBooks(meta, libraryIds);
+      const rows = await this.recRepo.findSeriesBooks(series.id, libraryIds, user.isSuperuser ? undefined : user.contentFilters);
 
       this.logger.log(
-        `[${SERIES_BOOKS_EVENT}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} seriesName="${meta}" resultCount=${rows.length} - series books lookup completed`,
+        `[${SERIES_BOOKS_EVENT}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} seriesId=${series.id} seriesName="${sanitizeLogValue(series.name ?? '')}" resultCount=${rows.length} - series books lookup completed`,
       );
 
       return rows.map((r) => ({
         id: r.bookId,
         title: r.title,
+        updatedAt: r.updatedAt?.toISOString() ?? null,
         seriesIndex: r.seriesIndex,
         hasCover: r.coverSource !== null,
         authors: r.authorNames,
+        isAudiobook: r.isAudiobook,
+        isComic: r.isComic,
       }));
     } catch (err) {
       const { errorClass, errorMessage } = this.parseError(err);
@@ -152,13 +173,21 @@ export class RecommendationService {
       await this.libraryService.verifyUserAccess(user.id, libraryId, user.isSuperuser);
 
       const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-      const rows = await this.recRepo.findAuthorBooks(bookId, libraryIds);
+      const rows = await this.recRepo.findAuthorBooks(bookId, libraryIds, user.isSuperuser ? undefined : user.contentFilters);
 
       this.logger.log(
         `[${AUTHOR_BOOKS_EVENT}] [end] bookId=${bookId} durationMs=${Date.now() - startedAt} resultCount=${rows.length} - author books lookup completed`,
       );
 
-      return rows.map((r) => ({ id: r.bookId, title: r.title, hasCover: r.coverSource !== null, authors: r.authorNames }));
+      return rows.map((r) => ({
+        id: r.bookId,
+        title: r.title,
+        updatedAt: r.updatedAt?.toISOString() ?? null,
+        hasCover: r.coverSource !== null,
+        authors: r.authorNames,
+        isAudiobook: r.isAudiobook,
+        isComic: r.isComic,
+      }));
     } catch (err) {
       const { errorClass, errorMessage } = this.parseError(err);
       this.logger.error(
@@ -174,9 +203,7 @@ export class RecommendationService {
     const authorSim = meta ? this.jaccard(this.toNormalizedSet(target.authorNames), this.toNormalizedSet(meta.authorNames)) : 0;
     const genreTagSim = meta ? this.jaccard(this.toNormalizedSet(target.genreTagNames), this.toNormalizedSet(meta.genreTagNames)) : 0;
 
-    const targetSeries = this.normalizeSeries(target.seriesName);
-    const candidateSeries = this.normalizeSeries(candidate.seriesName);
-    const seriesBonus = targetSeries && candidateSeries && targetSeries === candidateSeries ? 1.0 : 0.0;
+    const seriesBonus = target.seriesId != null && candidate.seriesId === target.seriesId ? 1.0 : 0.0;
 
     let ratingProximity = DEFAULT_RATING_PROXIMITY;
     if (target.rating != null && candidate.rating != null) {
@@ -210,6 +237,7 @@ export class RecommendationService {
   private createFallbackTarget(): TargetBookData {
     return {
       embedding: null,
+      seriesId: null,
       seriesName: null,
       rating: null,
       authorNames: [],
@@ -221,20 +249,10 @@ export class RecommendationService {
     return Math.max(0, Math.min(1, value));
   }
 
-  private normalizeSeries(seriesName: string | null): string | null {
-    if (!seriesName) return null;
-    const normalized = seriesName.trim().toLowerCase();
-    return normalized.length > 0 ? normalized : null;
-  }
-
   private parseError(err: unknown): { errorClass: string; errorMessage: string } {
     if (err instanceof Error) {
-      return { errorClass: err.constructor.name, errorMessage: this.sanitizeErrorMessage(err.message) };
+      return { errorClass: err.constructor.name, errorMessage: sanitizeLogValue(err.message).slice(0, 200) };
     }
-    return { errorClass: 'UnknownError', errorMessage: this.sanitizeErrorMessage(String(err)) };
-  }
-
-  private sanitizeErrorMessage(message: string): string {
-    return message.replace(/[\r\n"]/g, ' ').slice(0, 200);
+    return { errorClass: 'UnknownError', errorMessage: sanitizeLogValue(String(err)).slice(0, 200) };
   }
 }

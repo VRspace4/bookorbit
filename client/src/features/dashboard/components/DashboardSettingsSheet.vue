@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { ChevronDown, ChevronUp, GripVertical, Plus, RotateCcw, Trash2 } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { ChevronDown, ChevronUp, GripVertical, Plus, RotateCcw, Trash2 } from '@lucide/vue'
 
 import type { ScrollerConfig, ScrollerType, WidgetConfig } from '@bookorbit/types'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
@@ -11,6 +12,8 @@ import { useDraggableList } from '../composables/useDraggableList'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ 'update:open': [value: boolean] }>()
+
+const { t } = useI18n()
 
 const { scrollers, saveScrollers, MAX_SCROLLERS } = useDashboardConfig()
 const { widgets, saveWidgets, WIDGET_LABELS, DEFAULT_WIDGETS } = useDashboardWidgets()
@@ -46,7 +49,15 @@ const {
   moveDown: widgetMoveDown,
 } = useDraggableList(widgetDraft)
 // ── Add / Remove ─────────────────────────────────────────────
-const ALL_TYPES: ScrollerType[] = ['continue-reading', 'recently-added', 'random', 'smart-scope']
+const ALL_TYPES: ScrollerType[] = [
+  'continue-reading',
+  'continue-listening',
+  'want-to-read',
+  'up-next-in-series',
+  'recently-added',
+  'random',
+  'smart-scope',
+]
 
 function addScroller() {
   if (draft.value.length >= MAX_SCROLLERS) return
@@ -120,7 +131,7 @@ function resetToDefault() {
     <SheetContent side="right" class="flex w-[90vw] max-w-[420px] flex-col gap-0 p-0">
       <!-- Header -->
       <SheetHeader class="border-b border-border px-5 py-4">
-        <SheetTitle class="text-base font-semibold">Customize Dashboard</SheetTitle>
+        <SheetTitle class="text-base font-semibold">{{ t('dashboard.settings.title') }}</SheetTitle>
       </SheetHeader>
 
       <!-- Tabs -->
@@ -133,7 +144,7 @@ function resetToDefault() {
             ]"
             @click="activeTab = 'widgets'"
           >
-            Widgets
+            {{ t('dashboard.settings.tabs.widgets') }}
           </button>
           <button
             :class="[
@@ -142,7 +153,7 @@ function resetToDefault() {
             ]"
             @click="activeTab = 'shelves'"
           >
-            Shelves
+            {{ t('dashboard.settings.tabs.shelves') }}
           </button>
         </div>
       </div>
@@ -151,7 +162,7 @@ function resetToDefault() {
       <div class="flex-1 overflow-y-auto px-5 py-4">
         <!-- WIDGETS TAB -->
         <div v-show="activeTab === 'widgets'">
-          <p class="mb-4 text-xs text-muted-foreground">Drag to reorder. Toggle to show or hide a widget.</p>
+          <p class="mb-4 text-xs text-muted-foreground">{{ t('dashboard.settings.reorderHintWidget') }}</p>
 
           <div class="space-y-2">
             <div
@@ -208,7 +219,7 @@ function resetToDefault() {
 
         <!-- SHELVES TAB -->
         <div v-show="activeTab === 'shelves'">
-          <p class="mb-4 text-xs text-muted-foreground">Drag to reorder. Toggle to show or hide a shelf.</p>
+          <p class="mb-4 text-xs text-muted-foreground">{{ t('dashboard.settings.reorderHintShelf') }}</p>
 
           <div class="space-y-2">
             <div
@@ -283,7 +294,7 @@ function resetToDefault() {
 
               <!-- SmartScope picker (shown only when type = smartScope) -->
               <div v-if="scroller.type === 'smart-scope'" class="border-t border-border/50 px-3 pb-2.5 pt-2">
-                <label class="mb-1.5 block text-[11px] font-medium text-muted-foreground">Smart Scope</label>
+                <label class="mb-1.5 block text-[11px] font-medium text-muted-foreground">{{ t('dashboard.settings.smartScope') }}</label>
                 <select
                   v-if="smartScopes.length > 0"
                   v-model="scroller.smartScopeId"
@@ -292,7 +303,7 @@ function resetToDefault() {
                 >
                   <option v-for="smartScope in smartScopes" :key="smartScope.id" :value="smartScope.id">{{ smartScope.name }}</option>
                 </select>
-                <p v-else class="text-xs text-muted-foreground">No Smart Scopes yet. Create one from the sidebar.</p>
+                <p v-else class="text-xs text-muted-foreground">{{ t('dashboard.settings.noSmartScopes') }}</p>
               </div>
             </div>
           </div>
@@ -304,7 +315,7 @@ function resetToDefault() {
             @click="addScroller"
           >
             <Plus :size="15" />
-            Add shelf
+            {{ t('dashboard.settings.addShelf') }}
             <span class="text-xs opacity-60">({{ draft.length }}/{{ MAX_SCROLLERS }})</span>
           </button>
         </div>
@@ -314,21 +325,21 @@ function resetToDefault() {
       <div class="flex items-center justify-between border-t border-border px-5 py-4">
         <button class="flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground" @click="resetToDefault">
           <RotateCcw :size="13" />
-          Reset to defaults
+          {{ t('dashboard.settings.resetToDefaults') }}
         </button>
         <div class="flex items-center gap-2">
           <button
             class="h-8 rounded-md border border-input px-3 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             @click="emit('update:open', false)"
           >
-            Cancel
+            {{ t('common.cancel') }}
           </button>
           <button
             class="h-8 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
             :disabled="widgetSaving"
             @click="handleSave"
           >
-            Save
+            {{ t('common.save') }}
           </button>
         </div>
       </div>

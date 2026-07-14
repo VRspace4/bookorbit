@@ -26,6 +26,48 @@ describe('FileWriteRepository', () => {
     await expect(repo.findPrimaryFileForBook(2)).resolves.toBeNull();
   });
 
+  it('findFilesForBook returns all file write targets in stable order', async () => {
+    const rows = [
+      { id: 1, absolutePath: '/a/01.mp3', format: 'mp3', sizeBytes: 5, fileHash: 'hash1', libraryId: 10 },
+      { id: 2, absolutePath: '/a/02.mp3', format: 'mp3', sizeBytes: 6, fileHash: 'hash2', libraryId: 10 },
+    ];
+    const c = chain(rows);
+    const db = {
+      select: vi.fn().mockReturnValue(c),
+    };
+
+    const repo = new FileWriteRepository(db as never);
+
+    await expect(repo.findFilesForBook(1)).resolves.toEqual(rows);
+    expect(c.orderBy).toHaveBeenCalledTimes(1);
+  });
+
+  it('findLibraryFileWriteConfig selects audio write-back settings', async () => {
+    const settings = {
+      fileWriteEnabled: true,
+      fileWriteWriteCover: true,
+      fileWriteEpubEnabled: true,
+      fileWriteEpubMaxFileSizeMb: 100,
+      fileWritePdfEnabled: true,
+      fileWritePdfMaxFileSizeMb: 100,
+      fileWriteCbxEnabled: false,
+      fileWriteCbxMaxFileSizeMb: 500,
+      fileWriteAudioEnabled: true,
+      fileWriteAudioMaxFileSizeMb: 500,
+    };
+    const c = chain([settings]);
+    const db = {
+      select: vi.fn().mockReturnValue(c),
+    };
+
+    const repo = new FileWriteRepository(db as never);
+
+    await expect(repo.findLibraryFileWriteConfig(10)).resolves.toEqual(settings);
+    expect(db.select).toHaveBeenCalledWith(
+      expect.objectContaining({ fileWriteAudioEnabled: expect.anything(), fileWriteAudioMaxFileSizeMb: expect.anything() }),
+    );
+  });
+
   it('loadPayload returns null when metadata row is absent', async () => {
     const metaChain = chain([]);
     const db = { select: vi.fn().mockReturnValue(metaChain) };
@@ -52,7 +94,16 @@ describe('FileWriteRepository', () => {
       goodreadsId: 'gr',
       amazonId: 'a',
       hardcoverId: 'h',
+      hardcoverEditionId: '8941973',
       openLibraryId: 'ol',
+      ranobedbId: 'rn',
+      koboId: 'kb',
+      lubimyczytacId: 'lc',
+      aladinId: 'al',
+      itunesId: 'it',
+      audibleId: 'aud',
+      librofmId: '9781234567890',
+      rating: 4,
     };
 
     const metaChain = chain([meta]);
@@ -74,9 +125,71 @@ describe('FileWriteRepository', () => {
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockResolvedValue([{ name: 'Classic' }]),
     };
+    const narratorChain = {
+      from: vi.fn().mockReturnThis(),
+      innerJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockResolvedValue([{ name: 'Simon Vance' }]),
+    };
+    const comicChain = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([
+        {
+          issueNumber: '12',
+          volumeName: 'Volume One',
+          pencillers: ['Penciller A'],
+          inkers: ['Inker A'],
+          colorists: ['Colorist A'],
+          letterers: ['Letterer A'],
+          coverArtists: ['Cover Artist A'],
+          characters: ['Character A'],
+          teams: ['Team A'],
+          locations: ['Location A'],
+          storyArcs: ['Arc A'],
+        },
+      ]),
+    };
+    const customMetadataChain = {
+      from: vi.fn().mockReturnThis(),
+      innerJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockResolvedValue([
+        {
+          fieldId: 3,
+          key: 'mood',
+          label: 'Mood',
+          type: 'text',
+          displayOrder: 0,
+          valueText: 'Melancholy',
+          valueNumber: null,
+          valueDate: null,
+          valueBoolean: null,
+        },
+        {
+          fieldId: 4,
+          key: 'read',
+          label: 'Read',
+          type: 'boolean',
+          displayOrder: 1,
+          valueText: null,
+          valueNumber: null,
+          valueDate: null,
+          valueBoolean: false,
+        },
+      ]),
+    };
 
     const db = {
-      select: vi.fn().mockReturnValueOnce(metaChain).mockReturnValueOnce(authorChain).mockReturnValueOnce(genreChain).mockReturnValueOnce(tagChain),
+      select: vi
+        .fn()
+        .mockReturnValueOnce(metaChain)
+        .mockReturnValueOnce(authorChain)
+        .mockReturnValueOnce(narratorChain)
+        .mockReturnValueOnce(genreChain)
+        .mockReturnValueOnce(tagChain)
+        .mockReturnValueOnce(comicChain)
+        .mockReturnValueOnce(customMetadataChain),
     };
 
     const repo = new FileWriteRepository(db as never);
@@ -84,8 +197,38 @@ describe('FileWriteRepository', () => {
     await expect(repo.loadPayload(9)).resolves.toEqual({
       ...meta,
       authors: [{ name: 'Frank Herbert', sortName: 'Herbert, Frank' }],
+      narrators: ['Simon Vance'],
       genres: ['Sci-Fi'],
       tags: ['Classic'],
+      comicIssueNumber: '12',
+      comicVolumeName: 'Volume One',
+      comicPencillers: ['Penciller A'],
+      comicInkers: ['Inker A'],
+      comicColorists: ['Colorist A'],
+      comicLetterers: ['Letterer A'],
+      comicCoverArtists: ['Cover Artist A'],
+      comicCharacters: ['Character A'],
+      comicTeams: ['Team A'],
+      comicLocations: ['Location A'],
+      comicStoryArcs: ['Arc A'],
+      customMetadata: [
+        {
+          fieldId: 3,
+          key: 'mood',
+          label: 'Mood',
+          type: 'text',
+          displayOrder: 0,
+          value: 'Melancholy',
+        },
+        {
+          fieldId: 4,
+          key: 'read',
+          label: 'Read',
+          type: 'boolean',
+          displayOrder: 1,
+          value: false,
+        },
+      ],
     });
   });
 
@@ -157,5 +300,23 @@ describe('FileWriteRepository', () => {
         errorMessage: null,
       },
     ]);
+  });
+
+  it('findLibraryWriteSettingsForBook returns settings or null without joining bookFiles', async () => {
+    const settings = { fileWriteEnabled: true, fileRenameEnabled: false };
+    const c1 = chain([settings]);
+    const c2 = chain([]);
+
+    const db = {
+      select: vi.fn().mockReturnValueOnce(c1).mockReturnValueOnce(c2),
+    };
+
+    const repo = new FileWriteRepository(db as never);
+
+    await expect(repo.findLibraryWriteSettingsForBook(1)).resolves.toEqual(settings);
+    await expect(repo.findLibraryWriteSettingsForBook(2)).resolves.toBeNull();
+
+    // innerJoin is called exactly once per query (books -> libraries only, no bookFiles join)
+    expect(c1.innerJoin).toHaveBeenCalledTimes(1);
   });
 });

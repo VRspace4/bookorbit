@@ -17,6 +17,44 @@ describe('esc', () => {
   it('leaves safe strings unchanged', () => {
     expect(esc('hello world')).toBe('hello world');
   });
+
+  it('strips XML 1.0 illegal control characters from metadata (issue #260)', () => {
+    const nul = String.fromCharCode(0);
+    const verticalTab = String.fromCharCode(0x0b);
+    const formFeed = String.fromCharCode(0x0c);
+    const unitSeparator = String.fromCharCode(0x1f);
+
+    expect(esc(`Children of Dune${verticalTab}`)).toBe('Children of Dune');
+    expect(esc(`Dune${nul} Chronicles`)).toBe('Dune Chronicles');
+    expect(esc(`Acme${formFeed}${unitSeparator} Press`)).toBe('Acme Press');
+  });
+
+  it('strips the noncharacters U+FFFE and U+FFFF', () => {
+    const noncharA = String.fromCharCode(0xfffe);
+    const noncharB = String.fromCharCode(0xffff);
+    expect(esc(`A${noncharA}B${noncharB}C`)).toBe('ABC');
+  });
+
+  it('preserves the control characters XML 1.0 allows (tab, LF, CR)', () => {
+    expect(esc('line1\n\tline2\r')).toBe('line1\n\tline2\r');
+  });
+
+  it('strips control characters and escapes entities together', () => {
+    const nul = String.fromCharCode(0);
+    expect(esc(`Rock${nul} & Roll`)).toBe('Rock &amp; Roll');
+  });
+
+  it('strips unpaired surrogates from mis-decoded UTF-16 metadata', () => {
+    const loneHigh = String.fromCharCode(0xd800);
+    const loneLow = String.fromCharCode(0xdfff);
+    expect(esc(`Bad${loneHigh}Title`)).toBe('BadTitle');
+    expect(esc(`${loneLow}Edge`)).toBe('Edge');
+  });
+
+  it('preserves valid surrogate pairs (astral characters such as emoji)', () => {
+    expect(esc('Party 🎉 time')).toBe('Party 🎉 time');
+    expect(esc('𝐁𝐨𝐨𝐤')).toBe('𝐁𝐨𝐨𝐤');
+  });
 });
 
 describe('xmlEl', () => {

@@ -34,6 +34,12 @@ const PAGE_WINDOW_INVALID_MESSAGE = `pagination window is too deep; page * size 
 const SIZE_QUERY_INVALID_MESSAGE = 'size must be between 1 and 100';
 const MAX_PAGE_SIZE = 100;
 
+function describeSelection(action: 'Added' | 'Removed', body: { bookIds?: number[]; query?: unknown }, collectionId: string | undefined): string {
+  if (body.query) return `${action} all matching books ${action === 'Added' ? 'to' : 'from'} collection #${collectionId}`;
+  const count = body.bookIds?.length ?? 0;
+  return `${action} ${count} book${count !== 1 ? 's' : ''} ${action === 'Added' ? 'to' : 'from'} collection #${collectionId}`;
+}
+
 @Controller('collections')
 export class CollectionController {
   constructor(private readonly collectionService: CollectionService) {}
@@ -73,6 +79,11 @@ export class CollectionController {
     if (!bookIdsStr) return this.collectionService.findAll(user);
     const bookIds = this.parseBookIdsQuery(bookIdsStr);
     return this.collectionService.findAll(user, bookIds);
+  }
+
+  @Post('membership')
+  findAllWithMembership(@Body() dto: CollectionBooksDto, @CurrentUser() user: RequestUser) {
+    return this.collectionService.findAllWithSelectionMembership(dto, user);
   }
 
   @Get(':id')
@@ -126,8 +137,7 @@ export class CollectionController {
     resource: AuditResource.Collection,
     getResourceId: (req) => parseInt(req.params['id'] as string, 10),
     description: (req) => {
-      const count = (req.body as { bookIds?: number[] })?.bookIds?.length ?? 0;
-      return `Added ${count} book${count !== 1 ? 's' : ''} to collection #${req.params['id']}`;
+      return describeSelection('Added', req.body as { bookIds?: number[]; query?: unknown }, req.params['id'] as string | undefined);
     },
   })
   addBooks(@Param('id', ParseIntPipe) id: number, @Body() dto: CollectionBooksDto, @CurrentUser() user: RequestUser) {
@@ -140,8 +150,7 @@ export class CollectionController {
     resource: AuditResource.Collection,
     getResourceId: (req) => parseInt(req.params['id'] as string, 10),
     description: (req) => {
-      const count = (req.body as { bookIds?: number[] })?.bookIds?.length ?? 0;
-      return `Removed ${count} book${count !== 1 ? 's' : ''} from collection #${req.params['id']}`;
+      return describeSelection('Removed', req.body as { bookIds?: number[]; query?: unknown }, req.params['id'] as string | undefined);
     },
   })
   removeBooks(@Param('id', ParseIntPipe) id: number, @Body() dto: CollectionBooksDto, @CurrentUser() user: RequestUser) {
@@ -165,5 +174,10 @@ export class CollectionController {
   @Post(':id/books/query')
   queryBooks(@Param('id', ParseIntPipe) id: number, @Body(BookQueryPipe) query: BookQuery, @CurrentUser() user: RequestUser) {
     return this.collectionService.queryBooks(id, user, query);
+  }
+
+  @Post(':id/books/jump-buckets')
+  queryJumpBuckets(@Param('id', ParseIntPipe) id: number, @Body(BookQueryPipe) query: BookQuery, @CurrentUser() user: RequestUser) {
+    return this.collectionService.queryJumpBuckets(id, user, query);
   }
 }

@@ -42,15 +42,19 @@ describe('ProviderConfigService', () => {
   let db: ReturnType<typeof createDb>;
   let service: ProviderConfigService;
   let warnSpy: ReturnType<typeof vi.spyOn>;
+  let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     db = createDb();
     service = new ProviderConfigService(db as never);
     warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
   });
 
   afterEach(() => {
     warnSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it('returns defaults when no stored config exists', async () => {
@@ -67,7 +71,12 @@ describe('ProviderConfigService', () => {
       itunes: { enabled: true, coverResolution: 'high' },
       audible: { enabled: false, domain: 'com' },
       audnexus: { enabled: false },
+      librofm: { enabled: false },
       comicvine: { enabled: false, apiKey: '' },
+      ranobedb: { enabled: false },
+      kobo: { enabled: false, country: 'us', language: 'en' },
+      lubimyczytac: { enabled: false },
+      aladin: { enabled: false, ttbKey: '' },
     });
   });
 
@@ -175,6 +184,14 @@ describe('ProviderConfigService', () => {
         amazon: { enabled: true, domain: 'amazon.com', cookie: '' },
       }),
     });
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: { me: [{ username: 'reader' }] },
+        }),
+        { status: 200 },
+      ),
+    );
 
     const updated = await service.updateConfig({
       google: { enabled: false },
@@ -198,15 +215,86 @@ describe('ProviderConfigService', () => {
     );
   });
 
-  it('rejects enabling Google Books without an API key', async () => {
+  it('normalizes enabling Google Books without an API key back to disabled', async () => {
     db.__tx.query.appSettings.findFirst.mockResolvedValue({
       value: JSON.stringify({
         google: { enabled: false, apiKey: '' },
       }),
     });
 
-    await expect(service.updateConfig({ google: { enabled: true } })).rejects.toThrow('Google Books requires an API key');
+    const updated = await service.updateConfig({ google: { enabled: true } });
+    expect(updated.google).toEqual({ enabled: false, apiKey: '' });
+    expect(db.__tx.insert).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects enabling Hardcover without an API key', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue(undefined);
+
+    await expect(service.updateConfig({ hardcover: { enabled: true } })).rejects.toThrow('Hardcover requires an API key before it can be enabled');
     expect(db.__tx.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects enabling ComicVine without an API key', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue(undefined);
+
+    await expect(service.updateConfig({ comicvine: { enabled: true } })).rejects.toThrow('ComicVine requires an API key before it can be enabled');
+    expect(db.__tx.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects enabling Hardcover when live token validation fails', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue(undefined);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          errors: [{ message: 'Malformed Authorization header' }],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(service.updateConfig({ hardcover: { enabled: true, apiKey: 'invalid-token' } })).rejects.toThrow(
+      'Hardcover API error: Malformed Authorization header',
+    );
+    expect(db.__tx.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects enabling Hardcover when the live validation request times out', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue(undefined);
+    const timeout = new Error('aborted');
+    timeout.name = 'TimeoutError';
+    fetchMock.mockRejectedValue(timeout);
+
+    await expect(service.updateConfig({ hardcover: { enabled: true, apiKey: 'token-123' } })).rejects.toThrow(
+      'Hardcover validation timed out. Please try again.',
+    );
+    expect(db.__tx.insert).not.toHaveBeenCalled();
+  });
+
+  it('rejects enabling Hardcover when the live validation request errors', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue(undefined);
+    fetchMock.mockRejectedValue(new Error('network down'));
+
+    await expect(service.updateConfig({ hardcover: { enabled: true, apiKey: 'token-123' } })).rejects.toThrow(
+      'Could not reach Hardcover to validate the token.',
+    );
+    expect(db.__tx.insert).not.toHaveBeenCalled();
+  });
+
+  it('does not revalidate unchanged enabled Hardcover credentials for unrelated updates', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue({
+      value: JSON.stringify({
+        hardcover: { enabled: true, apiKey: 'existing-token' },
+        amazon: { enabled: true, domain: 'amazon.com', cookie: '' },
+      }),
+    });
+
+    const updated = await service.updateConfig({
+      amazon: { cookie: 'session-cookie' },
+    });
+
+    expect(updated.hardcover).toEqual({ enabled: true, apiKey: 'existing-token' });
+    expect(updated.amazon.cookie).toBe('session-cookie');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('normalizes legacy enabled Google Books config during unrelated updates', async () => {
@@ -220,6 +308,18 @@ describe('ProviderConfigService', () => {
 
     expect(updated.google).toEqual({ enabled: false, apiKey: '' });
     expect(updated.amazon.cookie).toBe('session-cookie');
+  });
+
+  it('normalizes Amazon cookie and Hardcover token formats before persisting', async () => {
+    db.__tx.query.appSettings.findFirst.mockResolvedValue(undefined);
+
+    const updated = await service.updateConfig({
+      amazon: { cookie: 'Cookie: session-id=abc; ubid-main=xyz' },
+      hardcover: { apiKey: 'Bearer hardcover-token' },
+    });
+
+    expect(updated.amazon.cookie).toBe('session-id=abc; ubid-main=xyz');
+    expect(updated.hardcover.apiKey).toBe('hardcover-token');
   });
 
   it('acquires advisory lock before reading config inside update transaction', async () => {
@@ -256,7 +356,12 @@ describe('ProviderConfigService', () => {
       itunes: { enabled: true, coverResolution: 'high' },
       audible: { enabled: false, domain: 'com' },
       audnexus: { enabled: false },
+      librofm: { enabled: false },
       comicvine: { enabled: false, apiKey: '' },
+      ranobedb: { enabled: false },
+      kobo: { enabled: false, country: 'us', language: 'en' },
+      lubimyczytac: { enabled: false },
+      aladin: { enabled: false, ttbKey: '' },
     });
 
     expect(statuses.map((s) => s.key)).toEqual([
@@ -268,12 +373,20 @@ describe('ProviderConfigService', () => {
       MetadataProviderKey.ITUNES,
       MetadataProviderKey.AUDIBLE,
       MetadataProviderKey.AUDNEXUS,
+      MetadataProviderKey.LIBROFM,
       MetadataProviderKey.COMICVINE,
+      MetadataProviderKey.RANOBEDB,
+      MetadataProviderKey.KOBO,
+      MetadataProviderKey.LUBIMYCZYTAC,
+      MetadataProviderKey.ALADIN,
     ]);
     expect(statuses.find((s) => s.key === MetadataProviderKey.GOOGLE)?.configured).toBe(false);
     expect(statuses.find((s) => s.key === MetadataProviderKey.GOOGLE)?.hint).toContain('API key required');
     expect(statuses.find((s) => s.key === MetadataProviderKey.AMAZON)?.hint).toContain('Cookie recommended');
     expect(statuses.find((s) => s.key === MetadataProviderKey.HARDCOVER)?.configured).toBe(false);
+    expect(statuses.find((s) => s.key === MetadataProviderKey.HARDCOVER)?.hint).toContain('Run Test');
+    expect(statuses.find((s) => s.key === MetadataProviderKey.COMICVINE)?.configured).toBe(false);
+    expect(statuses.find((s) => s.key === MetadataProviderKey.COMICVINE)?.hint).toContain('API key required');
     expect(statuses.find((s) => s.key === MetadataProviderKey.GOODREADS)?.enabled).toBe(false);
   });
 
@@ -287,11 +400,95 @@ describe('ProviderConfigService', () => {
       itunes: { enabled: true, coverResolution: 'high' },
       audible: { enabled: false, domain: 'com' },
       audnexus: { enabled: false },
+      librofm: { enabled: false },
       comicvine: { enabled: false, apiKey: '' },
+      ranobedb: { enabled: false },
+      kobo: { enabled: false, country: 'us', language: 'en' },
+      lubimyczytac: { enabled: false },
+      aladin: { enabled: false, ttbKey: '' },
     });
 
     expect(statuses.find((s) => s.key === MetadataProviderKey.HARDCOVER)?.configured).toBe(true);
     expect(statuses.find((s) => s.key === MetadataProviderKey.GOOGLE)?.hint).toBeUndefined();
     expect(statuses.find((s) => s.key === MetadataProviderKey.AMAZON)?.hint).toBeUndefined();
+  });
+
+  it('tests Hardcover provider using bearer-stripped token from patch config', async () => {
+    db.query.appSettings.findFirst.mockResolvedValue(undefined);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: { me: [{ username: 'reader' }] },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await service.testProvider(MetadataProviderKey.HARDCOVER, {
+      hardcover: { apiKey: 'Bearer token-123' },
+    });
+
+    expect(result).toEqual({
+      key: MetadataProviderKey.HARDCOVER,
+      ok: true,
+      status: 'success',
+      message: 'Connected as reader.',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.hardcover.app/v1/graphql',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer token-123',
+        }),
+      }),
+    );
+  });
+
+  it('tests Hardcover provider with quoted bearer token input', async () => {
+    db.query.appSettings.findFirst.mockResolvedValue(undefined);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: { me: [{ username: 'reader' }] },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await service.testProvider(MetadataProviderKey.HARDCOVER, {
+      hardcover: { apiKey: '"Bearer token-123"' },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.hardcover.app/v1/graphql',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer token-123',
+        }),
+      }),
+    );
+  });
+
+  it('returns warning for Amazon bot-check responses', async () => {
+    db.query.appSettings.findFirst.mockResolvedValue(undefined);
+    fetchMock.mockResolvedValue(
+      new Response('<html><title>Robot Check</title>Sorry, we just need to make sure you are not a robot.</html>', {
+        status: 200,
+      }),
+    );
+
+    const result = await service.testProvider(MetadataProviderKey.AMAZON, {
+      amazon: { cookie: 'Cookie: x-main=abc' },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('warning');
+    expect(result.message).toContain('bot-check');
+  });
+
+  it('rejects unsupported provider test requests', async () => {
+    await expect(service.testProvider(MetadataProviderKey.GOODREADS, {})).rejects.toThrow('Provider test not supported');
   });
 });

@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import type { Mock } from 'vitest';
 
 import { LibraryController } from './library.controller';
 
@@ -19,9 +20,15 @@ describe('LibraryController', () => {
     writeMetadataToFiles: vi.fn(),
   };
 
-  const bookService = { queryForLibrary: vi.fn() };
+  const bookService = { queryForLibrary: vi.fn(), queryJumpBucketsForLibrary: vi.fn() };
 
-  const controller = new LibraryController(libraryService as any, bookService as any);
+  const bulkRenameService = {
+    getPreview: vi.fn(),
+    isRunning: vi.fn(),
+    execute: vi.fn(),
+  };
+
+  const controller = new LibraryController(libraryService as any, bookService as any, bulkRenameService as any);
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -73,7 +80,7 @@ describe('LibraryController', () => {
     expect(reply.raw.off).toHaveBeenCalledWith('close', expect.any(Function));
     expect(reply.raw.off).toHaveBeenCalledWith('aborted', expect.any(Function));
 
-    const doneLine = (reply.raw.write as vi.Mock).mock.calls[3][0] as string;
+    const doneLine = (reply.raw.write as Mock).mock.calls[3][0] as string;
     const donePayload = JSON.parse(doneLine.replace(/^data:\s*/, '').trim());
     expect(donePayload).toEqual(expect.objectContaining({ done: true, processed: 3, succeeded: 1, failed: 1, skipped: 1 }));
     expect(reply.raw.end).toHaveBeenCalled();
@@ -107,5 +114,16 @@ describe('LibraryController', () => {
 
     expect(reply.raw.write).toHaveBeenCalledTimes(1);
     expect(reply.raw.end).toHaveBeenCalled();
+  });
+
+  it('queryBooks and queryJumpBuckets delegate to the book service', async () => {
+    const user = { id: 4, isSuperuser: false } as any;
+    const query = { sort: [{ field: 'title', dir: 'asc' }], pagination: { page: 0, size: 50 } } as any;
+
+    await controller.queryBooks(7, query, user);
+    await controller.queryJumpBuckets(7, query, user);
+
+    expect(bookService.queryForLibrary).toHaveBeenCalledWith(user, 7, query);
+    expect(bookService.queryJumpBucketsForLibrary).toHaveBeenCalledWith(user, 7, query);
   });
 });

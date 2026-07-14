@@ -41,7 +41,7 @@ export class BookMetadataFetchController {
   async updateLibraryConfig(@Param('id', ParseIntPipe) libraryId: number, @Body() dto: UpdateLibraryBookMetadataFetchConfigDto) {
     const override: BookMetadataFetchConfigOverride = Object.keys(dto).length === 0 ? null : dto;
     await this.configService.setLibraryOverride(libraryId, override);
-    return this.configService.getEffectiveConfig(libraryId);
+    return this.configService.getLibraryConfigWithLastRun(libraryId);
   }
 
   @Get('status')

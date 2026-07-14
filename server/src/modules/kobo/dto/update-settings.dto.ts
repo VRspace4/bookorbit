@@ -22,6 +22,14 @@ export class UpdateSettingsDto {
   forceEnableHyphenation?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  twoWayProgressSync?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  syncBookOrbitAnnotationsToKobo?: boolean;
+
+  @IsOptional()
   @IsInt()
   @Min(1)
   @Max(500)

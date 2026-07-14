@@ -29,6 +29,29 @@ describe('MigrationRepository', () => {
     expect(select).not.toHaveBeenCalled();
   });
 
+  it('deduplicates title lookups and queries in chunks of 500', async () => {
+    const where = vi
+      .fn()
+      .mockResolvedValueOnce([{ bookId: 1, title: 'Dune' }])
+      .mockResolvedValueOnce([{ bookId: 501, title: 'Messiah' }])
+      .mockResolvedValueOnce([{ bookId: 1001, title: null }]);
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+
+    const repo = new MigrationRepository({ select } as never);
+    const ids = Array.from({ length: 1001 }, (_, index) => index + 1);
+    ids.push(1, Number.NaN);
+
+    await expect(repo.findBookTitlesByIds(ids)).resolves.toEqual(
+      new Map([
+        [1, 'Dune'],
+        [501, 'Messiah'],
+        [1001, null],
+      ]),
+    );
+    expect(where).toHaveBeenCalledTimes(3);
+  });
+
   it('purges run state and removes all plan artifacts when there are no completed runs', async () => {
     const deleteWhere = vi.fn().mockResolvedValue(undefined);
     const deleteFn = vi.fn().mockReturnValue({ where: deleteWhere });
@@ -209,6 +232,23 @@ describe('MigrationRepository', () => {
     await expect(repo.findProfileById(200)).resolves.toEqual({ id: 200 });
     await expect(repo.findPlanArtifactById(300)).resolves.toEqual({ id: 300 });
     await expect(repo.findRunById(400)).resolves.toEqual({ id: 400 });
+  });
+
+  it('deletes migration sources and returns null when no row is deleted', async () => {
+    const returning = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: 7 }])
+      .mockResolvedValueOnce([]);
+    const where = vi.fn().mockReturnValue({ returning });
+    const deleteFn = vi.fn().mockReturnValue({ where });
+
+    const repo = new MigrationRepository({ delete: deleteFn } as never);
+
+    await expect(repo.deleteSource(7)).resolves.toEqual({ id: 7 });
+    await expect(repo.deleteSource(8)).resolves.toBeNull();
+
+    expect(deleteFn).toHaveBeenCalledWith(schema.migrationSources);
+    expect(where).toHaveBeenCalledTimes(2);
   });
 
   it('lists sources/profiles/plans/runs and run metrics via select query chains', async () => {

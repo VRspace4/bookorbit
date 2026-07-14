@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { onUnmounted, ref } from 'vue'
-import { X } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { X } from '@lucide/vue'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   modelValue: string[]
@@ -89,8 +92,9 @@ onUnmounted(() => clearTimeout(debounceTimer))
       </span>
       <input
         v-model="query"
-        class="flex-1 min-w-24 bg-transparent outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
-        :placeholder="modelValue.length === 0 ? placeholder : ''"
+        enterkeyhint="enter"
+        class="flex-1 min-w-24 bg-transparent outline-none placeholder:text-muted-foreground/50 disabled:cursor-not-allowed"
+        :placeholder="placeholder ?? (modelValue.length === 0 ? t('components.ui.chipInput.typeAndEnter') : t('components.ui.chipInput.pressEnter'))"
         :disabled="props.disabled"
         @input="onInput"
         @keydown="onKeydown"

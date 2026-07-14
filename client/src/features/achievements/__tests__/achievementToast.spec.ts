@@ -21,15 +21,15 @@ describe('showAchievementToast', () => {
   })
 
   it('shows a longer toast for epic rarity', () => {
-    showAchievementToast('Centurion', 'epic')
+    showAchievementToast('Story Stalwart', 'epic')
     expect(toast.success).toHaveBeenCalledWith(
-      expect.stringContaining('Centurion'),
+      expect.stringContaining('Story Stalwart'),
       expect.objectContaining({ description: 'Achievement Unlocked!', duration: 6000 }),
     )
   })
 
   it('shows a longer toast for legendary rarity', () => {
-    showAchievementToast('Bibliophile', 'legendary')
-    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Bibliophile'), expect.objectContaining({ duration: 6000 }))
+    showAchievementToast('Grand Archivist', 'legendary')
+    expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('Grand Archivist'), expect.objectContaining({ duration: 6000 }))
   })
 })

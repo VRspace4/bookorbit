@@ -99,13 +99,13 @@ describe('BookMetadataFetchController', () => {
   });
 
   it('gets library config and writes null override for empty payloads', async () => {
-    configService.getLibraryConfigWithLastRun.mockResolvedValue({ enabled: true });
-    configService.getEffectiveConfig.mockResolvedValue({ enabled: false });
+    configService.getLibraryConfigWithLastRun.mockResolvedValueOnce({ enabled: true }).mockResolvedValueOnce({ enabled: false });
     configService.setLibraryOverride.mockResolvedValue(undefined);
 
     await expect(controller.getLibraryConfig(22)).resolves.toEqual({ enabled: true });
     await expect(controller.updateLibraryConfig(22, {} as never)).resolves.toEqual({ enabled: false });
     expect(configService.setLibraryOverride).toHaveBeenCalledWith(22, null);
+    expect(configService.getLibraryConfigWithLastRun).toHaveBeenCalledWith(22);
   });
 
   it('returns status summary merged with paused state and session snapshot', async () => {

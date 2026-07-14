@@ -46,9 +46,11 @@ export class SeriesService {
       userId: user.id,
       completionStatus: dto.completionStatus,
       author: dto.author,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
     });
 
     const items: SeriesSummary[] = result.items.map((row) => ({
+      id: row.id,
       name: row.name,
       bookCount: row.bookCount,
       readCount: row.readCount,
@@ -60,7 +62,7 @@ export class SeriesService {
     return { items, total: result.total, page: result.page, size: result.size };
   }
 
-  async findBooks(user: RequestUser, seriesName: string, dto: ListSeriesBooksDto): Promise<SeriesBooksPage> {
+  async findBooks(user: RequestUser, seriesId: number, dto: ListSeriesBooksDto): Promise<SeriesBooksPage> {
     const page = dto.page ?? 0;
     const size = dto.size ?? 50;
     this.assertPaginationWindow(page, size);
@@ -71,23 +73,35 @@ export class SeriesService {
     }
 
     const [detail, bookPage] = await Promise.all([
-      this.seriesRepo.findDetail({ seriesName, userId: user.id, libraryIds }),
+      this.seriesRepo.findDetail({
+        seriesId,
+        userId: user.id,
+        libraryIds,
+        contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+      }),
       this.seriesRepo.findBookIds({
-        seriesName,
+        seriesId,
         page,
         size,
         sort: dto.sort ?? 'seriesIndex',
         order: dto.order ?? 'asc',
         libraryIds,
+        contentFilters: user.isSuperuser ? undefined : user.contentFilters,
       }),
     ]);
 
     if (!detail) {
       if (dto.libraryId) {
         const allLibraryIds = await this.resolveLibraryIds(user);
-        const existsInAnyLibrary = await this.seriesRepo.findDetail({ seriesName, userId: user.id, libraryIds: allLibraryIds });
+        const existsInAnyLibrary = await this.seriesRepo.findDetail({
+          seriesId,
+          userId: user.id,
+          libraryIds: allLibraryIds,
+          contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+        });
         if (existsInAnyLibrary) {
           const emptyInfo: SeriesDetail = {
+            id: existsInAnyLibrary.id,
             name: existsInAnyLibrary.name,
             bookCount: 0,
             readCount: 0,
@@ -112,12 +126,28 @@ export class SeriesService {
         cardData.genreRows,
         cardData.progressRows,
         cardData.statusRows,
+        cardData.narratorRows,
+        cardData.tagRows,
+        cardData.seriesMembershipRows,
       );
       const orderMap = new Map(bookPage.bookIds.map((id, i) => [id, i]));
-      items = cards.sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
+      items = cards
+        .map((card) => {
+          const contextualSeries = (card.seriesMemberships ?? []).find((membership) => membership.seriesId === seriesId);
+          return contextualSeries
+            ? {
+                ...card,
+                seriesId: contextualSeries.seriesId,
+                seriesName: contextualSeries.seriesName,
+                seriesIndex: contextualSeries.seriesIndex,
+              }
+            : card;
+        })
+        .sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
     }
 
     const seriesInfo: SeriesDetail = {
+      id: detail.id,
       name: detail.name,
       bookCount: detail.bookCount,
       readCount: detail.readCount,

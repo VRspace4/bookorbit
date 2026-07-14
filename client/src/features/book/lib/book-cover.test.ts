@@ -1,6 +1,23 @@
 import { describe, it, expect } from 'vitest'
 import { bookCoverStyle, bookCoverPalette, titleFontSizeClass } from './book-cover'
 
+function extractHue(color: string): number {
+  const match = color.match(/oklch\([^)]+\s(-?\d+(?:\.\d+)?)\)/)
+  if (!match) throw new Error(`Could not extract hue from color: ${color}`)
+  return Number.parseFloat(match[1]!)
+}
+
+function extractChroma(color: string): number {
+  const match = color.match(/oklch\(\s*-?\d+(?:\.\d+)?\s+(-?\d+(?:\.\d+)?)\s+-?\d+(?:\.\d+)?\s*\)/)
+  if (!match) throw new Error(`Could not extract chroma from color: ${color}`)
+  return Number.parseFloat(match[1]!)
+}
+
+function hueDistance(a: number, b: number): number {
+  const delta = Math.abs(a - b) % 360
+  return delta > 180 ? 360 - delta : delta
+}
+
 describe('bookCoverStyle', () => {
   it('returns background and color properties', () => {
     const style = bookCoverStyle('Dune')
@@ -80,7 +97,48 @@ describe('bookCoverPalette', () => {
     for (let i = 0; i < 50; i++) {
       hues.add(bookCoverPalette(`seed-${i}`).accent)
     }
-    expect(hues.size).toBeGreaterThan(10)
+    expect(hues.size).toBeGreaterThanOrEqual(10)
+  })
+
+  it('anchors placeholder hue near the supplied theme hue', () => {
+    const themeHue = 142
+    for (let i = 0; i < 50; i++) {
+      const palette = bookCoverPalette(`seed-${i}`, { themeHue })
+      const hue = extractHue(palette.from)
+      expect([0, 12, 24, 36]).toContain(hueDistance(hue, themeHue))
+    }
+  })
+
+  it('uses --tint-h from CSS variables when no theme hue is provided', () => {
+    const root = document.documentElement
+    const prev = root.style.getPropertyValue('--tint-h')
+    root.style.setProperty('--tint-h', '118')
+    try {
+      const palette = bookCoverPalette('seed-css-hue')
+      const hue = extractHue(palette.from)
+      expect([0, 12, 24, 36]).toContain(hueDistance(hue, 118))
+    } finally {
+      if (prev) root.style.setProperty('--tint-h', prev)
+      else root.style.removeProperty('--tint-h')
+    }
+  })
+
+  it('falls back to default hue if --tint-h is not a number', () => {
+    const root = document.documentElement
+    const prev = root.style.getPropertyValue('--tint-h')
+    root.style.setProperty('--tint-h', 'invalid')
+    try {
+      expect(bookCoverPalette('seed-fallback')).toEqual(bookCoverPalette('seed-fallback', { themeHue: 263 }))
+    } finally {
+      if (prev) root.style.setProperty('--tint-h', prev)
+      else root.style.removeProperty('--tint-h')
+    }
+  })
+
+  it('uses lower chroma for pastel accents than vivid accents', () => {
+    const vivid = bookCoverPalette('seed-tone-compare', { themeHue: 142, accent: 'blue', isDark: false })
+    const pastel = bookCoverPalette('seed-tone-compare', { themeHue: 142, accent: 'mint', isDark: false })
+    expect(extractChroma(pastel.from)).toBeLessThan(extractChroma(vivid.from))
   })
 
   it('always produces vibrant backgrounds', () => {

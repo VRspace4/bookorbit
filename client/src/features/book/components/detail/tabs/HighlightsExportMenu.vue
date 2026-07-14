@@ -1,18 +1,22 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Download, FileText, FileJson, FileType } from 'lucide-vue-next'
+import { Download, FileText, FileJson, FileType } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import type { AnnotationItem } from '@bookorbit/types'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 
-const props = defineProps<{
-  items: AnnotationItem[]
-  bookTitle: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    items: AnnotationItem[]
+    bookTitle: string
+    label?: string
+  }>(),
+  { label: '' },
+)
+
+const { t } = useI18n()
 
 const open = ref(false)
-
-function toggleMenu() {
-  open.value = !open.value
-}
 
 function closeMenu() {
   open.value = false
@@ -100,33 +104,35 @@ function exportJson() {
 </script>
 
 <template>
-  <div class="relative">
-    <button
-      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-      :disabled="items.length === 0"
-      @click="toggleMenu"
-    >
-      <Download :size="14" />
-      Export
-    </button>
-
-    <Teleport to="body">
-      <div v-if="open" class="fixed inset-0 z-40" @click="closeMenu" />
-    </Teleport>
-
-    <div v-if="open" class="absolute right-0 bottom-full mb-1 z-50 w-44 rounded-md border border-border bg-card shadow-lg py-1">
-      <button class="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors" @click="exportMarkdown">
+  <Popover v-model:open="open">
+    <PopoverTrigger as-child>
+      <button
+        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        :disabled="items.length === 0"
+      >
+        <Download :size="14" />
+        {{ label || t('book.detail.highlights.export.trigger') }}
+      </button>
+    </PopoverTrigger>
+    <PopoverContent align="end" class="w-44 p-1">
+      <button
+        class="flex items-center gap-2 w-full px-3 py-2 rounded text-sm text-foreground hover:bg-muted transition-colors"
+        @click="exportMarkdown"
+      >
         <FileText :size="14" class="text-muted-foreground" />
         Markdown
       </button>
-      <button class="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors" @click="exportPlainText">
+      <button
+        class="flex items-center gap-2 w-full px-3 py-2 rounded text-sm text-foreground hover:bg-muted transition-colors"
+        @click="exportPlainText"
+      >
         <FileType :size="14" class="text-muted-foreground" />
-        Plain Text
+        {{ t('book.detail.highlights.export.plainText') }}
       </button>
-      <button class="flex items-center gap-2 w-full px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors" @click="exportJson">
+      <button class="flex items-center gap-2 w-full px-3 py-2 rounded text-sm text-foreground hover:bg-muted transition-colors" @click="exportJson">
         <FileJson :size="14" class="text-muted-foreground" />
         JSON
       </button>
-    </div>
-  </div>
+    </PopoverContent>
+  </Popover>
 </template>

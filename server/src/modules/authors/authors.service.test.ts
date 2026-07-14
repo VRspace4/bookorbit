@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 vi.mock('../book/utils/assemble-book-cards', () => ({
   assembleBookCards: vi.fn(),
@@ -10,7 +11,7 @@ import { AUTHOR_ENRICHMENT_REASONS } from './author-enrichment-reasons';
 import { AuthorsService } from './authors.service';
 
 function reqUser(id = 7, superuser = false) {
-  return { id, isSuperuser: superuser, permissions: [] } as any;
+  return { id, isSuperuser: superuser, permissions: [], contentFilters: undefined } as any;
 }
 
 describe('AuthorsService', () => {
@@ -46,10 +47,12 @@ describe('AuthorsService', () => {
 
   const authorImageStorage = {
     saveFromUrl: vi.fn(),
+    saveFromBuffer: vi.fn(),
     getThumbnailPath: vi.fn(),
     getThumbnailUrlIfExists: vi.fn(),
     getImagePath: vi.fn(),
     getImageUrlIfExists: vi.fn(),
+    deleteAuthorDir: vi.fn(),
   };
 
   const enrichmentExecutor = {
@@ -143,7 +146,7 @@ describe('AuthorsService', () => {
     expect(result.affectedBookCount).toBe(8);
   });
 
-  it('update trims values and normalizes blank optional fields to null', async () => {
+  it('update normalizes author names and blank optional fields', async () => {
     authorsRepo.findVisibleAuthorIds.mockResolvedValue([20]);
     authorsRepo.findRelatedLibraryIds.mockResolvedValue([1]);
     authorsRepo.updateAuthorById.mockResolvedValue({ id: 20, name: 'Updated', sortName: null, description: 'Bio' });
@@ -157,14 +160,14 @@ describe('AuthorsService', () => {
     });
 
     await service.update(reqUser(), 20, {
-      name: '  Updated  ',
-      sortName: '   ',
+      name: '  Updated   Author  ',
+      sortName: '  Author,\tUpdated  ',
       description: '  Bio  ',
     });
 
     expect(authorsRepo.updateAuthorById).toHaveBeenCalledWith(20, {
-      name: 'Updated',
-      sortName: null,
+      name: 'Updated Author',
+      sortName: 'Author, Updated',
       description: 'Bio',
     });
     expect(enrichmentOrchestrator.schedule).toHaveBeenCalledWith(20, AUTHOR_ENRICHMENT_REASONS.AUTHOR_RENAME);
@@ -285,6 +288,7 @@ describe('AuthorsService', () => {
       libraryIds: [1, 2],
       hasPhoto: undefined,
       minBookCount: undefined,
+      contentFilters: undefined,
     });
     expect(page.items[0]).toEqual(
       expect.objectContaining({
@@ -342,6 +346,7 @@ describe('AuthorsService', () => {
         size: 10,
         page: 0,
         libraryIds: expect.arrayContaining([2]),
+        contentFilters: undefined,
       }),
     );
   });
@@ -368,7 +373,9 @@ describe('AuthorsService', () => {
 
     await service.findBooks(reqUser(), 7, {});
 
-    expect(authorsRepo.findBookIdsPage).toHaveBeenCalledWith(expect.objectContaining({ sort: 'addedAt', order: 'desc', page: 0, size: 50 }));
+    expect(authorsRepo.findBookIdsPage).toHaveBeenCalledWith(
+      expect.objectContaining({ sort: 'addedAt', order: 'desc', page: 0, size: 50, contentFilters: undefined }),
+    );
   });
 
   it('findBooks scopes results to user-accessible libraries only', async () => {
@@ -378,7 +385,45 @@ describe('AuthorsService', () => {
 
     await service.findBooks(reqUser(), 8, {});
 
-    expect(authorsRepo.findBookIdsPage).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [3] }));
+    expect(authorsRepo.findBookIdsPage).toHaveBeenCalledWith(expect.objectContaining({ libraryIds: [3], contentFilters: undefined }));
+  });
+
+  describe('content filter enforcement', () => {
+    it('passes contentFilters to findPage for non-superuser', async () => {
+      authorsRepo.findPage.mockResolvedValue({ items: [], total: 0, page: 0, size: 50 });
+
+      await service.findAll({ ...reqUser(), contentFilters: EMPTY_CONTENT_FILTER_RULES }, {});
+
+      expect(authorsRepo.findPage).toHaveBeenCalledWith(expect.objectContaining({ contentFilters: EMPTY_CONTENT_FILTER_RULES }));
+    });
+
+    it('passes undefined to findPage for superuser', async () => {
+      authorsRepo.findPage.mockResolvedValue({ items: [], total: 0, page: 0, size: 50 });
+
+      await service.findAll({ ...reqUser(7, true), contentFilters: EMPTY_CONTENT_FILTER_RULES }, {});
+
+      expect(authorsRepo.findPage).toHaveBeenCalledWith(expect.objectContaining({ contentFilters: undefined }));
+    });
+
+    it('passes contentFilters to findById and findBookIdsPage for non-superuser', async () => {
+      authorsRepo.findById.mockResolvedValue({ id: 10, name: 'Author', sortName: null, description: null, bookCount: 0, lastAddedAt: null });
+      authorsRepo.findBookIdsPage.mockResolvedValue({ bookIds: [], total: 0, page: 0, size: 50 });
+
+      await service.findBooks({ ...reqUser(), contentFilters: EMPTY_CONTENT_FILTER_RULES }, 10, {});
+
+      expect(authorsRepo.findById).toHaveBeenCalledWith(10, [1, 2], EMPTY_CONTENT_FILTER_RULES);
+      expect(authorsRepo.findBookIdsPage).toHaveBeenCalledWith(expect.objectContaining({ contentFilters: EMPTY_CONTENT_FILTER_RULES }));
+    });
+
+    it('passes undefined to findById and findBookIdsPage for superuser', async () => {
+      authorsRepo.findById.mockResolvedValue({ id: 10, name: 'Author', sortName: null, description: null, bookCount: 0, lastAddedAt: null });
+      authorsRepo.findBookIdsPage.mockResolvedValue({ bookIds: [], total: 0, page: 0, size: 50 });
+
+      await service.findBooks({ ...reqUser(7, true), contentFilters: EMPTY_CONTENT_FILTER_RULES }, 10, {});
+
+      expect(authorsRepo.findById).toHaveBeenCalledWith(10, [1, 2], undefined);
+      expect(authorsRepo.findBookIdsPage).toHaveBeenCalledWith(expect.objectContaining({ contentFilters: undefined }));
+    });
   });
 
   it('returns metadata providers directly from the metadata fetch service', () => {
@@ -448,6 +493,67 @@ describe('AuthorsService', () => {
 
     await expect(service.getThumbnailPath(reqUser(), 40)).resolves.toBe('/tmp/thumb.jpg');
     await expect(service.getImagePath(reqUser(), 40)).resolves.toBe('/tmp/full.jpg');
+  });
+
+  it('uploadImage validates and stores author image, then marks hasPhoto=true', async () => {
+    const bytes = Buffer.from('fake-image');
+    authorsRepo.findVisibleAuthorIds.mockResolvedValue([41]);
+    authorsRepo.findRelatedLibraryIds.mockResolvedValue([1]);
+    authorImageStorage.saveFromBuffer.mockResolvedValue(undefined);
+    authorsRepo.updateAuthorById.mockResolvedValue({ id: 41 });
+    authorsRepo.findById.mockResolvedValue({
+      id: 41,
+      name: 'Photo Author',
+      sortName: null,
+      description: null,
+      bookCount: 1,
+      lastAddedAt: null,
+    });
+    authorImageStorage.getImageUrlIfExists.mockResolvedValue('/api/v1/authors/41/image?t=1234');
+
+    const result = await service.uploadImage(reqUser(), 41, bytes, 'image/png');
+
+    expect(authorImageStorage.saveFromBuffer).toHaveBeenCalledWith(41, bytes);
+    expect(authorsRepo.updateAuthorById).toHaveBeenCalledWith(41, { hasPhoto: true });
+    expect(result).toEqual(expect.objectContaining({ id: 41, imageUrl: '/api/v1/authors/41/image?t=1234' }));
+  });
+
+  it('uploadImage rejects non-image mime types', async () => {
+    await expect(service.uploadImage(reqUser(), 41, Buffer.from('nope'), 'text/plain')).rejects.toMatchObject({
+      name: BadRequestException.name,
+      message: 'File must be an image',
+    });
+  });
+
+  it('uploadImage rejects files over 20 MB', async () => {
+    const tooLarge = Buffer.alloc(AuthorsService.MAX_AUTHOR_IMAGE_BYTES + 1);
+    await expect(service.uploadImage(reqUser(), 41, tooLarge, 'image/jpeg')).rejects.toMatchObject({
+      name: BadRequestException.name,
+      message: 'Image exceeds 20 MB limit',
+    });
+  });
+
+  it('deleteImage removes author image directory and marks hasPhoto=false', async () => {
+    authorsRepo.findVisibleAuthorIds.mockResolvedValue([42]);
+    authorsRepo.findRelatedLibraryIds.mockResolvedValue([1]);
+    authorImageStorage.deleteAuthorDir.mockResolvedValue(undefined);
+    authorsRepo.updateAuthorById.mockResolvedValue({ id: 42 });
+    authorsRepo.findById.mockResolvedValue({
+      id: 42,
+      name: 'No Photo Author',
+      sortName: null,
+      description: null,
+      bookCount: 2,
+      lastAddedAt: null,
+    });
+    authorImageStorage.getImageUrlIfExists.mockResolvedValue(null);
+    authorImageStorage.getThumbnailUrlIfExists.mockResolvedValue(null);
+
+    const result = await service.deleteImage(reqUser(), 42);
+
+    expect(authorImageStorage.deleteAuthorDir).toHaveBeenCalledWith(42);
+    expect(authorsRepo.updateAuthorById).toHaveBeenCalledWith(42, { hasPhoto: false });
+    expect(result).toEqual(expect.objectContaining({ id: 42, imageUrl: null }));
   });
 
   it('bulkRefreshMetadata returns zero counters for empty input', async () => {

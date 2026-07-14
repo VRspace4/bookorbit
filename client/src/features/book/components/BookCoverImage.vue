@@ -5,12 +5,13 @@ import { useCoverVersions } from '../composables/useCoverVersions'
 const props = defineProps<{
   bookId: number
   type?: 'thumbnail' | 'cover'
+  version?: string | number | Date | null
   class?: string
   alt?: string
 }>()
 
 const { coverUrl } = useCoverVersions()
-const src = computed(() => coverUrl(props.bookId, props.type ?? 'thumbnail'))
+const src = computed(() => coverUrl(props.bookId, props.type ?? 'thumbnail', props.version))
 </script>
 
 <template>

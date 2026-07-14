@@ -2,7 +2,11 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
 import { UserAvatarService } from './user-avatar.service';
 
-const ONE_BY_ONE_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+lmL8AAAAASUVORK5CYII=', 'base64');
+// Must be a strictly valid PNG: sharp >= 0.35 bundles a stricter libpng that rejects minimal hand-crafted streams.
+const ONE_BY_ONE_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWM4YWT0HwAFHgIsBxDy5AAAAABJRU5ErkJggg==',
+  'base64',
+);
 
 describe('UserAvatarService', () => {
   const userRepo = {

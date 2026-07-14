@@ -38,13 +38,23 @@ describe('BookMetadataLockService', () => {
     await expect(service.assertManualUpdateAllowed(12, dto)).resolves.toBeUndefined();
   });
 
+  it('passes transaction executors through lock replacement', async () => {
+    const { service, lockRepo } = makeService();
+    const tx = { id: 'tx' };
+
+    await service.replaceLockedFields(12, ['cover'], tx as never);
+
+    expect(lockRepo.replaceLockedFields).toHaveBeenCalledWith(12, ['cover'], tx);
+  });
+
   it('filters automated dto updates and preserves unlocked chapters', async () => {
-    const { service } = makeService(['title', 'narrators', 'comicIssueNumber', 'googleBooksId']);
+    const { service } = makeService(['title', 'narrators', 'comicIssueNumber', 'googleBooksId', 'hardcoverEditionId']);
 
     const result = await service.filterAutomatedBookUpdate(12, {
       title: 'Locked title',
       authors: ['Allowed Author'],
       googleBooksId: 'g-id',
+      hardcoverEditionId: '1001',
       audioMetadata: {
         narrators: ['Locked Narrator'],
         chapters: [{ title: 'Chapter 1', startMs: 0 }],
@@ -64,7 +74,7 @@ describe('BookMetadataLockService', () => {
         volumeName: 'Allowed Volume',
       },
     });
-    expect(result.skippedFields).toEqual(['title', 'narrators', 'googleBooksId', 'comicIssueNumber']);
+    expect(result.skippedFields).toEqual(['title', 'narrators', 'googleBooksId', 'hardcoverEditionId', 'comicIssueNumber']);
   });
 
   it('assertFieldsUnlocked passes when none of the checked fields are locked', async () => {
@@ -90,6 +100,118 @@ describe('BookMetadataLockService', () => {
     expect('title' in result.resolved).toBe(false);
   });
 
+  it('filters resolved series memberships as a grouped series update', async () => {
+    const unlocked = makeService();
+    const memberships = [
+      { seriesName: 'Sword of Truth', seriesIndex: 11 },
+      { seriesName: 'Chainfire Trilogy', seriesIndex: 3 },
+    ];
+
+    await expect(
+      unlocked.service.filterResolvedMetadata(1, { seriesName: 'Sword of Truth', seriesIndex: 11, seriesMemberships: memberships }, {}),
+    ).resolves.toEqual({
+      resolved: { seriesName: 'Sword of Truth', seriesIndex: 11, seriesMemberships: memberships },
+      providerIds: {},
+      skippedFields: [],
+    });
+
+    const locked = makeService(['seriesIndex']);
+    await expect(
+      locked.service.filterResolvedMetadata(1, { seriesName: 'Sword of Truth', seriesIndex: 11, seriesMemberships: memberships }, {}),
+    ).resolves.toEqual({
+      resolved: {},
+      providerIds: {},
+      skippedFields: ['seriesIndex'],
+    });
+  });
+
+  it('filters community rating rows as one lockable provider bundle', async () => {
+    const unlocked = makeService();
+    const communityRatings = [{ provider: MetadataProviderKey.HARDCOVER, rating: 4.25, ratingCount: 12345, updatedAt: '2026-06-25T00:00:00.000Z' }];
+
+    await expect(
+      unlocked.service.filterResolvedMetadata(
+        1,
+        {
+          communityRatings,
+        },
+        {},
+      ),
+    ).resolves.toEqual({
+      resolved: {
+        communityRatings,
+      },
+      providerIds: {},
+      skippedFields: [],
+    });
+
+    const locked = makeService(['communityRating']);
+
+    await expect(
+      locked.service.filterResolvedMetadata(
+        1,
+        {
+          communityRatings,
+        },
+        {},
+      ),
+    ).resolves.toEqual({
+      resolved: {},
+      providerIds: {},
+      skippedFields: ['communityRating'],
+    });
+  });
+
+  it('filters automated community rating dto updates as one lockable provider bundle', async () => {
+    const { service } = makeService(['communityRating']);
+
+    const result = await service.filterAutomatedBookUpdate(12, {
+      title: 'Allowed',
+      communityRatings: [{ provider: MetadataProviderKey.HARDCOVER, rating: 4.25, ratingCount: 12345 }],
+    });
+
+    expect(result).toEqual({
+      dto: { title: 'Allowed' },
+      skippedFields: ['communityRating'],
+    });
+  });
+
+  it('uses the publishedYear lock for publishedDate updates', async () => {
+    const { service } = makeService(['publishedYear']);
+
+    const automated = await service.filterAutomatedBookUpdate(12, {
+      publishedDate: '1965-08-01',
+      publishedYear: 1965,
+      title: 'Allowed',
+    });
+
+    expect(automated).toEqual({
+      dto: { title: 'Allowed' },
+      skippedFields: ['publishedYear'],
+    });
+    await expect(service.assertManualUpdateAllowed(12, { publishedDate: '1965-08-01' })).rejects.toThrow(ConflictException);
+  });
+
+  it('filters resolved publishedDate with the publishedYear lock', async () => {
+    const { service } = makeService(['publishedYear']);
+
+    await expect(
+      service.filterResolvedMetadata(
+        12,
+        {
+          publishedDate: '1965-08-01',
+          publishedYear: 1965,
+          publisher: 'Allowed Publisher',
+        },
+        {},
+      ),
+    ).resolves.toEqual({
+      resolved: { publisher: 'Allowed Publisher' },
+      providerIds: {},
+      skippedFields: ['publishedYear'],
+    });
+  });
+
   it('propagates repository errors', async () => {
     const lockRepo = {
       findLockedFields: vi.fn().mockRejectedValue(new Error('db failure')),
@@ -101,13 +223,14 @@ describe('BookMetadataLockService', () => {
   });
 
   it('filters resolved metadata and provider ids for locked fields', async () => {
-    const { service } = makeService(['cover', 'authors', 'openLibraryId', 'comicVolumeName']);
+    const { service } = makeService(['cover', 'authors', 'openLibraryId', 'librofmId', 'hardcoverEditionId', 'comicVolumeName']);
 
     const result = await service.filterResolvedMetadata(
       12,
       {
         title: 'Allowed Title',
         authors: ['Locked Author'],
+        hardcoverEditionId: '1001',
         coverUrl: 'https://example.com/cover.jpg',
         comicMetadata: {
           issueNumber: '7',
@@ -116,6 +239,7 @@ describe('BookMetadataLockService', () => {
       },
       {
         [MetadataProviderKey.GOOGLE]: 'g-id',
+        [MetadataProviderKey.LIBROFM]: '9781234567890',
         [MetadataProviderKey.OPEN_LIBRARY]: 'ol-id',
       },
     );
@@ -129,6 +253,6 @@ describe('BookMetadataLockService', () => {
     expect(result.providerIds).toEqual({
       [MetadataProviderKey.GOOGLE]: 'g-id',
     });
-    expect(result.skippedFields).toEqual(['authors', 'openLibraryId', 'comicVolumeName', 'cover']);
+    expect(result.skippedFields).toEqual(['authors', 'hardcoverEditionId', 'openLibraryId', 'librofmId', 'comicVolumeName', 'cover']);
   });
 });

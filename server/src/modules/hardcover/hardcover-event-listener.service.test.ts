@@ -1,144 +1,79 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED,
   ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED,
   ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED,
   ACHIEVEMENT_EVENT_READING_SESSION_SAVED,
   AchievementEventsService,
 } from '../achievement/achievement-events.service';
+import { HardcoverAutoSyncSchedulerService } from './hardcover-auto-sync-scheduler.service';
 import { HardcoverEventListener } from './hardcover-event-listener.service';
 
-const mockSettingsService = {
-  getSettings: vi.fn(),
-  isFeatureEnabled: vi.fn(),
-};
-
-const mockSyncService = {
-  syncBook: vi.fn(),
-};
-
-const mockRepository = {
-  findBookIdByFileId: vi.fn().mockResolvedValue(42),
+const mockScheduler = {
+  requestSync: vi.fn(),
+  requestSyncForBookFile: vi.fn(),
 };
 
 function makeListener() {
   const events = new AchievementEventsService();
-  const listener = new HardcoverEventListener(events, mockSettingsService as any, mockSyncService as any, mockRepository as any);
+  const listener = new HardcoverEventListener(events, mockScheduler as unknown as HardcoverAutoSyncSchedulerService);
   listener.onModuleInit();
-  return { events, listener };
+  return { events };
 }
-
-const enabledSettings = {
-  tokenConfigured: true,
-  enabled: true,
-  autoSyncOnStatusChange: true,
-  autoSyncOnProgressUpdate: true,
-  autoSyncOnRatingChange: true,
-  privacySettingId: 3,
-};
 
 describe('HardcoverEventListener', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockSettingsService.isFeatureEnabled.mockResolvedValue(true);
-    mockSyncService.syncBook.mockResolvedValue(undefined);
-    mockRepository.findBookIdByFileId.mockResolvedValue(42);
   });
 
-  describe('status changed event', () => {
-    it('syncs book on status change when enabled', async () => {
-      mockSettingsService.getSettings.mockResolvedValue(enabledSettings);
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, { userId: 1, bookId: 10, newStatus: 'reading', previousStatus: 'unread' });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).toHaveBeenCalledWith(1, 10);
-    });
+  it('schedules status auto-sync on status change', () => {
+    const { events } = makeListener();
 
-    it('skips when feature disabled', async () => {
-      mockSettingsService.getSettings.mockResolvedValue(enabledSettings);
-      mockSettingsService.isFeatureEnabled.mockResolvedValue(false);
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, { userId: 1, bookId: 10, newStatus: 'reading', previousStatus: 'unread' });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).not.toHaveBeenCalled();
-    });
+    events.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, { userId: 1, bookId: 10, newStatus: 'reading', previousStatus: 'unread' });
 
-    it('skips when token not configured', async () => {
-      mockSettingsService.getSettings.mockResolvedValue({ ...enabledSettings, tokenConfigured: false });
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, { userId: 1, bookId: 10, newStatus: 'reading', previousStatus: 'unread' });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).not.toHaveBeenCalled();
-    });
-
-    it('skips when autoSyncOnStatusChange disabled', async () => {
-      mockSettingsService.getSettings.mockResolvedValue({ ...enabledSettings, autoSyncOnStatusChange: false });
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, { userId: 1, bookId: 10, newStatus: 'reading', previousStatus: 'unread' });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).not.toHaveBeenCalled();
-    });
-
-    it('does not throw when sync fails', async () => {
-      mockSettingsService.getSettings.mockResolvedValue(enabledSettings);
-      mockSyncService.syncBook.mockRejectedValue(new Error('API error'));
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED, { userId: 1, bookId: 10, newStatus: 'reading', previousStatus: 'unread' });
-      await new Promise((r) => setTimeout(r, 10));
-    });
+    expect(mockScheduler.requestSync).toHaveBeenCalledWith({ userId: 1, bookId: 10, reason: 'status' });
   });
 
-  describe('reading session saved event', () => {
-    it('resolves bookId from bookFileId and syncs', async () => {
-      mockSettingsService.getSettings.mockResolvedValue(enabledSettings);
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_READING_SESSION_SAVED, {
-        userId: 1,
-        bookFileId: 5,
-        durationSeconds: 300,
-        startedAt: new Date(),
-        endedAt: new Date(),
-        progressDelta: 10,
-        endProgress: 50,
-        timezone: 'UTC',
-      });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).toHaveBeenCalledWith(1, 42);
+  it('schedules file progress auto-sync for reading sessions', () => {
+    const { events } = makeListener();
+
+    events.emit(ACHIEVEMENT_EVENT_READING_SESSION_SAVED, {
+      userId: 1,
+      bookFileId: 5,
+      durationSeconds: 300,
+      startedAt: new Date(),
+      endedAt: new Date(),
+      progressDelta: 10,
+      endProgress: 50,
+      timezone: 'UTC',
     });
 
-    it('skips when autoSyncOnProgressUpdate disabled', async () => {
-      mockSettingsService.getSettings.mockResolvedValue({ ...enabledSettings, autoSyncOnProgressUpdate: false });
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_READING_SESSION_SAVED, {
-        userId: 1,
-        bookFileId: 5,
-        durationSeconds: 300,
-        startedAt: new Date(),
-        endedAt: new Date(),
-        progressDelta: 10,
-        endProgress: 50,
-        timezone: 'UTC',
-      });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).not.toHaveBeenCalled();
-    });
+    expect(mockScheduler.requestSyncForBookFile).toHaveBeenCalledWith({ userId: 1, bookFileId: 5, reason: 'progress' });
   });
 
-  describe('rating changed event', () => {
-    it('syncs each book when rating changes', async () => {
-      mockSettingsService.getSettings.mockResolvedValue(enabledSettings);
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED, { userId: 1, bookIds: [1, 2, 3], rating: 4 });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).toHaveBeenCalledTimes(3);
+  it('schedules progress auto-sync on book progress changes', () => {
+    const { events } = makeListener();
+
+    events.emit(ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED, {
+      userId: 1,
+      bookId: 10,
+      bookFileId: 5,
+      progress: 40,
+      source: 'koreader',
     });
 
-    it('skips when autoSyncOnRatingChange disabled', async () => {
-      mockSettingsService.getSettings.mockResolvedValue({ ...enabledSettings, autoSyncOnRatingChange: false });
-      const { events } = makeListener();
-      events.emit(ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED, { userId: 1, bookIds: [1], rating: 4 });
-      await new Promise((r) => setTimeout(r, 10));
-      expect(mockSyncService.syncBook).not.toHaveBeenCalled();
-    });
+    expect(mockScheduler.requestSync).toHaveBeenCalledWith({ userId: 1, bookId: 10, reason: 'progress' });
+  });
+
+  it('schedules rating auto-sync for each affected book', () => {
+    const { events } = makeListener();
+
+    events.emit(ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED, { userId: 1, bookIds: [1, 2, 3], rating: 4 });
+
+    expect(mockScheduler.requestSync).toHaveBeenCalledTimes(3);
+    expect(mockScheduler.requestSync).toHaveBeenNthCalledWith(1, { userId: 1, bookId: 1, reason: 'rating' });
+    expect(mockScheduler.requestSync).toHaveBeenNthCalledWith(2, { userId: 1, bookId: 2, reason: 'rating' });
+    expect(mockScheduler.requestSync).toHaveBeenNthCalledWith(3, { userId: 1, bookId: 3, reason: 'rating' });
   });
 });

@@ -33,7 +33,7 @@ function makeGroup(overrides: Partial<TieredGroup> = {}): TieredGroup {
   const tierOne = makeTier({
     key: 'g_1',
     tier: 1,
-    name: 'Fledgling',
+    name: 'Ink Initiate',
     rarity: 'common',
     earned: true,
     threshold: 1,
@@ -42,7 +42,7 @@ function makeGroup(overrides: Partial<TieredGroup> = {}): TieredGroup {
   const tierTwo = makeTier({
     key: 'g_2',
     tier: 2,
-    name: 'Bookworm',
+    name: 'Spine Scout',
     rarity: 'rare',
     earned: false,
     threshold: 10,
@@ -51,15 +51,15 @@ function makeGroup(overrides: Partial<TieredGroup> = {}): TieredGroup {
   const tierThree = makeTier({
     key: 'g_3',
     tier: 3,
-    name: 'Centurion',
+    name: 'Story Stalwart',
     rarity: 'epic',
     earned: false,
-    threshold: 50,
+    threshold: 35,
   })
   const tierFour = makeTier({
     key: 'g_4',
     tier: 4,
-    name: 'Bibliophile',
+    name: 'Grand Archivist',
     rarity: 'legendary',
     earned: false,
     threshold: 100,
@@ -69,8 +69,8 @@ function makeGroup(overrides: Partial<TieredGroup> = {}): TieredGroup {
     type: 'tiered',
     groupKey: 'g',
     category: 'reading',
-    displayName: 'Fledgling',
-    displayDescription: 'Finish 10 books',
+    displayName: 'Ink Initiate',
+    displayDescription: 'Finish your first book',
     iconName: 'book-open',
     rarity: 'common',
     tiers: [tierOne, tierTwo, tierThree, tierFour],
@@ -87,8 +87,8 @@ function makeGroup(overrides: Partial<TieredGroup> = {}): TieredGroup {
 describe('TieredAchievementCard', () => {
   it('renders displayName and displayDescription', () => {
     const wrapper = mount(TieredAchievementCard, { props: { group: makeGroup() } })
-    expect(wrapper.text()).toContain('Fledgling')
-    expect(wrapper.text()).toContain('Finish 10 books')
+    expect(wrapper.text()).toContain('Ink Initiate')
+    expect(wrapper.text()).toContain('Finish your first book')
   })
 
   it('renders correct number of pip dots', () => {
@@ -100,7 +100,7 @@ describe('TieredAchievementCard', () => {
   it('shows compact tier progress in a single line', () => {
     const wrapper = mount(TieredAchievementCard, { props: { group: makeGroup() } })
     expect(wrapper.text()).toContain('Tier 1 of 4')
-    expect(wrapper.text()).toContain('5 / 10 to Bookworm')
+    expect(wrapper.text()).toContain('5 / 10 to Spine Scout')
     expect(wrapper.find('[class*="h-1.5"][class*="flex-1"]').exists()).toBe(false)
   })
 
@@ -109,7 +109,7 @@ describe('TieredAchievementCard', () => {
       key: 'library_builder_1',
       groupKey: 'library_builder',
       tier: 1,
-      name: 'Shelf Starter',
+      name: 'Shelf Seed',
       description: 'Have 50 books in your library',
       threshold: 50,
       earned: false,
@@ -119,7 +119,7 @@ describe('TieredAchievementCard', () => {
       key: 'library_builder_2',
       groupKey: 'library_builder',
       tier: 2,
-      name: 'Growing Collection',
+      name: 'Collection Architect',
       threshold: 250,
       earned: false,
     })
@@ -127,7 +127,7 @@ describe('TieredAchievementCard', () => {
       key: 'library_builder_3',
       groupKey: 'library_builder',
       tier: 3,
-      name: 'Vast Library',
+      name: 'Stack Sovereign',
       threshold: 1000,
       earned: false,
     })
@@ -142,7 +142,7 @@ describe('TieredAchievementCard', () => {
     const wrapper = mount(TieredAchievementCard, {
       props: {
         group: makeGroup({
-          displayName: 'Shelf Starter',
+          displayName: 'Shelf Seed',
           displayDescription: 'Have 50 books in your library',
           tiers: [tierOne, tierTwo, tierThree, tierFour],
           earnedCount: 0,
@@ -155,20 +155,19 @@ describe('TieredAchievementCard', () => {
     })
 
     expect(wrapper.text()).toContain('Tier 0 of 4')
-    expect(wrapper.text()).toContain('264 / 50 to Shelf Starter')
+    expect(wrapper.text()).toContain('264 / 50 to Shelf Seed')
   })
 
-  it('shows All tiers complete! when all earned', () => {
+  it('shows green checkmark when all earned', () => {
     const allEarned = makeGroup({
-      displayDescription: 'All tiers complete!',
+      displayDescription: 'Finish a book with 1,000 or more pages',
       earnedCount: 4,
       totalTiers: 4,
       nextUnearned: null,
       currentProgress: null,
     })
     const wrapper = mount(TieredAchievementCard, { props: { group: allEarned } })
-    const allTiersMatches = wrapper.text().match(/All tiers complete!/g) ?? []
-    expect(allTiersMatches).toHaveLength(1)
+    expect(wrapper.text()).toContain('Finish a book with 1,000 or more pages')
     expect(wrapper.find('[class*="bg-green-500"]').exists()).toBe(true)
     expect(wrapper.find('[class*="text-green-400"]').exists()).toBe(true)
   })
@@ -183,10 +182,10 @@ describe('TieredAchievementCard', () => {
   it('expanded panel shows tier list', async () => {
     const wrapper = mount(TieredAchievementCard, { props: { group: makeGroup() } })
     await wrapper.trigger('click')
-    expect(wrapper.text()).toContain('Fledgling')
-    expect(wrapper.text()).toContain('Bookworm')
-    expect(wrapper.text()).toContain('Centurion')
-    expect(wrapper.text()).toContain('Bibliophile')
+    expect(wrapper.text()).toContain('Ink Initiate')
+    expect(wrapper.text()).toContain('Spine Scout')
+    expect(wrapper.text()).toContain('Story Stalwart')
+    expect(wrapper.text()).toContain('Grand Archivist')
   })
 
   it('expanded panel shows tier dates for earned tiers', async () => {

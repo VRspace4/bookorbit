@@ -28,6 +28,9 @@ describe('AudnexusProvider', () => {
     audible: { enabled: false, domain: 'audible.com' },
     audnexus: { enabled: true },
     comicvine: { enabled: false, apiKey: '' },
+    ranobedb: { enabled: false },
+    kobo: { enabled: false, country: 'us', language: 'en' },
+    lubimyczytac: { enabled: false },
   };
 
   beforeEach(async () => {

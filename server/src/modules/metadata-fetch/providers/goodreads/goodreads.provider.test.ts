@@ -18,7 +18,24 @@ describe('GoodreadsProvider', () => {
     audible: { enabled: false, domain: 'com' },
     audnexus: { enabled: false },
     comicvine: { enabled: false, apiKey: '' },
+    ranobedb: { enabled: false },
+    kobo: { enabled: false, country: 'us', language: 'en' },
+    lubimyczytac: { enabled: false },
   };
+
+  function goodreadsBookHtml(bookId: string, title: string): string {
+    const mockState = {
+      [`Book:kca:${bookId}`]: { title },
+    };
+    return `<script id="__NEXT_DATA__">{"props":{"pageProps":{"apolloState":${JSON.stringify(mockState)}}}}</script>`;
+  }
+
+  function fetchUrl(input: unknown): string {
+    if (typeof input === 'string') return input;
+    if (input instanceof URL) return input.toString();
+    if (typeof input === 'object' && input !== null && 'url' in input && typeof input.url === 'string') return input.url;
+    return '';
+  }
 
   beforeEach(() => {
     providerConfig = {
@@ -179,6 +196,163 @@ describe('GoodreadsProvider', () => {
       await vi.advanceTimersByTimeAsync(0);
       await searchPromise;
       expect(global.fetch).toHaveBeenCalledTimes(4); // 1 autocomplete + 3 book lookups
+    });
+
+    it('prefers title-only autocomplete matches over author-query summary results', async () => {
+      vi.useFakeTimers();
+      const titleOnly = [
+        {
+          bookId: '56916837',
+          bookUrl: '/book/show/56916837-to-kill-a-mockingbird',
+          title: 'To Kill a Mockingbird',
+          bookTitleBare: 'To Kill a Mockingbird',
+          author: 'Harper Lee',
+          ratingsCount: 7_000_000,
+        },
+      ];
+      const titleWithAuthor = [
+        {
+          bookId: '26189532',
+          bookUrl: '/book/show/26189532-to-kill-a-mockingbird-by-harper-lee-summary-analysis',
+          title: 'To Kill a Mockingbird by Harper Lee | Summary & Analysis',
+          bookTitleBare: 'To Kill a Mockingbird by Harper Lee | Summary & Analysis',
+          author: 'aBookaDay',
+          ratingsCount: 100,
+        },
+      ];
+
+      global.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
+        const url = fetchUrl(input);
+        if (url.includes('q=To%20Kill%20a%20Mockingbird%20Harper%20Lee')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(titleWithAuthor) });
+        }
+        if (url.includes('q=To%20Kill%20a%20Mockingbird')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(titleOnly) });
+        }
+        if (url.includes('/book/show/56916837')) {
+          return Promise.resolve({ ok: true, text: () => Promise.resolve(goodreadsBookHtml('56916837', 'To Kill a Mockingbird')) });
+        }
+        return Promise.resolve({
+          ok: true,
+          text: () => Promise.resolve(goodreadsBookHtml('26189532', 'To Kill a Mockingbird by Harper Lee | Summary & Analysis')),
+        });
+      }) as never;
+
+      const searchPromise = provider.search({ title: 'To Kill a Mockingbird', author: 'Harper Lee' });
+      await vi.runAllTimersAsync();
+      const result = await searchPromise;
+
+      const bookFetchUrls = vi
+        .mocked(global.fetch)
+        .mock.calls.map(([url]) => fetchUrl(url))
+        .filter((url) => url.includes('/book/show/'));
+      expect(bookFetchUrls[0]).toBe('https://www.goodreads.com/book/show/56916837');
+      expect(result[0].title).toBe('To Kill a Mockingbird');
+    });
+
+    it('ranks exact title and author autocomplete matches above companion books', async () => {
+      vi.useFakeTimers();
+      const titleOnly = [
+        {
+          bookId: '44767458',
+          bookUrl: '/book/show/44767458-dune',
+          title: 'Dune (Dune, #1)',
+          bookTitleBare: 'Dune',
+          author: 'Frank Patrick Herbert',
+          ratingsCount: 1_600_000,
+        },
+        {
+          bookId: '110',
+          bookUrl: '/book/show/110.The_Road_to_Dune',
+          title: 'The Road to Dune',
+          bookTitleBare: 'The Road to Dune',
+          author: 'Frank Herbert',
+          ratingsCount: 20_000,
+        },
+      ];
+      const titleWithAuthor = [
+        {
+          bookId: '110',
+          bookUrl: '/book/show/110.The_Road_to_Dune',
+          title: 'The Road to Dune',
+          bookTitleBare: 'The Road to Dune',
+          author: 'Frank Herbert',
+          ratingsCount: 20_000,
+        },
+      ];
+
+      global.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
+        const url = fetchUrl(input);
+        if (url.includes('q=Dune%20Frank%20Herbert')) return Promise.resolve({ ok: true, json: () => Promise.resolve(titleWithAuthor) });
+        if (url.includes('q=Dune')) return Promise.resolve({ ok: true, json: () => Promise.resolve(titleOnly) });
+        if (url.includes('/book/show/44767458')) {
+          return Promise.resolve({ ok: true, text: () => Promise.resolve(goodreadsBookHtml('44767458', 'Dune')) });
+        }
+        return Promise.resolve({ ok: true, text: () => Promise.resolve(goodreadsBookHtml('110', 'The Road to Dune')) });
+      }) as never;
+
+      const searchPromise = provider.search({ title: 'Dune', author: 'Frank Herbert' });
+      await vi.runAllTimersAsync();
+      const result = await searchPromise;
+
+      const bookFetchUrls = vi
+        .mocked(global.fetch)
+        .mock.calls.map(([url]) => fetchUrl(url))
+        .filter((url) => url.includes('/book/show/'));
+      expect(bookFetchUrls[0]).toBe('https://www.goodreads.com/book/show/44767458');
+      expect(result[0].title).toBe('Dune');
+    });
+
+    it('keeps fetching detail pages after one loads but fails to parse', async () => {
+      vi.useFakeTimers();
+      const autocomplete = [
+        { bookId: '1', bookUrl: '/book/show/1.B1', title: 'B1', bookTitleBare: 'B1' },
+        { bookId: '2', bookUrl: '/book/show/2.B2', title: 'B2', bookTitleBare: 'B2' },
+      ];
+
+      global.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
+        const url = fetchUrl(input);
+        if (url.includes('/auto_complete')) return Promise.resolve({ ok: true, json: () => Promise.resolve(autocomplete) });
+        if (url.includes('/book/show/1')) return Promise.resolve({ ok: true, text: () => Promise.resolve('<html>no data</html>') });
+        return Promise.resolve({ ok: true, text: () => Promise.resolve(goodreadsBookHtml('2', 'B2 From Detail')) });
+      }) as never;
+
+      const searchPromise = provider.search({ title: 'B' });
+      await vi.runAllTimersAsync();
+      const result = await searchPromise;
+
+      const detailUrls = vi
+        .mocked(global.fetch)
+        .mock.calls.map(([url]) => fetchUrl(url))
+        .filter((url) => url.includes('/book/show/'));
+      expect(detailUrls).toContain('https://www.goodreads.com/book/show/2');
+      expect(result.find((c) => c.providerId === '2')?.title).toBe('B2 From Detail');
+      expect(result.find((c) => c.providerId === '1')?.title).toBe('B1');
+    });
+
+    it('stops fetching detail pages once one is WAF-blocked and falls back to autocomplete', async () => {
+      vi.useFakeTimers();
+      const autocomplete = [
+        { bookId: '1', bookUrl: '/book/show/1.B1', title: 'B1', bookTitleBare: 'B1' },
+        { bookId: '2', bookUrl: '/book/show/2.B2', title: 'B2', bookTitleBare: 'B2' },
+      ];
+
+      global.fetch = vi.fn((input: Parameters<typeof fetch>[0]) => {
+        const url = fetchUrl(input);
+        if (url.includes('/auto_complete')) return Promise.resolve({ ok: true, json: () => Promise.resolve(autocomplete) });
+        return Promise.resolve({ ok: true, status: 202, text: () => Promise.resolve('<div id="challenge-container"></div>') });
+      }) as never;
+
+      const searchPromise = provider.search({ title: 'B' });
+      await vi.runAllTimersAsync();
+      const result = await searchPromise;
+
+      const detailUrls = vi
+        .mocked(global.fetch)
+        .mock.calls.map(([url]) => fetchUrl(url))
+        .filter((url) => url.includes('/book/show/'));
+      expect(detailUrls).toEqual(['https://www.goodreads.com/book/show/1']);
+      expect(result.map((c) => c.title)).toEqual(['B1', 'B2']);
     });
   });
 

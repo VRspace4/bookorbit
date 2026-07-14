@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
 import type { MetadataCandidate, MetadataProviderInfo } from '@bookorbit/types'
+import { Star } from '@lucide/vue'
 import { getProviderLabel, hideOnError, providerBadgeStyle, toDisplayCoverUrl } from '../../../lib/metadata-fetch'
 import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '../../../lib/cover-aspect-ratio'
+import { formatCommunityRatingValue } from '../../../lib/community-rating'
+import { displayPublishedDate } from '../../../lib/published-date'
 import BookCoverPlaceholder from '@/features/book/components/BookCoverPlaceholder.vue'
 
 const props = defineProps<{
@@ -18,6 +21,8 @@ const providerLabel = computed(() => getProviderLabel(props.candidate.provider, 
 const displayCoverUrl = computed(() => toDisplayCoverUrl(props.candidate.coverUrl))
 const candidateSeed = computed(() => props.candidate.title ?? props.candidate.provider)
 const candidateAuthorLine = computed(() => props.candidate.authors?.join(', ') || null)
+const communityRatingDisplay = computed(() => formatCommunityRatingValue(props.candidate.communityRating, props.candidate.communityRatingCount))
+const publishedDisplay = computed(() => displayPublishedDate(props.candidate.publishedDate, props.candidate.publishedYear))
 
 function handleSelect() {
   emit('select', props.candidate)
@@ -54,8 +59,12 @@ function handleSelect() {
         <span class="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded-md" :style="providerBadgeStyle(candidate.provider)">
           {{ providerLabel }}
         </span>
-        <span v-if="candidate.publishedYear" class="text-[10px] text-muted-foreground tabular-nums">{{ candidate.publishedYear }}</span>
+        <span v-if="publishedDisplay" class="text-[10px] text-muted-foreground tabular-nums">{{ publishedDisplay }}</span>
         <span v-if="candidate.pageCount" class="text-[10px] text-muted-foreground tabular-nums">{{ candidate.pageCount }}p</span>
+        <span v-if="communityRatingDisplay" class="inline-flex items-center gap-1 text-[10px] text-muted-foreground tabular-nums">
+          <Star class="size-3 text-primary" />
+          {{ communityRatingDisplay }}
+        </span>
       </span>
     </span>
   </button>

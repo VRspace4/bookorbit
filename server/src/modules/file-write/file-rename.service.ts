@@ -4,19 +4,22 @@ import { access, mkdir, readdir, rename as fsRename, rmdir } from 'fs/promises';
 import { basename, dirname, extname, join, relative } from 'path';
 
 import type { FileRenameResult } from '@bookorbit/types';
-import { NotificationType, resolveUploadPath } from '@bookorbit/types';
+import { isAudioFormat, NotificationType, resolveUploadPath } from '@bookorbit/types';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { NotificationService } from '../notification/notification.service';
 import type { BookFilePathUpdate, BookRenameData } from './file-rename.repository';
 import { FileRenameRepository } from './file-rename.repository';
-import { FileLockService } from './file-lock.service';
+import { FileLockService, bookOperationLockKey } from './file-lock.service';
+import { buildTokens } from './file-rename.utils';
 
 const FILE_RENAME_EVENT = 'file.rename';
 const FILE_RENAME_ROLLBACK_EVENT = 'file.rename_rollback';
 const DEFAULT_RENAME_DEBOUNCE_MS = 3_000;
 
 export const RENAME_RELEVANT_FIELDS = new Set(['title', 'authors', 'seriesName', 'seriesIndex', 'publishedYear'] as const);
+
+type RenameBookFile = Awaited<ReturnType<FileRenameRepository['findAllBookFiles']>>[number];
 
 @Injectable()
 export class FileRenameService implements OnModuleDestroy {
@@ -56,6 +59,14 @@ export class FileRenameService implements OnModuleDestroy {
     this.debounceMap.set(bookId, timer);
   }
 
+  cancelPendingRename(bookId: number): void {
+    const existing = this.debounceMap.get(bookId);
+    if (existing) {
+      clearTimeout(existing);
+      this.debounceMap.delete(bookId);
+    }
+  }
+
   onModuleDestroy(): void {
     for (const timer of this.debounceMap.values()) clearTimeout(timer);
     this.debounceMap.clear();
@@ -67,16 +78,20 @@ export class FileRenameService implements OnModuleDestroy {
     }
   }
 
-  async performRename(bookId: number, userId: number): Promise<FileRenameResult> {
+  async performRename(bookId: number, userId: number, force = false, suppressNotification = false): Promise<FileRenameResult> {
+    return this.lockService.withLock(bookOperationLockKey(bookId), () => this.performRenameLocked(bookId, userId, force, suppressNotification));
+  }
+
+  private async performRenameLocked(bookId: number, userId: number, force = false, suppressNotification = false): Promise<FileRenameResult> {
     const startedAt = Date.now();
-    this.logger.log(`[${FILE_RENAME_EVENT}] [start] bookId=${bookId} userId=${userId} - file rename started`);
+    this.logger.log(`[${FILE_RENAME_EVENT}] [start] bookId=${bookId} userId=${userId} force=${force} - file rename started`);
 
     const data = await this.renameRepo.findBookRenameData(bookId);
     if (!data) {
       return this.logAndReturn(bookId, startedAt, { status: 'skipped', reason: 'book not found' });
     }
 
-    if (!data.fileRenameEnabled) {
+    if (!data.fileRenameEnabled && !force) {
       return this.logAndReturn(bookId, startedAt, { status: 'skipped', reason: 'disabled' });
     }
 
@@ -93,48 +108,155 @@ export class FileRenameService implements OnModuleDestroy {
     const format = (data.file.format ?? extname(data.file.absolutePath).slice(1)).toLowerCase();
     const originalStem = basename(data.file.absolutePath, extname(data.file.absolutePath));
     const tokens = buildTokens(data.metadata, data.authors, originalStem, format);
-    const resolvedRelPath = resolveUploadPath(pattern, tokens, format);
+    const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
+    const resolvedRelPath = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
 
     if (!resolvedRelPath) {
       return this.logAndReturn(bookId, startedAt, { status: 'skipped', reason: 'pattern resolved to empty' });
     }
 
     const currentAbsolutePath = data.file.absolutePath;
-    const newAbsolutePath = join(data.libraryFolderPath, resolvedRelPath);
+    const baseNewAbsolutePath = join(data.libraryFolderPath, resolvedRelPath);
     const currentFolderPath = data.bookFolderPath;
-    const newFolderPath = dirname(newAbsolutePath);
+    const baseNewFolderPath = dirname(baseNewAbsolutePath);
     const isBookPerFolder = data.organizationMode === 'book_per_folder';
 
-    if (newAbsolutePath === currentAbsolutePath) {
+    const allFiles = await this.renameRepo.findAllBookFiles(bookId);
+    const fileTargets = new Map<number, string>();
+    const bookHasOwnFolder = isBookPerFolder && currentFolderPath !== currentAbsolutePath;
+
+    for (const file of allFiles) {
+      if (file.id === data.file.id) {
+        fileTargets.set(file.id, baseNewAbsolutePath);
+      } else if (file.role === 'content') {
+        const fileExt = extname(file.absolutePath);
+        const fileFormat = (file.format ?? fileExt.slice(1)).toLowerCase();
+        const fileOriginalStem = basename(file.absolutePath, fileExt);
+        const fileTokens = buildTokens(data.metadata, data.authors, fileOriginalStem, fileFormat);
+        const fileResolvedRelPath = resolveUploadPath(pattern, fileTokens, fileFormat, { sanitizeForCrossPlatform });
+
+        let targetAbs: string;
+        if (fileResolvedRelPath) {
+          const resolvedAbs = join(data.libraryFolderPath, fileResolvedRelPath);
+          if (isBookPerFolder) {
+            const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
+            const oldSubDir = dirname(relToOldFolder);
+            targetAbs = join(baseNewFolderPath, oldSubDir, basename(resolvedAbs));
+          } else {
+            targetAbs = resolvedAbs;
+          }
+        } else {
+          const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
+          targetAbs = join(isBookPerFolder ? baseNewFolderPath : dirname(baseNewAbsolutePath), relToOldFolder);
+        }
+
+        fileTargets.set(file.id, targetAbs);
+      } else {
+        const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
+        const targetAbs = join(isBookPerFolder ? baseNewFolderPath : dirname(baseNewAbsolutePath), relToOldFolder);
+
+        fileTargets.set(file.id, targetAbs);
+      }
+    }
+
+    this.applyMultiTrackAudioPartSuffixes(fileTargets, allFiles, data.file.id);
+
+    if (this.hasInternalCollision(fileTargets)) {
+      fileTargets.clear();
+      fileTargets.set(data.file.id, baseNewAbsolutePath);
+      for (const file of allFiles) {
+        if (file.id !== data.file.id) {
+          const relToOldFolder = bookHasOwnFolder ? relative(currentFolderPath, file.absolutePath) : basename(file.absolutePath);
+          const targetDir = isBookPerFolder ? baseNewFolderPath : dirname(baseNewAbsolutePath);
+          fileTargets.set(file.id, join(targetDir, relToOldFolder));
+        }
+      }
+    }
+
+    const newAbsolutePath = fileTargets.get(data.file.id) ?? baseNewAbsolutePath;
+    const newFolderPath = dirname(newAbsolutePath);
+
+    let pathUnchanged = newAbsolutePath === currentAbsolutePath;
+    if (pathUnchanged) {
+      for (const file of allFiles) {
+        if (fileTargets.get(file.id) && fileTargets.get(file.id) !== file.absolutePath) {
+          pathUnchanged = false;
+          break;
+        }
+      }
+    } else {
+      pathUnchanged = false;
+    }
+
+    if (pathUnchanged) {
       return this.logAndReturn(bookId, startedAt, { status: 'skipped', reason: 'path unchanged' });
     }
 
-    const pathTaken = await this.renameRepo.checkPathTakenByOtherBook(newAbsolutePath, bookId);
-    if (pathTaken) {
-      this.logger.warn(
-        `[${FILE_RENAME_EVENT}] [end] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} status=skipped reason="collision" newPath="${sanitizeLogValue(newAbsolutePath)}" - rename skipped: path already taken`,
-      );
-      await this.notifyFailure(userId, bookId, 'File rename skipped: target path already taken by another book.');
-      return { status: 'skipped', reason: 'collision', oldPath: currentAbsolutePath, newPath: newAbsolutePath, durationMs: Date.now() - startedAt };
+    const nestedFolderMove = bookHasOwnFolder && newFolderPath !== currentFolderPath && this.foldersAreNested(currentFolderPath, newFolderPath);
+    const renamingFolder = bookHasOwnFolder && newFolderPath !== currentFolderPath && !nestedFolderMove;
+    let moveIntoExistingFolder = false;
+    let mergeTargetBookId: number | null = null;
+
+    if (renamingFolder) {
+      if (await this.pathExists(newFolderPath)) {
+        moveIntoExistingFolder = true;
+        const targetBook = await this.renameRepo.findBookByExactFolderPath(data.libraryId, newFolderPath);
+        if (targetBook && targetBook.id !== bookId) mergeTargetBookId = targetBook.id;
+
+        const existingTargetPath = await this.findExistingTargetFilePath(allFiles, fileTargets);
+        if (existingTargetPath) {
+          const reason = 'target path already exists on disk';
+          this.logger.warn(
+            `[${FILE_RENAME_EVENT}] [end] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} status=skipped reason="${sanitizeLogValue(reason)}" newPath="${sanitizeLogValue(existingTargetPath)}" - rename skipped: target already exists on disk`,
+          );
+          await this.notifyFailure(userId, bookId, `File rename skipped: ${reason}.`, suppressNotification);
+          return { status: 'skipped', reason, oldPath: currentAbsolutePath, newPath: newAbsolutePath, durationMs: Date.now() - startedAt };
+        }
+      }
+    } else {
+      const existingTargetPath = await this.findExistingTargetFilePath(allFiles, fileTargets);
+      if (existingTargetPath) {
+        const reason = 'target path already exists on disk';
+        this.logger.warn(
+          `[${FILE_RENAME_EVENT}] [end] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} status=skipped reason="${sanitizeLogValue(reason)}" newPath="${sanitizeLogValue(newAbsolutePath)}" - rename skipped: target already exists on disk`,
+        );
+        await this.notifyFailure(userId, bookId, `File rename skipped: ${reason}.`, suppressNotification);
+        return { status: 'skipped', reason, oldPath: currentAbsolutePath, newPath: newAbsolutePath, durationMs: Date.now() - startedAt };
+      }
     }
 
-    const filesystemTargetPath = isBookPerFolder && newFolderPath !== currentFolderPath ? newFolderPath : newAbsolutePath;
-    if (await this.pathExists(filesystemTargetPath)) {
-      const reason =
-        isBookPerFolder && newFolderPath !== currentFolderPath ? 'target folder already exists on disk' : 'target path already exists on disk';
-      this.logger.warn(
-        `[${FILE_RENAME_EVENT}] [end] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} status=skipped reason="${sanitizeLogValue(reason)}" newPath="${sanitizeLogValue(newAbsolutePath)}" - rename skipped: target already exists on disk`,
-      );
-      await this.notifyFailure(userId, bookId, `File rename skipped: ${reason}.`);
-      return { status: 'skipped', reason, oldPath: currentAbsolutePath, newPath: newAbsolutePath, durationMs: Date.now() - startedAt };
+    for (const file of allFiles) {
+      const targetPath = fileTargets.get(file.id)!;
+      if (targetPath !== file.absolutePath) {
+        const pathTaken = await this.renameRepo.checkPathTakenByOtherBook(targetPath, bookId);
+        if (pathTaken) {
+          this.logger.warn(
+            `[${FILE_RENAME_EVENT}] [end] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} status=skipped reason="collision" newPath="${sanitizeLogValue(targetPath)}" - rename skipped: path already taken`,
+          );
+          await this.notifyFailure(userId, bookId, 'File rename skipped: target path already taken by another book.', suppressNotification);
+          return {
+            status: 'skipped',
+            reason: 'collision',
+            oldPath: currentAbsolutePath,
+            newPath: newAbsolutePath,
+            durationMs: Date.now() - startedAt,
+          };
+        }
+      }
     }
 
     try {
-      if (isBookPerFolder && newFolderPath !== currentFolderPath) {
-        await this.renameBookWithFolder(bookId, data, currentFolderPath, newFolderPath, newAbsolutePath);
+      if (bookHasOwnFolder && newFolderPath !== currentFolderPath) {
+        if (mergeTargetBookId !== null) {
+          await this.mergeBookIntoExistingFolder(bookId, data, currentFolderPath, newFolderPath, fileTargets, mergeTargetBookId);
+        } else if (moveIntoExistingFolder) {
+          await this.renameBookIntoExistingFolder(bookId, data, currentFolderPath, newFolderPath, fileTargets);
+        } else {
+          await this.renameBookWithFolder(bookId, data, currentFolderPath, newFolderPath, fileTargets);
+        }
       } else {
-        const nextBookFolderPath = isBookPerFolder ? currentFolderPath : newAbsolutePath;
-        await this.renameBookFileOnly(bookId, data, currentAbsolutePath, newAbsolutePath, nextBookFolderPath);
+        const nextBookFolderPath = isBookPerFolder ? newFolderPath : newAbsolutePath;
+        await this.renameBookFilesOnly(bookId, data, fileTargets, nextBookFolderPath);
       }
     } catch (err) {
       const errorClass = err instanceof Error ? err.name : 'Error';
@@ -142,7 +264,7 @@ export class FileRenameService implements OnModuleDestroy {
       this.logger.warn(
         `[${FILE_RENAME_EVENT}] [fail] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - file rename failed`,
       );
-      await this.notifyFailure(userId, bookId, err instanceof Error ? err.message : String(err));
+      await this.notifyFailure(userId, bookId, err instanceof Error ? err.message : String(err), suppressNotification);
       return { status: 'failed', reason: errorMessage, oldPath: currentAbsolutePath, newPath: newAbsolutePath, durationMs: Date.now() - startedAt };
     }
 
@@ -150,34 +272,61 @@ export class FileRenameService implements OnModuleDestroy {
       `[${FILE_RENAME_EVENT}] [end] bookId=${bookId} userId=${userId} durationMs=${Date.now() - startedAt} status=success oldPath="${sanitizeLogValue(currentAbsolutePath)}" newPath="${sanitizeLogValue(newAbsolutePath)}" - file rename completed`,
     );
 
-    await this.notifySuccess(userId, bookId, currentAbsolutePath, newAbsolutePath);
+    await this.notifySuccess(userId, bookId, currentAbsolutePath, newAbsolutePath, suppressNotification);
     return { status: 'success', oldPath: currentAbsolutePath, newPath: newAbsolutePath, durationMs: Date.now() - startedAt };
   }
 
-  private async renameBookFileOnly(
+  private async renameBookFilesOnly(
     bookId: number,
     data: BookRenameData,
-    oldPath: string,
-    newPath: string,
+    fileTargets: Map<number, string>,
     nextBookFolderPath: string,
   ): Promise<void> {
-    const oldDir = dirname(oldPath);
-    const newDir = dirname(newPath);
-    const oldRelPath = data.file.relPath;
-    const newRelPath = relative(data.libraryFolderPath, newPath);
+    const allFiles = await this.renameRepo.findAllBookFiles(bookId);
+    const updates: BookFilePathUpdate[] = allFiles.map((file) => {
+      const newPath = fileTargets.get(file.id)!;
+      return {
+        id: file.id,
+        absolutePath: newPath,
+        relPath: relative(data.libraryFolderPath, newPath),
+      };
+    });
 
-    await this.renameRepo.applyFileRename(bookId, data.file.id, newPath, newRelPath, nextBookFolderPath);
+    await this.renameRepo.applyFolderRename(bookId, updates, nextBookFolderPath);
 
+    const moved: Array<{ from: string; to: string }> = [];
     try {
-      await mkdir(newDir, { recursive: true });
-      await this.lockService.withLock(oldPath, () => fsRename(oldPath, newPath));
+      for (const file of allFiles) {
+        const newPath = fileTargets.get(file.id)!;
+        if (newPath !== file.absolutePath) {
+          await mkdir(dirname(newPath), { recursive: true });
+          await this.lockService.withLock(file.absolutePath, () => fsRename(file.absolutePath, newPath));
+          moved.push({ from: file.absolutePath, to: newPath });
+        }
+      }
     } catch (error) {
-      await this.rollbackFileRename(bookId, data.file.id, oldPath, oldRelPath, data.bookFolderPath, error);
+      for (const { from, to } of [...moved].reverse()) {
+        try {
+          await fsRename(to, from);
+        } catch (rollbackError) {
+          this.logRollbackFailure(bookId, error, rollbackError);
+        }
+      }
+      const oldUpdates = allFiles.map((file) => ({
+        id: file.id,
+        absolutePath: file.absolutePath,
+        relPath: file.relPath,
+      }));
+      await this.rollbackFolderRename(bookId, oldUpdates, data.bookFolderPath, error);
       throw error;
     }
 
-    if (oldDir !== newDir) {
-      await this.tryRemoveEmptyDir(oldDir);
+    for (const file of allFiles) {
+      const oldDir = dirname(file.absolutePath);
+      const newDir = dirname(fileTargets.get(file.id)!);
+      if (oldDir !== newDir) {
+        await this.tryRemoveEmptyDir(oldDir);
+      }
     }
   }
 
@@ -186,55 +335,233 @@ export class FileRenameService implements OnModuleDestroy {
     data: BookRenameData,
     oldFolderPath: string,
     newFolderPath: string,
-    newPrimaryAbsolutePath: string,
+    fileTargets: Map<number, string>,
   ): Promise<void> {
     const allFiles = await this.renameRepo.findAllBookFiles(bookId);
-    const movedPrimaryAbsolutePath = join(newFolderPath, relative(oldFolderPath, data.file.absolutePath));
-    const newUpdates = allFiles.map((file) => {
-      const relToOldFolder = relative(oldFolderPath, file.absolutePath);
-      const absolutePath = file.id === data.file.id ? newPrimaryAbsolutePath : join(newFolderPath, relToOldFolder);
-      return {
-        id: file.id,
-        absolutePath,
-        relPath: relative(data.libraryFolderPath, absolutePath),
-      } satisfies BookFilePathUpdate;
-    });
+    const newUpdates = allFiles.map((file) => ({
+      id: file.id,
+      absolutePath: fileTargets.get(file.id)!,
+      relPath: relative(data.libraryFolderPath, fileTargets.get(file.id)!),
+    }));
     const oldUpdates = allFiles.map((file) => ({ id: file.id, absolutePath: file.absolutePath, relPath: file.relPath }) satisfies BookFilePathUpdate);
 
     await this.renameRepo.applyFolderRename(bookId, newUpdates, newFolderPath);
 
-    let folderRenamed = false;
-    try {
-      await mkdir(dirname(newFolderPath), { recursive: true });
-      await this.lockService.withLock(oldFolderPath, () => fsRename(oldFolderPath, newFolderPath));
-      folderRenamed = true;
-      if (movedPrimaryAbsolutePath !== newPrimaryAbsolutePath) {
-        await this.lockService.withLock(movedPrimaryAbsolutePath, () => fsRename(movedPrimaryAbsolutePath, newPrimaryAbsolutePath));
+    if (this.foldersAreNested(oldFolderPath, newFolderPath)) {
+      await this.moveBookFilesIndividually(bookId, allFiles, oldFolderPath, newFolderPath, fileTargets, oldUpdates);
+    } else {
+      let folderRenamed = false;
+      try {
+        await mkdir(dirname(newFolderPath), { recursive: true });
+        await this.lockService.withLock(oldFolderPath, () => fsRename(oldFolderPath, newFolderPath));
+        folderRenamed = true;
+
+        const movedFilesInside: Array<{ from: string; to: string }> = [];
+        try {
+          for (const file of allFiles) {
+            const currentPathAfterFolderRename = join(newFolderPath, relative(oldFolderPath, file.absolutePath));
+            const intendedPath = fileTargets.get(file.id)!;
+            if (currentPathAfterFolderRename !== intendedPath) {
+              await mkdir(dirname(intendedPath), { recursive: true });
+              await this.lockService.withLock(currentPathAfterFolderRename, () => fsRename(currentPathAfterFolderRename, intendedPath));
+              movedFilesInside.push({ from: currentPathAfterFolderRename, to: intendedPath });
+            }
+          }
+        } catch (innerError) {
+          for (const { from, to } of [...movedFilesInside].reverse()) {
+            try {
+              await fsRename(to, from);
+            } catch {
+              /* ignore */
+            }
+          }
+          throw innerError;
+        }
+      } catch (error) {
+        await this.rollbackFolderRename(bookId, oldUpdates, oldFolderPath, error);
+        if (folderRenamed) {
+          await this.rollbackFolderMove(bookId, newFolderPath, oldFolderPath, error);
+        }
+        throw error;
       }
+    }
+
+    await this.tryRemoveEmptyDir(oldFolderPath);
+    await this.tryRemoveEmptyDir(dirname(oldFolderPath));
+  }
+
+  private async renameBookIntoExistingFolder(
+    bookId: number,
+    data: BookRenameData,
+    oldFolderPath: string,
+    newFolderPath: string,
+    fileTargets: Map<number, string>,
+  ): Promise<void> {
+    const allFiles = await this.renameRepo.findAllBookFiles(bookId);
+    const newUpdates = allFiles.map((file) => ({
+      id: file.id,
+      absolutePath: fileTargets.get(file.id)!,
+      relPath: relative(data.libraryFolderPath, fileTargets.get(file.id)!),
+    }));
+    const oldUpdates = allFiles.map((file) => ({ id: file.id, absolutePath: file.absolutePath, relPath: file.relPath }) satisfies BookFilePathUpdate);
+
+    await this.renameRepo.applyFolderRename(bookId, newUpdates, newFolderPath);
+    await this.moveBookFilesIndividually(bookId, allFiles, oldFolderPath, newFolderPath, fileTargets, oldUpdates);
+
+    await this.tryRemoveEmptyDir(oldFolderPath);
+    await this.tryRemoveEmptyDir(dirname(oldFolderPath));
+  }
+
+  private async mergeBookIntoExistingFolder(
+    bookId: number,
+    data: BookRenameData,
+    oldFolderPath: string,
+    newFolderPath: string,
+    fileTargets: Map<number, string>,
+    targetBookId: number,
+  ): Promise<void> {
+    const allFiles = await this.renameRepo.findAllBookFiles(bookId);
+    const updates = allFiles.map((file) => ({
+      id: file.id,
+      absolutePath: fileTargets.get(file.id)!,
+      relPath: relative(data.libraryFolderPath, fileTargets.get(file.id)!),
+    }));
+
+    const movedFiles: Array<{ from: string; to: string }> = [];
+    try {
+      await mkdir(newFolderPath, { recursive: true });
+
+      for (const file of allFiles) {
+        const newFilePath = fileTargets.get(file.id)!;
+        const newFileDir = dirname(newFilePath);
+        if (newFileDir !== newFolderPath) {
+          await mkdir(newFileDir, { recursive: true });
+        }
+
+        if (file.absolutePath !== newFilePath) {
+          await this.lockService.withLock(file.absolutePath, () => fsRename(file.absolutePath, newFilePath));
+          movedFiles.push({ from: file.absolutePath, to: newFilePath });
+        }
+      }
+
+      await this.renameRepo.applyExistingFolderMerge({
+        sourceBookId: bookId,
+        targetBookId,
+        updates,
+        fallbackPrimaryFileId: data.file.id,
+      });
     } catch (error) {
-      await this.rollbackFolderRename(bookId, oldUpdates, oldFolderPath, error);
-      if (folderRenamed) {
-        await this.rollbackFolderMove(bookId, newFolderPath, oldFolderPath, error);
+      for (const { from, to } of [...movedFiles].reverse()) {
+        try {
+          await mkdir(dirname(from), { recursive: true });
+          await fsRename(to, from);
+        } catch (rollbackError) {
+          this.logRollbackFailure(bookId, error, rollbackError);
+        }
       }
       throw error;
     }
 
+    await this.tryRemoveEmptyDir(oldFolderPath);
     await this.tryRemoveEmptyDir(dirname(oldFolderPath));
   }
 
-  private async rollbackFileRename(
+  private async moveBookFilesIndividually(
     bookId: number,
-    fileId: number,
-    oldPath: string,
-    oldRelPath: string | null,
-    oldBookFolderPath: string,
-    originalError: unknown,
+    allFiles: Awaited<ReturnType<FileRenameRepository['findAllBookFiles']>>,
+    oldFolderPath: string,
+    newFolderPath: string,
+    fileTargets: Map<number, string>,
+    oldUpdates: BookFilePathUpdate[],
   ): Promise<void> {
+    const movedFiles: Array<{ from: string; to: string }> = [];
+
     try {
-      await this.renameRepo.applyFileRename(bookId, fileId, oldPath, oldRelPath, oldBookFolderPath);
-    } catch (rollbackError) {
-      this.logRollbackFailure(bookId, originalError, rollbackError);
+      await mkdir(newFolderPath, { recursive: true });
+
+      for (const file of allFiles) {
+        const newFilePath = fileTargets.get(file.id)!;
+        const newFileDir = dirname(newFilePath);
+
+        if (newFileDir !== newFolderPath) {
+          await mkdir(newFileDir, { recursive: true });
+        }
+
+        if (file.absolutePath !== newFilePath) {
+          await this.lockService.withLock(file.absolutePath, () => fsRename(file.absolutePath, newFilePath));
+          movedFiles.push({ from: file.absolutePath, to: newFilePath });
+        }
+      }
+    } catch (error) {
+      for (const { from, to } of [...movedFiles].reverse()) {
+        try {
+          await mkdir(dirname(from), { recursive: true });
+          await fsRename(to, from);
+        } catch (rollbackError) {
+          this.logRollbackFailure(bookId, error, rollbackError);
+        }
+      }
+      await this.rollbackFolderRename(bookId, oldUpdates, oldFolderPath, error);
+      throw error;
     }
+  }
+
+  private applyMultiTrackAudioPartSuffixes(fileTargets: Map<number, string>, allFiles: RenameBookFile[], primaryFileId: number): void {
+    const audioFiles = allFiles.filter((file) => this.isAudioContentFile(file, primaryFileId));
+    if (audioFiles.length < 2) return;
+
+    const audioFilesByTarget = new Map<string, RenameBookFile[]>();
+    for (const file of audioFiles) {
+      const targetPath = fileTargets.get(file.id);
+      if (!targetPath) continue;
+
+      const key = targetPath.toLowerCase();
+      const existing = audioFilesByTarget.get(key);
+      if (existing) {
+        existing.push(file);
+      } else {
+        audioFilesByTarget.set(key, [file]);
+      }
+    }
+
+    const collidingGroups = [...audioFilesByTarget.values()].filter((group) => group.length > 1);
+    if (collidingGroups.length === 0) return;
+
+    const trackNumbersByFileId = new Map<number, number>();
+    [...audioFiles].sort(compareAudioTrackFiles).forEach((file, index) => {
+      trackNumbersByFileId.set(file.id, index + 1);
+    });
+
+    for (const group of collidingGroups) {
+      for (const file of group) {
+        const targetPath = fileTargets.get(file.id);
+        const trackNumber = trackNumbersByFileId.get(file.id);
+        if (!targetPath || !trackNumber) continue;
+
+        fileTargets.set(file.id, appendPartSuffix(targetPath, trackNumber));
+      }
+    }
+  }
+
+  private isAudioContentFile(file: RenameBookFile, primaryFileId: number): boolean {
+    const format = (file.format ?? extname(file.absolutePath).slice(1)).toLowerCase();
+    return Boolean(format && isAudioFormat(format) && (file.role === 'content' || file.id === primaryFileId));
+  }
+
+  private hasInternalCollision(fileTargets: Map<number, string>): boolean {
+    const seen = new Set<string>();
+    for (const targetPath of fileTargets.values()) {
+      const key = targetPath.toLowerCase();
+      if (seen.has(key)) return true;
+      seen.add(key);
+    }
+    return false;
+  }
+
+  private foldersAreNested(pathA: string, pathB: string): boolean {
+    const normA = (pathA.endsWith('/') ? pathA : pathA + '/').toLowerCase();
+    const normB = (pathB.endsWith('/') ? pathB : pathB + '/').toLowerCase();
+    return normB.startsWith(normA) || normA.startsWith(normB);
   }
 
   private async rollbackFolderRename(bookId: number, oldUpdates: BookFilePathUpdate[], oldFolderPath: string, originalError: unknown): Promise<void> {
@@ -272,6 +599,16 @@ export class FileRenameService implements OnModuleDestroy {
     }
   }
 
+  private async findExistingTargetFilePath(allFiles: RenameBookFile[], fileTargets: Map<number, string>): Promise<string | null> {
+    for (const file of allFiles) {
+      const targetPath = fileTargets.get(file.id)!;
+      if (targetPath !== file.absolutePath && (await this.pathExists(targetPath))) {
+        return targetPath;
+      }
+    }
+    return null;
+  }
+
   private async tryRemoveEmptyDir(dirPath: string): Promise<void> {
     try {
       const entries = await readdir(dirPath);
@@ -293,7 +630,8 @@ export class FileRenameService implements OnModuleDestroy {
     return full;
   }
 
-  private async notifySuccess(userId: number, bookId: number, oldPath: string, newPath: string): Promise<void> {
+  private async notifySuccess(userId: number, bookId: number, oldPath: string, newPath: string, suppress = false): Promise<void> {
+    if (suppress) return;
     await this.notificationService
       .notify({
         type: NotificationType.FileRenameCompleted,
@@ -305,7 +643,8 @@ export class FileRenameService implements OnModuleDestroy {
       .catch(() => {});
   }
 
-  private async notifyFailure(userId: number, bookId: number, reason: string): Promise<void> {
+  private async notifyFailure(userId: number, bookId: number, reason: string, suppress = false): Promise<void> {
+    if (suppress) return;
     await this.notificationService
       .notify({
         type: NotificationType.FileRenameFailed,
@@ -318,48 +657,20 @@ export class FileRenameService implements OnModuleDestroy {
   }
 }
 
-function buildTokens(
-  metadata: {
-    title: string | null;
-    subtitle: string | null;
-    publisher: string | null;
-    language: string | null;
-    isbn13: string | null;
-    publishedYear: number | null;
-    seriesName: string | null;
-    seriesIndex: number | null;
-  },
-  authors: string[],
-  originalStem: string,
-  format: string,
-): Record<string, string> {
-  const tokens: Record<string, string> = { originalFilename: originalStem, extension: format };
-
-  if (metadata.title) tokens['title'] = metadata.title;
-  if (metadata.subtitle) tokens['subtitle'] = metadata.subtitle;
-  if (metadata.publisher) tokens['publisher'] = metadata.publisher;
-  if (metadata.language) tokens['language'] = metadata.language;
-  if (metadata.isbn13) tokens['isbn'] = metadata.isbn13;
-  if (metadata.publishedYear) tokens['year'] = String(metadata.publishedYear);
-  if (metadata.seriesName) tokens['series'] = metadata.seriesName;
-
-  const seriesIndex = formatSeriesIndex(metadata.seriesIndex);
-  if (seriesIndex) tokens['seriesIndex'] = seriesIndex;
-  if (authors.length > 0) tokens['authors'] = authors.join(', ');
-
-  return tokens;
-}
-
-function formatSeriesIndex(value: number | null): string | null {
-  if (value == null) return null;
-  const whole = Math.floor(value);
-  const fraction = value - whole;
-  const padded = String(whole).padStart(2, '0');
-  return fraction > 0 ? `${padded}.${String(fraction).split('.')[1]}` : padded;
-}
-
 function resolvePositiveInteger(value: unknown, fallback: number): number {
   const numeric = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(numeric) || numeric < 1) return fallback;
   return Math.floor(numeric);
+}
+
+function compareAudioTrackFiles(a: RenameBookFile, b: RenameBookFile): number {
+  const aSortOrder = a.sortOrder ?? Number.MAX_SAFE_INTEGER;
+  const bSortOrder = b.sortOrder ?? Number.MAX_SAFE_INTEGER;
+  return aSortOrder - bSortOrder || a.id - b.id;
+}
+
+function appendPartSuffix(targetPath: string, trackNumber: number): string {
+  const extension = extname(targetPath);
+  const stem = basename(targetPath, extension);
+  return join(dirname(targetPath), `${stem}-Part${String(trackNumber).padStart(2, '0')}${extension}`);
 }

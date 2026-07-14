@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import type { EpubReaderSettings } from '@bookorbit/types'
 import { themes } from '../constants/themes'
 import type { Theme, ThemeMode } from '../constants/themes'
 import type { FoliateRenderer } from './useFoliate'
@@ -16,6 +17,11 @@ export interface ReaderState {
   isDark: boolean
   themeName: string
   flow: 'paginated' | 'scrolled'
+  fixedLayoutSpread: EpubReaderSettings['fixedLayoutSpread']
+}
+
+export interface ApplyReaderStateOptions {
+  flow?: ReaderState['flow']
 }
 
 const defaults: ReaderState = {
@@ -31,6 +37,7 @@ const defaults: ReaderState = {
   isDark: false,
   themeName: 'default',
   flow: 'paginated',
+  fixedLayoutSpread: 'auto',
 }
 
 export function useReaderState() {
@@ -46,6 +53,7 @@ export function useReaderState() {
   const isDark = ref(defaults.isDark)
   const themeName = ref(defaults.themeName)
   const flow = ref<'paginated' | 'scrolled'>(defaults.flow)
+  const fixedLayoutSpread = ref<EpubReaderSettings['fixedLayoutSpread']>(defaults.fixedLayoutSpread)
 
   const fontFaceCSS = ref('')
 
@@ -62,6 +70,7 @@ export function useReaderState() {
     isDark: isDark.value,
     themeName: themeName.value,
     flow: flow.value,
+    fixedLayoutSpread: fixedLayoutSpread.value,
   }))
 
   const currentTheme = computed<Theme>(() => themes.find((t) => t.name === themeName.value) ?? themes[0]!)
@@ -186,19 +195,20 @@ export function useReaderState() {
     `
   }
 
-  function applyToRenderer(renderer: FoliateRenderer): void {
+  function applyToRenderer(renderer: FoliateRenderer, options: ApplyReaderStateOptions = {}): void {
     if (!renderer) return
     const s = state.value
+    const rendererFlow = options.flow ?? s.flow
     renderer.setAttribute('max-column-count', String(s.maxColumnCount))
     renderer.setAttribute('gap', `${s.gap * 100}%`)
     renderer.setAttribute('max-inline-size', `${s.maxInlineSize}px`)
     renderer.setAttribute('max-block-size', `${s.maxBlockSize}px`)
-    if (s.flow === 'paginated') {
+    if (rendererFlow === 'paginated') {
       renderer.setAttribute('margin', '40px')
     } else {
       renderer.removeAttribute('margin')
     }
-    renderer.setAttribute('flow', s.flow)
+    renderer.setAttribute('flow', rendererFlow)
     if (typeof renderer.setStyles === 'function') {
       renderer.setStyles(generateCSS())
     }
@@ -240,6 +250,9 @@ export function useReaderState() {
   function setFlow(v: 'paginated' | 'scrolled') {
     flow.value = v
   }
+  function setFixedLayoutSpread(v: EpubReaderSettings['fixedLayoutSpread']) {
+    fixedLayoutSpread.value = v
+  }
 
   function setFontFaceCSS(css: string) {
     fontFaceCSS.value = css
@@ -259,6 +272,7 @@ export function useReaderState() {
     isDark,
     themeName,
     flow,
+    fixedLayoutSpread,
     currentTheme,
     activeMode,
     themes,
@@ -276,6 +290,7 @@ export function useReaderState() {
     setIsDark,
     setThemeName,
     setFlow,
+    setFixedLayoutSpread,
     setFontFaceCSS,
   }
 }

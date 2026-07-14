@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, ref, watch } from 'vue'
-import { ArrowLeft, Loader2, Pencil, X } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { ArrowLeft, Loader2, Pencil, X } from '@lucide/vue'
 import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
 import { DialogClose, DialogContent, DialogDescription, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from 'reka-ui'
 import type { BookCard } from '@bookorbit/types'
@@ -21,6 +22,7 @@ const emit = defineEmits<{
   'update:book': [bookId: number, hasCover: boolean]
 }>()
 
+const { t } = useI18n()
 const { md } = useBreakpoints(breakpointsTailwind)
 const isEditEnabled = computed(() => !props.readOnly && md.value)
 
@@ -33,6 +35,7 @@ const { coverUrl } = useCoverVersions()
 const coverAspectRatio = inject(COVER_ASPECT_RATIO_KEY, ref(DEFAULT_COVER_ASPECT_RATIO))
 
 const hasCoverResolved = computed(() => savedCover.value || (props.book?.hasCover ?? false))
+const coverVersion = computed(() => detail.value?.updatedAt ?? props.book?.updatedAt ?? props.book?.addedAt ?? null)
 
 watch(
   () => props.book?.id,
@@ -83,7 +86,7 @@ async function handleToggleCoverLock() {
         @escape-key-down="handleOpenChange(false)"
       >
         <DialogDescription class="sr-only">
-          {{ mode === 'view' ? 'Book cover preview' : 'Edit book cover' }}
+          {{ mode === 'view' ? t('book.table.cover.previewDescription') : t('book.table.cover.editDescription') }}
         </DialogDescription>
 
         <!-- Header -->
@@ -97,7 +100,7 @@ async function handleToggleCoverLock() {
               <ArrowLeft :size="15" />
             </button>
             <DialogTitle class="truncate text-sm font-semibold text-foreground">
-              {{ mode === 'view' ? book?.title : 'Edit cover' }}
+              {{ mode === 'view' ? book?.title : t('book.table.cover.editTitle') }}
             </DialogTitle>
           </div>
           <DialogClose
@@ -113,7 +116,12 @@ async function handleToggleCoverLock() {
           <template v-if="mode === 'view'">
             <div class="mb-4 flex justify-center">
               <div class="overflow-hidden rounded-lg bg-muted shadow-md" :style="{ aspectRatio: coverAspectRatio, width: 'min(100%, 280px)' }">
-                <img v-if="hasCoverResolved && book" :src="coverUrl(book.id, 'cover')" :alt="book.title ?? ''" class="h-full w-full object-contain" />
+                <img
+                  v-if="hasCoverResolved && book"
+                  :src="coverUrl(book.id, 'cover', coverVersion)"
+                  :alt="book.title ?? ''"
+                  class="h-full w-full object-contain"
+                />
                 <BookCoverPlaceholder
                   v-else
                   :title="book?.title ?? ''"
@@ -130,7 +138,7 @@ async function handleToggleCoverLock() {
               @click="switchToEdit"
             >
               <Pencil :size="14" />
-              Edit Cover
+              {{ t('book.table.cover.editCover') }}
             </button>
           </template>
 

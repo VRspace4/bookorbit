@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, NotFoundException } from '@nes
 
 import type { RequestUser } from '../../common/types/request-user';
 import { CollectionService } from './collection.service';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeUser(overrides?: Partial<RequestUser>): RequestUser {
   return {
@@ -18,6 +19,8 @@ function makeUser(overrides?: Partial<RequestUser>): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -53,11 +56,6 @@ function makeService() {
     buildMembershipWhere: vi.fn(),
   };
 
-  const bookReadService = {
-    findLibraryIdsByBookIds: vi.fn(),
-    findCardsByBookIds: vi.fn(),
-  };
-
   const libraryService = {
     verifyUserAccess: vi.fn(),
     findAccessibleLibraryIds: vi.fn(),
@@ -68,7 +66,9 @@ function makeService() {
   };
 
   const bookService = {
+    resolveSelectionToIds: vi.fn(),
     executeBooksQuery: vi.fn(),
+    executeJumpBucketsQuery: vi.fn(),
   };
 
   const achievementEvents = {
@@ -77,13 +77,12 @@ function makeService() {
 
   const service = new CollectionService(
     collectionRepo as never,
-    bookReadService as never,
     libraryService as never,
     queryBuilder as never,
     bookService as never,
     achievementEvents as never,
   );
-  return { service, collectionRepo, bookReadService, libraryService, queryBuilder, bookService, achievementEvents };
+  return { service, collectionRepo, libraryService, queryBuilder, bookService, achievementEvents };
 }
 
 describe('CollectionService', () => {
@@ -123,6 +122,31 @@ describe('CollectionService', () => {
       await service.findAll(user, []);
 
       expect(collectionRepo.findAllForUser).toHaveBeenCalledWith(user.id);
+      expect(collectionRepo.findAllForUserWithMembership).not.toHaveBeenCalled();
+    });
+
+    it('resolves selection payloads before loading membership counts', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      const user = makeUser();
+      const selection = { query: { libraryId: 5, q: 'dune' } };
+      bookService.resolveSelectionToIds.mockResolvedValue([10, 11, 10]);
+      collectionRepo.findAllForUserWithMembership.mockResolvedValue([makeCollection({ memberCount: 2 })]);
+
+      const result = await service.findAllWithSelectionMembership(selection, user);
+
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(selection, user);
+      expect(collectionRepo.findAllForUserWithMembership).toHaveBeenCalledWith(user.id, [10, 11]);
+      expect(result[0]).toEqual(expect.objectContaining({ memberCount: 2 }));
+    });
+
+    it('uses the plain collection list when a selection resolves to zero books', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      bookService.resolveSelectionToIds.mockResolvedValue([]);
+      collectionRepo.findAllForUser.mockResolvedValue([makeCollection()]);
+
+      await service.findAllWithSelectionMembership({ query: { libraryId: 5 } }, makeUser());
+
+      expect(collectionRepo.findAllForUser).toHaveBeenCalledWith(1);
       expect(collectionRepo.findAllForUserWithMembership).not.toHaveBeenCalled();
     });
   });
@@ -277,52 +301,55 @@ describe('CollectionService', () => {
   });
 
   describe('addBooks', () => {
-    it('verifies collection ownership and library access before adding books', async () => {
-      const { service, collectionRepo, bookReadService, libraryService } = makeService();
+    it('verifies collection ownership and resolves the selection before adding books', async () => {
+      const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 2 })]);
-      bookReadService.findLibraryIdsByBookIds.mockResolvedValue([
-        { id: 7, libraryId: 100 },
-        { id: 8, libraryId: 101 },
-      ]);
-      libraryService.verifyUserAccess.mockResolvedValue(undefined);
+      bookService.resolveSelectionToIds.mockResolvedValue([7, 8]);
       collectionRepo.addBooks.mockResolvedValue([]);
+      const selection = { bookIds: [7, 8] };
 
-      const result = await service.addBooks(10, { bookIds: [7, 8] }, makeUser());
+      const user = makeUser();
+      const result = await service.addBooks(10, selection, user);
 
-      expect(bookReadService.findLibraryIdsByBookIds).toHaveBeenCalledWith([7, 8]);
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledTimes(2);
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(selection, user);
       expect(collectionRepo.addBooks).toHaveBeenCalledWith(10, [7, 8]);
       expect(result).toEqual(expect.objectContaining({ bookCount: 2 }));
     });
 
-    it('deduplicates repeated book ids for access checks', async () => {
-      const { service, collectionRepo, bookReadService, libraryService } = makeService();
+    it('deduplicates resolved book ids before writing membership rows', async () => {
+      const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 1 })]);
-      bookReadService.findLibraryIdsByBookIds.mockResolvedValue([{ id: 7, libraryId: 100 }]);
-      libraryService.verifyUserAccess.mockResolvedValue(undefined);
+      bookService.resolveSelectionToIds.mockResolvedValue([7, 7]);
 
       await service.addBooks(10, { bookIds: [7, 7] }, makeUser());
 
-      expect(bookReadService.findLibraryIdsByBookIds).toHaveBeenCalledWith([7]);
-      expect(libraryService.verifyUserAccess).toHaveBeenCalledTimes(1);
+      expect(collectionRepo.addBooks).toHaveBeenCalledWith(10, [7]);
     });
 
-    it('throws NotFoundException when at least one book id is missing', async () => {
-      const { service, collectionRepo, bookReadService } = makeService();
+    it('does not write membership rows when the selection resolves to zero books', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 0 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([]);
+
+      const result = await service.addBooks(10, { query: { libraryId: 5 } }, makeUser());
+
+      expect(collectionRepo.addBooks).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({ bookCount: 0 }));
+    });
+
+    it('propagates selection resolution errors and does not write membership rows', async () => {
+      const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValue([makeCollection()]);
-      bookReadService.findLibraryIdsByBookIds.mockResolvedValue([{ id: 7, libraryId: 100 }]);
+      bookService.resolveSelectionToIds.mockRejectedValue(new NotFoundException('One or more books were not found'));
 
       await expect(service.addBooks(10, { bookIds: [7, 8] }, makeUser())).rejects.toThrow(NotFoundException);
       expect(collectionRepo.addBooks).not.toHaveBeenCalled();
     });
 
     it('skips per-library access lookups for superusers', async () => {
-      const { service, collectionRepo, bookReadService, libraryService } = makeService();
+      const { service, collectionRepo, bookService, libraryService } = makeService();
       collectionRepo.findById.mockResolvedValueOnce([makeCollection({ userId: 88 })]).mockResolvedValueOnce([makeCollection({ bookCount: 2 })]);
-      bookReadService.findLibraryIdsByBookIds.mockResolvedValue([
-        { id: 7, libraryId: 100 },
-        { id: 8, libraryId: 101 },
-      ]);
+      bookService.resolveSelectionToIds.mockResolvedValue([7, 8]);
 
       await service.addBooks(10, { bookIds: [7, 8] }, makeUser({ id: 42, isSuperuser: true }));
 
@@ -330,14 +357,25 @@ describe('CollectionService', () => {
       expect(collectionRepo.addBooks).toHaveBeenCalledWith(10, [7, 8]);
     });
 
-    it('propagates library access errors and does not write membership rows', async () => {
-      const { service, collectionRepo, bookReadService, libraryService } = makeService();
+    it('propagates selection access errors and does not write membership rows', async () => {
+      const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValue([makeCollection()]);
-      bookReadService.findLibraryIdsByBookIds.mockResolvedValue([{ id: 7, libraryId: 100 }]);
-      libraryService.verifyUserAccess.mockRejectedValue(new ForbiddenException('No access to this library'));
+      bookService.resolveSelectionToIds.mockRejectedValue(new ForbiddenException('No access to this library'));
 
       await expect(service.addBooks(10, { bookIds: [7] }, makeUser())).rejects.toThrow(ForbiddenException);
       expect(collectionRepo.addBooks).not.toHaveBeenCalled();
+    });
+
+    it('resolves query selections before adding all matching books', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      const selection = { query: { libraryId: 5, q: 'space opera' } };
+      collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 3 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([10, 11, 12]);
+
+      await service.addBooks(10, selection, makeUser());
+
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(selection, expect.objectContaining({ id: 1 }));
+      expect(collectionRepo.addBooks).toHaveBeenCalledWith(10, [10, 11, 12]);
     });
   });
 
@@ -357,6 +395,7 @@ describe('CollectionService', () => {
         userId: 1,
         q: undefined,
         timeZone: 'UTC',
+        contentFilters: EMPTY_CONTENT_FILTER_RULES,
       });
       expect(collectionRepo.buildMembershipWhere).toHaveBeenCalledWith(10);
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(1, expect.anything(), {
@@ -388,6 +427,7 @@ describe('CollectionService', () => {
           userId: 1,
           q: 'science',
           timeZone: 'UTC',
+          contentFilters: EMPTY_CONTENT_FILTER_RULES,
         },
       );
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(
@@ -409,6 +449,31 @@ describe('CollectionService', () => {
 
       await expect(service.getBooks(10, makeUser(), 0, 50)).rejects.toThrow(ForbiddenException);
       expect(libraryService.findAccessibleLibraryIds).not.toHaveBeenCalled();
+    });
+
+    it('queryJumpBuckets intersects the membership filter like queryBooks', async () => {
+      const { service, collectionRepo, libraryService, queryBuilder, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection()]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([100]);
+      collectionRepo.buildMembershipWhere.mockReturnValue('membership-where');
+      queryBuilder.buildWhere.mockReturnValue('filter-where');
+      bookService.executeJumpBucketsQuery.mockResolvedValue({ buckets: [], total: 0 });
+
+      const query = { sort: [{ field: 'title', dir: 'asc' as const }], pagination: { page: 0, size: 50 } };
+      await service.queryJumpBuckets(10, makeUser(), query as never);
+
+      expect(collectionRepo.buildMembershipWhere).toHaveBeenCalledWith(10);
+      expect(bookService.executeJumpBucketsQuery).toHaveBeenCalledWith(1, expect.anything(), query);
+    });
+
+    it('queryJumpBuckets propagates ownership errors before delegating', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection({ userId: 999 })]);
+
+      await expect(service.queryJumpBuckets(10, makeUser(), { sort: [], pagination: { page: 0, size: 50 } } as never)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(bookService.executeJumpBucketsQuery).not.toHaveBeenCalled();
     });
   });
 
@@ -444,19 +509,88 @@ describe('CollectionService', () => {
 
   describe('removeBooks', () => {
     it('updates collection membership and returns hydrated collection', async () => {
-      const { service, collectionRepo } = makeService();
+      const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 1 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([7]);
       collectionRepo.removeBooks.mockResolvedValue([{ collectionId: 10, bookId: 7 }]);
 
       const result = await service.removeBooks(10, { bookIds: [7] }, makeUser());
 
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith({ bookIds: [7] }, expect.objectContaining({ id: 1 }));
       expect(collectionRepo.removeBooks).toHaveBeenCalledWith(10, [7]);
       expect(result).toEqual(expect.objectContaining({ bookCount: 1 }));
     });
 
+    it('deduplicates resolved ids before removing membership rows', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 0 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([7, 7]);
+      collectionRepo.removeBooks.mockResolvedValue([{ collectionId: 10, bookId: 7 }]);
+
+      await service.removeBooks(10, { bookIds: [7, 7] }, makeUser());
+
+      expect(collectionRepo.removeBooks).toHaveBeenCalledWith(10, [7]);
+    });
+
+    it('resolves query selections before removing all matching books', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      const selection = { query: { libraryId: 5, q: 'finished' } };
+      collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 0 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([10, 11]);
+
+      await service.removeBooks(10, selection, makeUser());
+
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(selection, expect.objectContaining({ id: 1 }));
+      expect(collectionRepo.removeBooks).toHaveBeenCalledWith(10, [10, 11]);
+    });
+
+    it('does not write membership rows when a remove selection resolves to zero books', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValueOnce([makeCollection()]).mockResolvedValueOnce([makeCollection({ bookCount: 0 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([]);
+
+      const result = await service.removeBooks(10, { query: { libraryId: 5 } }, makeUser());
+
+      expect(collectionRepo.removeBooks).not.toHaveBeenCalled();
+      expect(result).toEqual(expect.objectContaining({ bookCount: 0 }));
+    });
+
+    it('rejects removeBooks calls from non-owners', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValue([makeCollection({ userId: 88 })]);
+
+      await expect(service.removeBooks(10, { bookIds: [7] }, makeUser({ id: 1 }))).rejects.toThrow(ForbiddenException);
+      expect(bookService.resolveSelectionToIds).not.toHaveBeenCalled();
+      expect(collectionRepo.removeBooks).not.toHaveBeenCalled();
+    });
+
+    it('allows superusers to remove books from collections they do not own', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById
+        .mockResolvedValueOnce([makeCollection({ userId: 88 })])
+        .mockResolvedValueOnce([makeCollection({ userId: 88, bookCount: 0 })]);
+      bookService.resolveSelectionToIds.mockResolvedValue([7]);
+      collectionRepo.removeBooks.mockResolvedValue([{ collectionId: 10, bookId: 7 }]);
+
+      const result = await service.removeBooks(10, { bookIds: [7] }, makeUser({ id: 1, isSuperuser: true }));
+
+      expect(collectionRepo.removeBooks).toHaveBeenCalledWith(10, [7]);
+      expect(result).toEqual(expect.objectContaining({ userId: 88, bookCount: 0 }));
+    });
+
+    it('throws NotFoundException when removing books from a missing collection', async () => {
+      const { service, collectionRepo, bookService } = makeService();
+      collectionRepo.findById.mockResolvedValue([]);
+
+      await expect(service.removeBooks(10, { bookIds: [7] }, makeUser())).rejects.toThrow(NotFoundException);
+      expect(bookService.resolveSelectionToIds).not.toHaveBeenCalled();
+      expect(collectionRepo.removeBooks).not.toHaveBeenCalled();
+    });
+
     it('rethrows repository errors while removing books', async () => {
-      const { service, collectionRepo } = makeService();
+      const { service, collectionRepo, bookService } = makeService();
       collectionRepo.findById.mockResolvedValue([makeCollection()]);
+      bookService.resolveSelectionToIds.mockResolvedValue([7]);
       collectionRepo.removeBooks.mockRejectedValue(new Error('remove failed'));
 
       await expect(service.removeBooks(10, { bookIds: [7] }, makeUser())).rejects.toThrow('remove failed');

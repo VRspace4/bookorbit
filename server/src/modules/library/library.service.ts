@@ -14,9 +14,11 @@ import { join } from 'path';
 import { DEFAULT_FORMAT_PRIORITY } from '@bookorbit/types';
 import type { AccessLevel, LibraryFileSyncProgressEvent, OrganizationMode, WriteResult } from '@bookorbit/types';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { normalizeIconValue } from '../../common/utils/icon-value.utils';
 import type { RequestUser } from '../../common/types/request-user';
 import { AchievementEventsService, ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
 import { FileWriteService } from '../file-write/file-write.service';
+import { PathPolicyService } from '../path/path-policy.service';
 import { isPrimaryFormat } from '../scanner/lib/classify';
 import { FileWatcherService } from '../scanner/file-watcher.service';
 import { ScannerService } from '../scanner/scanner.service';
@@ -31,12 +33,6 @@ import { LibraryRepository } from './library.repository';
 interface LibraryMetadataWriteStreamOptions {
   onProgress?: (event: LibraryFileSyncProgressEvent) => void;
   isCancelled?: () => boolean;
-}
-
-function normalizeIcon(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const icon = value.trim();
-  return icon.length > 0 ? icon : null;
 }
 
 interface LibraryMetadataWriteSummary {
@@ -59,6 +55,7 @@ export class LibraryService {
     private readonly fileWatcherService: FileWatcherService,
     private readonly fileWriteService: FileWriteService,
     private readonly achievementEvents: AchievementEventsService,
+    private readonly pathPolicy: PathPolicyService,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
@@ -70,7 +67,9 @@ export class LibraryService {
   }
 
   async findAll(user: RequestUser) {
-    const librariesForUser = user.isSuperuser ? await this.libraryRepo.findAll() : await this.libraryRepo.findAllForUser(user.id);
+    const librariesForUser = user.isSuperuser
+      ? await this.libraryRepo.findAll()
+      : await this.libraryRepo.findAllForUser(user.id, user.contentFilters);
     const folders = user.isSuperuser
       ? await this.libraryRepo.findAllFolders()
       : await this.libraryRepo.findFoldersByLibraryIds(librariesForUser.map((library) => library.id));
@@ -105,7 +104,8 @@ export class LibraryService {
 
   async create(dto: CreateLibraryDto) {
     await this.assertNameAvailable(dto.name);
-    const icon = normalizeIcon(dto.icon);
+    const folderPaths = await this.assertFolderPathsWithinBrowseRoot(dto.folders);
+    const icon = normalizeIconValue(dto.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
     }
@@ -133,10 +133,12 @@ export class LibraryService {
       fileWritePdfMaxFileSizeMb: dto.fileWritePdfMaxFileSizeMb ?? 100,
       fileWriteCbxEnabled: dto.fileWriteCbxEnabled ?? false,
       fileWriteCbxMaxFileSizeMb: dto.fileWriteCbxMaxFileSizeMb ?? 500,
+      fileWriteAudioEnabled: dto.fileWriteAudioEnabled ?? true,
+      fileWriteAudioMaxFileSizeMb: dto.fileWriteAudioMaxFileSizeMb ?? 500,
       fileRenameEnabled: dto.fileRenameEnabled ?? false,
     });
 
-    const folders = await Promise.all(dto.folders.map((path) => this.libraryRepo.insertFolder({ libraryId: library.id, path })));
+    const folders = await Promise.all(folderPaths.map((path) => this.libraryRepo.insertFolder({ libraryId: library.id, path })));
 
     if (library.watch) {
       await this.fileWatcherService.startWatcher(
@@ -154,12 +156,20 @@ export class LibraryService {
     const [existing] = await this.libraryRepo.findById(id);
     if (!existing) throw new NotFoundException('Library not found');
 
+    const existingOrganizationMode = normalizeOrganizationMode(existing.organizationMode);
+    if (dto.organizationMode !== undefined && dto.organizationMode !== existingOrganizationMode) {
+      throw new BadRequestException(
+        'Library organization mode cannot be changed after creation. Create a new library to use a different organization mode.',
+      );
+    }
+
     if (dto.name && dto.name !== existing.name) {
       await this.assertNameAvailable(dto.name, id);
     }
 
-    const { folders: folderPaths, ...fields } = dto;
-    const icon = fields.icon !== undefined ? normalizeIcon(fields.icon) : normalizeIcon(existing.icon);
+    const { folders: rawFolderPaths, ...fields } = dto;
+    const folderPaths = rawFolderPaths === undefined ? undefined : await this.assertFolderPathsWithinBrowseRoot(rawFolderPaths);
+    const icon = fields.icon !== undefined ? normalizeIconValue(fields.icon) : normalizeIconValue(existing.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
     }
@@ -202,11 +212,7 @@ export class LibraryService {
     }
 
     const shouldRescan =
-      dto.formatPriority !== undefined ||
-      dto.allowedFormats !== undefined ||
-      dto.excludePatterns !== undefined ||
-      dto.organizationMode !== undefined ||
-      folderPaths !== undefined;
+      dto.formatPriority !== undefined || dto.allowedFormats !== undefined || dto.excludePatterns !== undefined || folderPaths !== undefined;
     if (shouldRescan) this.scannerService.startScanAsync(id);
 
     return { ...normalizeLibraryOrganizationMode(updated), folders };
@@ -233,9 +239,19 @@ export class LibraryService {
         let error: string | undefined;
         let overlapLibrary: string | undefined;
 
+        const resolvedInputPath = await this.pathPolicy.resolveBrowsePath(inputPath).catch(() => null);
+        if (resolvedInputPath === null) {
+          return {
+            path: inputPath,
+            accessible: false,
+            fileCount: 0,
+            error: 'Path is outside the configured library browse root',
+          };
+        }
+
         let inputStat: Awaited<ReturnType<typeof stat>> | null = null;
         try {
-          inputStat = await stat(inputPath);
+          inputStat = await stat(resolvedInputPath);
         } catch (err) {
           error = formatPrescanError(err);
         }
@@ -243,11 +259,11 @@ export class LibraryService {
         if (inputStat === null) {
           accessible = false;
         } else if (!inputStat.isDirectory()) {
-          return { path: inputPath, accessible: false, fileCount: 0, error: 'Not a directory' };
+          return { path: resolvedInputPath, accessible: false, fileCount: 0, error: 'Not a directory' };
         } else {
           accessible = true;
           try {
-            fileCount = await countPrimaryFiles(inputPath);
+            fileCount = await countPrimaryFiles(resolvedInputPath);
           } catch (err) {
             accessible = false;
             fileCount = 0;
@@ -256,13 +272,13 @@ export class LibraryService {
         }
 
         for (const existing of allFolderPaths) {
-          if (pathsOverlap(inputPath, existing.path)) {
+          if (pathsOverlap(resolvedInputPath, existing.path)) {
             overlapLibrary = existing.libraryName;
             break;
           }
         }
 
-        return { path: inputPath, accessible, fileCount, overlapLibrary, error };
+        return { path: resolvedInputPath, accessible, fileCount, overlapLibrary, error };
       }),
     );
 
@@ -357,6 +373,10 @@ export class LibraryService {
   private async assertNameAvailable(name: string, excludeId?: number) {
     const existing = await this.libraryRepo.findByName(name, excludeId);
     if (existing.length > 0) throw new ConflictException('A library with this name already exists');
+  }
+
+  private async assertFolderPathsWithinBrowseRoot(paths: string[]): Promise<string[]> {
+    return Promise.all(paths.map((path) => this.pathPolicy.assertWithinBrowseRoot(path)));
   }
 
   private async cleanupCoverDirectories(bookIds: number[]): Promise<void> {

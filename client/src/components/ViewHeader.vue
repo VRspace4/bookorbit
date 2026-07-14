@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { CheckSquare, LayoutGrid, List, SlidersHorizontal, Square, Table2 } from 'lucide-vue-next'
-import * as LucideIcons from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { formatNumber } from '@/i18n/formatters'
+import { CheckSquare, LayoutGrid, List, SlidersHorizontal, Square, Table2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
@@ -10,11 +11,13 @@ import ViewHeaderDesktopSearch from '@/components/view-header/ViewHeaderDesktopS
 import ViewHeaderDisplayControls from '@/components/view-header/ViewHeaderDisplayControls.vue'
 import ViewHeaderMobileMenu from '@/components/view-header/ViewHeaderMobileMenu.vue'
 import ViewHeaderMobileSearchSheet from '@/components/view-header/ViewHeaderMobileSearchSheet.vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 withDefaults(
   defineProps<{
     title: string
     icon?: string
+    fallbackIcon?: string
     total: number
     coverSize: number
     gridGap: number
@@ -59,20 +62,18 @@ const emit = defineEmits<{
   'update:searchQuery': [value: string]
 }>()
 
+const { t } = useI18n()
+
 const mobileDisplayOpen = ref(false)
 const mobileSearchOpen = ref(false)
-
-function getIconComponent(name: string) {
-  return (LucideIcons as Record<string, unknown>)[name] ?? null
-}
 </script>
 
 <template>
   <div class="sticky top-0 z-20 mb-2 mt-2 flex h-10 shrink-0 items-center gap-2 bg-background/80 p-2 backdrop-blur-md transition-all duration-300">
     <div class="flex min-w-0 flex-1 items-center gap-2">
-      <component v-if="icon" :is="getIconComponent(icon)" :size="16" class="shrink-0 text-muted-foreground" />
+      <AppIcon v-if="icon" :icon="icon" :fallback="fallbackIcon" :size="16" class="shrink-0 text-muted-foreground" />
       <span class="truncate text-[16px] font-bold tracking-tight text-foreground/90">{{ title }}</span>
-      <span class="shrink-0 tabular-nums text-[12px] font-semibold text-primary/70">({{ total.toLocaleString() }})</span>
+      <span class="shrink-0 tabular-nums text-[12px] font-semibold text-primary/70">({{ formatNumber(total) }})</span>
     </div>
 
     <div class="flex shrink-0 items-center gap-2">
@@ -95,7 +96,7 @@ function getIconComponent(name: string) {
       >
         <CheckSquare v-if="selectionMode" :size="13" />
         <Square v-else :size="13" />
-        Select
+        {{ t('components.viewHeader.select') }}
       </Button>
 
       <div v-if="showSelection" class="mx-1.5 hidden h-3.5 w-px bg-border/40 md:block" />
@@ -161,7 +162,7 @@ function getIconComponent(name: string) {
           >
             <template #columns>
               <slot name="columns">
-                <p class="text-xs text-muted-foreground">Use the column visibility panel in the table header to show or hide columns.</p>
+                <p class="text-xs text-muted-foreground">{{ t('components.viewHeader.columnVisibilityHint') }}</p>
               </slot>
             </template>
           </ViewHeaderDisplayControls>
@@ -192,8 +193,8 @@ function getIconComponent(name: string) {
   <Sheet v-model:open="mobileDisplayOpen">
     <SheetContent side="bottom">
       <SheetHeader>
-        <SheetTitle>Display</SheetTitle>
-        <SheetDescription class="sr-only">Adjust cover size, grid spacing, and view display options.</SheetDescription>
+        <SheetTitle>{{ t('components.viewHeader.display') }}</SheetTitle>
+        <SheetDescription class="sr-only">{{ t('components.viewHeader.displayDescription') }}</SheetDescription>
       </SheetHeader>
       <div class="px-4 pb-6">
         <ViewHeaderDisplayControls
@@ -213,7 +214,7 @@ function getIconComponent(name: string) {
         >
           <template #columns>
             <slot name="columns">
-              <p class="text-xs text-muted-foreground">Column visibility can be managed from the table header.</p>
+              <p class="text-xs text-muted-foreground">{{ t('components.viewHeader.columnVisibilityMobileHint') }}</p>
             </slot>
           </template>
         </ViewHeaderDisplayControls>

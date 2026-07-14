@@ -31,6 +31,17 @@ vi.mock('@/features/auth/composables/usePermissions', () => ({
 }))
 
 vi.mock('@/features/admin/UsersPage.vue', () => ({ default: { template: '<div data-testid="users-page" />' } }))
+vi.mock('@/features/admin/AccountActivityPage.vue', () => ({ default: { template: '<div data-testid="account-activity-page" />' } }))
+vi.mock('../MagicLinksSettings.vue', () => ({
+  default: {
+    name: 'MagicLinksSettings',
+    props: {
+      withHeader: Boolean,
+      withEmbeddedCreateAction: Boolean,
+    },
+    template: '<div data-testid="magic-links-settings" />',
+  },
+}))
 vi.mock('../OidcSettings.vue', () => ({ default: { template: '<div data-testid="oidc-settings" />' } }))
 vi.mock('../SettingsPageHeader.vue', () => ({ default: { template: '<div />' } }))
 
@@ -48,10 +59,12 @@ describe('AdminAllSettings', () => {
   })
 
   describe('superuser', () => {
-    it('sees both Users and OIDC tabs', () => {
+    it('sees Users, Account Activity, Magic Links, and OIDC tabs', () => {
       const wrapper = mountComponent(undefined, { su: true })
       const labels = wrapper.findAll('button').map((b) => b.text())
       expect(labels).toContain('Users')
+      expect(labels).toContain('Account Activity')
+      expect(labels).toContain('Magic Links')
       expect(labels).toContain('OIDC / SSO')
     })
 
@@ -70,6 +83,21 @@ describe('AdminAllSettings', () => {
       const wrapper = mountComponent('users', { su: true })
       expect(wrapper.find('[data-testid="users-page"]').exists()).toBe(true)
     })
+
+    it('renders MagicLinksSettings when tab=magic-links', () => {
+      const wrapper = mountComponent('magic-links', { su: true })
+      expect(wrapper.find('[data-testid="magic-links-settings"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="users-page"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="oidc-settings"]').exists()).toBe(false)
+    })
+
+    it('enables MagicLinksSettings embedded create action in the admin tab', () => {
+      const wrapper = mountComponent('magic-links', { su: true })
+      const magicLinksSettings = wrapper.findComponent({ name: 'MagicLinksSettings' })
+
+      expect(magicLinksSettings.props('withHeader')).toBe(false)
+      expect(magicLinksSettings.props('withEmbeddedCreateAction')).toBe(true)
+    })
   })
 
   describe('user with manage_users only', () => {
@@ -77,7 +105,9 @@ describe('AdminAllSettings', () => {
       const wrapper = mountComponent(undefined, { perms: ['manage_users'] })
       const labels = wrapper.findAll('button').map((b) => b.text())
       expect(labels).toContain('Users')
+      expect(labels).not.toContain('Magic Links')
       expect(labels).not.toContain('OIDC / SSO')
+      expect(labels).not.toContain('Account Activity')
     })
 
     it('defaults to users tab and shows UsersPage', () => {
@@ -89,6 +119,17 @@ describe('AdminAllSettings', () => {
       const wrapper = mountComponent('oidc', { perms: ['manage_users'] })
       expect(wrapper.find('[data-testid="users-page"]').exists()).toBe(true)
       expect(wrapper.find('[data-testid="oidc-settings"]').exists()).toBe(false)
+    })
+  })
+
+  describe('user with view_user_activity only', () => {
+    it('sees and defaults to only the Account Activity tab', () => {
+      const wrapper = mountComponent(undefined, { perms: ['view_user_activity'] })
+      const labels = wrapper.findAll('button').map((button) => button.text())
+
+      expect(labels).toEqual(['Account Activity'])
+      expect(wrapper.find('[data-testid="account-activity-page"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="users-page"]').exists()).toBe(false)
     })
   })
 
@@ -111,6 +152,7 @@ describe('AdminAllSettings', () => {
       const wrapper = mountComponent(undefined, { perms: ['manage_users', 'manage_app_settings'] })
       const labels = wrapper.findAll('button').map((b) => b.text())
       expect(labels).toContain('Users')
+      expect(labels).not.toContain('Magic Links')
       expect(labels).toContain('OIDC / SSO')
     })
   })

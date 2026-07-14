@@ -24,6 +24,7 @@ describe('NotificationService', () => {
     emitCountUpdate: ReturnType<typeof vi.fn>;
     emitRead: ReturnType<typeof vi.fn>;
     emitDismissed: ReturnType<typeof vi.fn>;
+    emitAllRead: ReturnType<typeof vi.fn>;
     emitCleared: ReturnType<typeof vi.fn>;
     emitAllRead: ReturnType<typeof vi.fn>;
   };
@@ -48,6 +49,7 @@ describe('NotificationService', () => {
       emitCountUpdate: vi.fn(),
       emitRead: vi.fn(),
       emitDismissed: vi.fn(),
+      emitAllRead: vi.fn(),
       emitCleared: vi.fn(),
       emitAllRead: vi.fn(),
     };

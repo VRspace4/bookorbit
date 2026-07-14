@@ -13,20 +13,20 @@ vi.mock('fs/promises', () => ({
   unlink: vi.fn(),
 }));
 
-vi.mock('@parcel/watcher', () => ({
-  subscribe: vi.fn(),
+vi.mock('chokidar', () => ({
+  watch: vi.fn(),
 }));
 
 import { mkdir, readdir, realpath, unlink } from 'fs/promises';
-import { subscribe } from '@parcel/watcher';
+import { watch } from 'chokidar';
 
 import { isPrimaryFormat } from '../scanner/lib/classify';
 import { waitForStability } from '../scanner/lib/stability';
 import { BookDockWatcherService } from './book-dock-watcher.service';
 
-function makeService() {
+function makeService(bookDockPath = '/data/book-dock') {
   const config = {
-    get: vi.fn().mockReturnValue('/data'),
+    get: vi.fn().mockImplementation((key: string) => (key === 'storage.bookDockPath' ? bookDockPath : undefined)),
   };
   const ingestService = {
     ingestFromWatchedFolder: vi.fn(),
@@ -39,8 +39,24 @@ function makeService() {
   const gateway = {
     emitSummary: vi.fn(),
   };
-  const service = new BookDockWatcherService(config as never, ingestService as never, repo as never, gateway as never);
-  return { service, ingestService, repo, gateway };
+  const processingState = {
+    isPaused: vi.fn().mockResolvedValue(false),
+  };
+  const service = new BookDockWatcherService(config as never, ingestService as never, repo as never, gateway as never, processingState as never);
+  return { service, ingestService, repo, gateway, processingState };
+}
+
+function makeReadyWatcher(overrides: { close?: ReturnType<typeof vi.fn> } = {}) {
+  const watcher = {
+    on: vi.fn().mockReturnThis(),
+    once: vi.fn().mockImplementation((eventName: string, handler: () => void) => {
+      if (eventName === 'ready') handler();
+      return watcher;
+    }),
+    off: vi.fn().mockReturnThis(),
+    close: overrides.close ?? vi.fn().mockResolvedValue(undefined),
+  };
+  return watcher;
 }
 
 describe('BookDockWatcherService', () => {
@@ -59,20 +75,33 @@ describe('BookDockWatcherService', () => {
     expect(emitSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('rescan uses a custom configured Book Dock path', async () => {
+    const { service } = makeService('/books/bookdrop');
+    const walkSpy = vi.spyOn(service as any, 'walkAndIngest').mockResolvedValue(undefined);
+    const emitSpy = vi.spyOn(service as any, 'emitSummary').mockResolvedValue(undefined);
+
+    await service.rescan();
+
+    expect(walkSpy).toHaveBeenCalledWith('/books/bookdrop');
+    expect(emitSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('startWatcher ensures directory exists and subscribes for file events', async () => {
     const { service } = makeService();
-    vi.mocked(subscribe).mockResolvedValue({ unsubscribe: vi.fn() } as never);
+    vi.mocked(watch).mockReturnValue(makeReadyWatcher() as never);
 
     await (service as any).startWatcher();
 
     expect(mkdir).toHaveBeenCalledWith('/data/book-dock', { recursive: true });
     expect(realpath).toHaveBeenCalledWith('/data/book-dock');
-    expect(subscribe).toHaveBeenCalledWith('/data/book-dock', expect.any(Function));
+    expect(watch).toHaveBeenCalledWith('/data/book-dock', { ignoreInitial: true });
   });
 
   it('startWatcher swallows watcher boot errors', async () => {
     const { service } = makeService();
-    vi.mocked(subscribe).mockRejectedValue(new Error('watch init failed'));
+    vi.mocked(watch).mockImplementation(() => {
+      throw new Error('watch init failed');
+    });
 
     await expect((service as any).startWatcher()).resolves.toBeUndefined();
   });
@@ -87,7 +116,19 @@ describe('BookDockWatcherService', () => {
 
     expect(waitForStability).toHaveBeenCalledWith('/data/book-dock/book.epub');
     expect(ingestService.ingestFromWatchedFolder).toHaveBeenCalledWith('/data/book-dock/book.epub');
-    expect(gateway.emitSummary).toHaveBeenCalledWith({ pending: 1, ready: 2, error: 0, total: 3 });
+    expect(gateway.emitSummary).toHaveBeenCalledWith({ pending: 1, ready: 2, error: 0, total: 3, paused: false });
+  });
+
+  it('rescan skips discovery while paused and emits current summary', async () => {
+    const { service, processingState, ingestService, gateway } = makeService();
+    const walkSpy = vi.spyOn(service as any, 'walkAndIngest').mockResolvedValue(undefined);
+    processingState.isPaused.mockResolvedValue(true);
+
+    await service.rescan();
+
+    expect(walkSpy).not.toHaveBeenCalled();
+    expect(ingestService.ingestFromWatchedFolder).not.toHaveBeenCalled();
+    expect(gateway.emitSummary).toHaveBeenCalledWith({ pending: 1, ready: 2, error: 0, total: 3, paused: true });
   });
 
   it('process(delete) removes db row and cover files before emitting summary', async () => {
@@ -99,7 +140,18 @@ describe('BookDockWatcherService', () => {
     expect(unlink).toHaveBeenCalledWith('/data/book-dock/covers/12.jpg');
     expect(unlink).toHaveBeenCalledWith('/data/book-dock/covers/12_thumb.jpg');
     expect(repo.deleteById).toHaveBeenCalledWith(12);
-    expect(gateway.emitSummary).toHaveBeenCalledWith({ pending: 1, ready: 2, error: 0, total: 3 });
+    expect(gateway.emitSummary).toHaveBeenCalledWith({ pending: 1, ready: 2, error: 0, total: 3, paused: false });
+  });
+
+  it('process(create) skips stability and ingest while paused', async () => {
+    const { service, ingestService, processingState } = makeService();
+    processingState.isPaused.mockResolvedValue(true);
+    vi.mocked(isPrimaryFormat).mockReturnValue(true);
+
+    await (service as any).process('create', '/data/book-dock/book.epub');
+
+    expect(waitForStability).not.toHaveBeenCalled();
+    expect(ingestService.ingestFromWatchedFolder).not.toHaveBeenCalled();
   });
 
   it('walkAndIngest skips covers folder and ingests supported files recursively', async () => {
@@ -131,14 +183,14 @@ describe('BookDockWatcherService', () => {
 
   it('onModuleDestroy clears timers and unsubscribes active watcher', async () => {
     const { service } = makeService();
-    const unsubscribe = vi.fn().mockResolvedValue(undefined);
-    (service as any).subscription = { unsubscribe };
+    const close = vi.fn().mockResolvedValue(undefined);
+    (service as any).subscription = { close };
     const timer = setTimeout(() => undefined, 1_000);
     (service as any).pendingTimers.set('/tmp/file.epub', { timer, type: 'create' });
 
     await service.onModuleDestroy();
 
-    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
     expect((service as any).pendingTimers.size).toBe(0);
     expect((service as any).subscription).toBeNull();
   });

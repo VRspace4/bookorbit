@@ -18,6 +18,9 @@ const mockConfig: ProviderConfigurations = {
   audible: { enabled: false, domain: 'com' },
   audnexus: { enabled: false },
   comicvine: { enabled: true, apiKey: 'test-key' },
+  ranobedb: { enabled: false },
+  kobo: { enabled: false, country: 'us', language: 'en' },
+  lubimyczytac: { enabled: false },
 };
 
 const mockVolume = {
@@ -94,7 +97,8 @@ describe('ComicVineProvider', () => {
     it('returns empty array when provider is disabled', async () => {
       vi.spyOn(providerConfig, 'getConfig').mockResolvedValue({
         ...mockConfig,
-        comicvine: { enabled: false, apiKey: 'test-key' },
+        comicvine: { enabled: false, apiKey: '' },
+        ranobedb: { enabled: false },
       });
 
       expect(await provider.search({ title: 'Batman #1' })).toEqual([]);
@@ -308,7 +312,8 @@ describe('ComicVineProvider', () => {
     it('returns null when disabled', async () => {
       vi.spyOn(providerConfig, 'getConfig').mockResolvedValue({
         ...mockConfig,
-        comicvine: { enabled: false, apiKey: 'test-key' },
+        comicvine: { enabled: false, apiKey: '' },
+        ranobedb: { enabled: false },
       });
 
       expect(await provider.lookupById('100')).toBeNull();

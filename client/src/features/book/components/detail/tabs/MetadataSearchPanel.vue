@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, reactive, ref, watch } from 'vue'
-import { Search, BookOpen, Loader2, PencilLine } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { Search, BookOpen, Loader2, PencilLine } from '@lucide/vue'
 import type { MetadataCandidate, MetadataProviderInfo, MetadataProviderKey } from '@bookorbit/types'
 import MetadataResultCard from './MetadataResultCard.vue'
 import { providerActivePillStyle } from '../../../lib/metadata-fetch'
@@ -20,9 +21,11 @@ const emit = defineEmits<{
   search: [{ title: string; author: string; isbn: string }]
   toggleProvider: [MetadataProviderKey]
   clearFilter: []
+  selectFieldRules: []
   select: [MetadataCandidate]
 }>()
 
+const { t } = useI18n()
 const coverAspectRatio = inject(COVER_ASPECT_RATIO_KEY, ref(DEFAULT_COVER_ASPECT_RATIO))
 
 const form = reactive({
@@ -35,8 +38,21 @@ const isFormCollapsed = ref(false)
 const canSearch = computed(() => !!(form.title.trim() || form.isbn.trim()))
 const searchSummary = computed(() => {
   const parts = [form.title.trim(), form.author.trim(), form.isbn.trim()].filter(Boolean)
-  return parts.length ? parts.join(' - ') : 'Untitled query'
+  return parts.length ? parts.join(' - ') : t('book.detail.editMetadata.searchPanel.untitledQuery')
 })
+const hasFieldRuleScope = computed(() => props.providers.some((provider) => provider.selectedByFieldRules !== undefined))
+const allProviderKeys = computed(() => props.providers.map((provider) => provider.key))
+const fieldRuleProviderKeys = computed(() => props.providers.filter((provider) => provider.selectedByFieldRules).map((provider) => provider.key))
+const providersOutsideFieldRules = computed(() => props.providers.filter((provider) => provider.selectedByFieldRules === false))
+const providersOutsideFieldRuleText = computed(() => providersOutsideFieldRules.value.map((provider) => provider.label).join(', '))
+const allProvidersSelected = computed(() => sameProviderSelection(allProviderKeys.value))
+const fieldRuleProvidersSelected = computed(() => sameProviderSelection(fieldRuleProviderKeys.value))
+const hasFieldRuleScopeOption = computed(
+  () => hasFieldRuleScope.value && providersOutsideFieldRules.value.length > 0 && fieldRuleProviderKeys.value.length > 0,
+)
+const customProviderSelection = computed(
+  () => props.providers.length > 0 && !allProvidersSelected.value && !(hasFieldRuleScopeOption.value && fieldRuleProvidersSelected.value),
+)
 
 watch(
   () => props.hasSearched,
@@ -66,6 +82,10 @@ function handleClearFilter() {
   emit('clearFilter')
 }
 
+function handleSelectFieldRules() {
+  emit('selectFieldRules')
+}
+
 function handleToggleProvider(provider: MetadataProviderKey) {
   emit('toggleProvider', provider)
 }
@@ -73,46 +93,50 @@ function handleToggleProvider(provider: MetadataProviderKey) {
 function handleSelectCandidate(candidate: MetadataCandidate) {
   emit('select', candidate)
 }
+
+function sameProviderSelection(keys: MetadataProviderKey[]) {
+  if (!keys.length) return false
+  const selected = new Set(props.selectedProviders)
+  return selected.size === keys.length && keys.every((key) => selected.has(key))
+}
 </script>
 
 <template>
   <div class="flex flex-col h-full">
     <!-- Search form card -->
     <div v-if="!isFormCollapsed" class="px-4 pt-4 pb-3 shrink-0">
-      <div class="rounded-lg border border-border bg-card p-3 space-y-2 shadow-sm">
-        <div class="flex gap-2">
-          <div class="relative flex-1">
+      <div class="rounded-lg border border-border bg-card p-3 shadow-sm">
+        <div class="grid grid-cols-[minmax(0,1fr)_auto] gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_11rem_auto]">
+          <div class="relative col-span-2 min-w-0 md:col-span-1">
             <BookOpen class="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
             <input
               v-model="form.title"
               class="w-full h-8 rounded-lg border border-input bg-background pl-8 pr-3 text-sm outline-none focus:ring-1 focus:ring-ring transition-shadow"
-              placeholder="Title"
+              :placeholder="t('book.detail.editMetadata.searchPanel.titlePlaceholder')"
               @keydown.enter="runSearch"
             />
           </div>
           <input
             v-model="form.author"
-            class="flex-1 h-8 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring transition-shadow"
-            placeholder="Author"
+            class="col-span-2 h-8 min-w-0 rounded-lg border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring transition-shadow md:col-span-1"
+            :placeholder="t('book.detail.editMetadata.searchPanel.authorPlaceholder')"
             @keydown.enter="runSearch"
           />
-        </div>
-        <div class="flex gap-2">
           <input
             v-model="form.isbn"
-            class="flex-1 h-8 rounded-lg border border-input bg-background px-3 text-sm font-mono outline-none focus:ring-1 focus:ring-ring transition-shadow"
-            placeholder="ISBN"
+            class="h-8 min-w-0 rounded-lg border border-input bg-background px-3 text-sm font-mono outline-none focus:ring-1 focus:ring-ring transition-shadow"
+            :placeholder="t('book.detail.editMetadata.searchPanel.isbnPlaceholder')"
             @keydown.enter="runSearch"
           />
           <button
-            class="relative flex items-center gap-1.5 h-8 px-4 rounded-lg bg-primary text-primary-foreground text-sm font-medium transition-all disabled:opacity-40 hover:opacity-90 active:scale-95 overflow-hidden group"
+            class="relative flex items-center justify-center gap-1.5 h-8 w-28 rounded-lg bg-primary text-primary-foreground text-sm font-medium transition-all disabled:opacity-40 hover:opacity-90 active:scale-95 overflow-hidden group"
             :disabled="!canSearch || isStreaming"
             @click="runSearch"
           >
             <span class="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity" />
             <Loader2 v-if="isStreaming" class="size-3.5 animate-spin" />
             <Search v-else class="size-3.5" />
-            {{ isStreaming ? 'Searching...' : 'Search' }}
+            {{ isStreaming ? t('book.detail.editMetadata.searchPanel.searching') : t('common.search') }}
           </button>
         </div>
       </div>
@@ -122,7 +146,9 @@ function handleSelectCandidate(candidate: MetadataCandidate) {
         <div class="flex items-center gap-2">
           <Search class="size-3.5 text-muted-foreground shrink-0" />
           <div class="min-w-0 flex-1">
-            <p class="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Active query</p>
+            <p class="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+              {{ t('book.detail.editMetadata.searchPanel.activeQuery') }}
+            </p>
             <p class="text-sm font-medium text-foreground truncate">{{ searchSummary }}</p>
           </div>
           <button
@@ -130,35 +156,51 @@ function handleSelectCandidate(candidate: MetadataCandidate) {
             @click="expandSearchForm"
           >
             <PencilLine class="size-3.5" />
-            Edit
+            {{ t('common.edit') }}
           </button>
         </div>
       </div>
     </div>
 
     <!-- Provider filter pills -->
-    <div v-if="providers.length" class="flex items-center gap-1.5 px-4 pb-3 flex-wrap shrink-0">
-      <button
-        class="h-6 px-2.5 rounded-full text-xs font-medium transition-all active:scale-95"
-        :class="
-          !selectedProviders.length
-            ? 'bg-primary text-primary-foreground shadow-sm shadow-primary/20'
-            : 'bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80'
-        "
-        @click="handleClearFilter"
+    <div v-if="providers.length" class="flex items-center gap-1.5 px-4 pb-2 flex-wrap shrink-0">
+      <div
+        class="inline-flex h-6 items-stretch overflow-hidden rounded-full border border-border bg-background shadow-xs"
+        :aria-label="t('book.detail.editMetadata.searchPanel.searchScope')"
       >
-        All
-      </button>
+        <button
+          class="h-full px-2.5 text-[11px] font-medium transition-colors"
+          :class="
+            allProvidersSelected ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+          "
+          @click="handleClearFilter"
+        >
+          {{ hasFieldRuleScope ? t('book.detail.editMetadata.searchPanel.allEnabled') : t('book.detail.editMetadata.searchPanel.all') }}
+        </button>
+        <button
+          v-if="hasFieldRuleScopeOption"
+          class="h-full px-2.5 text-[11px] font-medium transition-colors"
+          :class="
+            fieldRuleProvidersSelected ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+          "
+          @click="handleSelectFieldRules"
+        >
+          {{ t('book.detail.editMetadata.searchPanel.fieldRules') }}
+        </button>
+        <span
+          v-if="customProviderSelection"
+          class="h-full px-2.5 bg-primary text-primary-foreground text-[11px] font-medium shadow-sm flex items-center"
+        >
+          {{ t('book.detail.editMetadata.searchPanel.custom') }}
+        </span>
+      </div>
       <button
         v-for="p in providers"
         :key="p.key"
         class="h-6 px-2.5 rounded-full text-xs font-medium transition-all flex items-center gap-1 active:scale-95"
-        :class="
-          selectedProviders.includes(p.key) || !selectedProviders.length
-            ? ''
-            : 'bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80'
-        "
-        :style="selectedProviders.includes(p.key) || !selectedProviders.length ? providerActivePillStyle(p.key) : {}"
+        :title="p.selectedByFieldRules === false ? t('book.detail.editMetadata.searchPanel.providerNotInFieldRules', { provider: p.label }) : p.label"
+        :class="selectedProviders.includes(p.key) ? '' : 'bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80'"
+        :style="selectedProviders.includes(p.key) ? providerActivePillStyle(p.key) : {}"
         @click="handleToggleProvider(p.key)"
       >
         {{ p.label }}
@@ -170,6 +212,13 @@ function handleSelectCandidate(candidate: MetadataCandidate) {
         </span>
         <span v-else-if="isStreaming" class="size-1.5 rounded-full bg-current animate-pulse" />
       </button>
+    </div>
+    <div
+      v-if="providersOutsideFieldRules.length"
+      class="mx-4 mb-3 rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground shrink-0"
+    >
+      <span class="font-medium text-foreground">{{ t('book.detail.editMetadata.searchPanel.notInFieldRulesLabel') }}</span>
+      {{ t('book.detail.editMetadata.searchPanel.notInFieldRulesText', { providers: providersOutsideFieldRuleText }) }}
     </div>
 
     <!-- Results (scrollable) -->
@@ -192,14 +241,14 @@ function handleSelectCandidate(candidate: MetadataCandidate) {
           <BookOpen class="size-5" />
         </div>
         <div class="text-center">
-          <p class="text-sm font-medium text-foreground">No results found</p>
-          <p class="text-xs text-muted-foreground mt-0.5">Try adjusting the title or author</p>
+          <p class="text-sm font-medium text-foreground">{{ t('book.detail.editMetadata.searchPanel.noResults') }}</p>
+          <p class="text-xs text-muted-foreground mt-0.5">{{ t('book.detail.editMetadata.searchPanel.noResultsHint') }}</p>
         </div>
       </div>
 
       <!-- Instructions when no search yet -->
       <div v-else-if="!hasSearched" class="py-12 flex flex-col items-center gap-2 text-muted-foreground">
-        <p class="text-sm">Search above, then click a result to start comparing metadata.</p>
+        <p class="text-sm">{{ t('book.detail.editMetadata.searchPanel.searchPrompt') }}</p>
       </div>
 
       <!-- Results grid -->

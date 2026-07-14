@@ -1,8 +1,10 @@
 import { ref } from 'vue'
 import type { Ref } from 'vue'
+import { useRouter } from 'vue-router'
 import type { BookCard } from '@bookorbit/types'
 import { useTableViewControls } from './useTableViewControls'
 import { useBookViewSelection } from './useBookViewSelection'
+import { useBookNavigation } from './useBookNavigation'
 import { useDeleteBook } from './useDeleteBook'
 import { useBookBulkActions, type QuerySelectionState } from './useBookBulkActions'
 
@@ -18,6 +20,8 @@ interface BookTableShellOptions {
 type BookActionType = 'quick-view' | 'add-to-collection' | 'delete'
 
 export function useBookTableShell({ books, querySelection }: BookTableShellOptions) {
+  const router = useRouter()
+  const { setBookContext } = useBookNavigation()
   const tableControls = useTableViewControls()
   const selection = useBookViewSelection(books)
 
@@ -44,7 +48,7 @@ export function useBookTableShell({ books, querySelection }: BookTableShellOptio
   )
 
   const addToCollectionOpen = ref(false)
-  const bulkTagsOpen = ref(false)
+  const bulkEditOpen = ref(false)
   const sendBookOpen = ref(false)
   const quickViewBookId = ref<number | null>(null)
   const quickViewOpen = ref(false)
@@ -77,6 +81,14 @@ export function useBookTableShell({ books, querySelection }: BookTableShellOptio
     books.value = books.value.map((book, currentIndex) => (currentIndex === index ? updated : book))
   }
 
+  function handleEditIndividually(): void {
+    const orderedIds = books.value.filter((book) => selection.selectedIds.value.has(book.id)).map((book) => book.id)
+    if (orderedIds.length === 0) return
+    setBookContext(orderedIds, orderedIds.length)
+    router.push({ name: 'book-detail', params: { bookId: orderedIds[0] }, query: { tab: 'edit' } })
+    selection.exitSelectionMode()
+  }
+
   return {
     ...tableControls,
     ...selection,
@@ -87,11 +99,12 @@ export function useBookTableShell({ books, querySelection }: BookTableShellOptio
     confirmDelete,
     ...bulk,
     addToCollectionOpen,
-    bulkTagsOpen,
+    bulkEditOpen,
     sendBookOpen,
     quickViewBookId,
     quickViewOpen,
     handleBookAction,
     handleTableBookUpdate,
+    handleEditIndividually,
   }
 }

@@ -21,6 +21,7 @@ import { bookCoverDirPath, bookThumbnailPath, findPreferredBookCoverFileName } f
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { Public } from '../../common/decorators/public.decorator';
 import { imageContentTypeFromPath } from '../../common/image-content-type';
+import { contentDispositionHeader } from '../../common/utils/content-disposition.utils';
 import { OPDS_MIME_ACQ, OPDS_MIME_NAV, OPDS_MIME_SEARCH, fileMimeType } from './opds-xml.helpers';
 import { OpdsAuthGuard } from './opds-auth.guard';
 import type { OpdsRequestUser } from './opds-auth.guard';
@@ -28,6 +29,7 @@ import { OpdsEnabledGuard } from './opds-enabled.guard';
 import { OpdsUser } from './opds-user.decorator';
 import { OpdsBookService } from './opds-book.service';
 import { OpdsService } from './opds.service';
+import { BookService } from '../book/book.service';
 
 @Controller('opds')
 @Public()
@@ -39,6 +41,7 @@ export class OpdsController {
     private readonly opdsService: OpdsService,
     private readonly opdsBookService: OpdsBookService,
     private readonly config: ConfigService,
+    private readonly bookService: BookService,
   ) {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
@@ -78,15 +81,15 @@ export class OpdsController {
 
   @Get('authors')
   async authors(@OpdsUser() user: OpdsRequestUser, @Res() reply: FastifyReply) {
-    const items = await this.opdsBookService.getDistinctAuthors(user.userId, user.isSuperuser);
+    const items = await this.opdsBookService.getDistinctAuthors(user.userId, user.isSuperuser, user.contentFilters);
     const xml = this.opdsService.generateAuthorsNavigation(items);
     this.sendXml(reply, xml, OPDS_MIME_NAV);
   }
 
   @Get('series')
   async series(@OpdsUser() user: OpdsRequestUser, @Res() reply: FastifyReply) {
-    const items = await this.opdsBookService.getDistinctSeries(user.userId, user.isSuperuser);
-    const xml = this.opdsService.generateSeriesNavigation(items.filter((s): s is { name: string; bookCount: number } => s.name !== null));
+    const items = await this.opdsBookService.getDistinctSeries(user.userId, user.isSuperuser, user.contentFilters);
+    const xml = this.opdsService.generateSeriesNavigation(items.filter((s): s is { id: number; name: string; bookCount: number } => s.name !== null));
     this.sendXml(reply, xml, OPDS_MIME_NAV);
   }
 
@@ -102,6 +105,7 @@ export class OpdsController {
     @Query('series') series?: string,
     @Query('q') q?: string,
     @Res() reply?: FastifyReply,
+    @Query('seriesId') seriesIdStr?: string,
   ) {
     const clampedSize = Math.min(Math.max(size, 1), 100);
     const clampedPage = Math.max(page, 1);
@@ -111,10 +115,12 @@ export class OpdsController {
     const libraryId = this.parseOptionalPositiveInt('libraryId', libraryIdStr);
     const collectionId = this.parseOptionalPositiveInt('collectionId', collectionIdStr);
     const smartScopeId = this.parseOptionalPositiveInt('smartScopeId', smartScopeIdStr);
+    const seriesId = this.parseOptionalPositiveInt('seriesId', seriesIdStr);
 
     if (libraryId !== undefined) filters.libraryId = libraryId;
     if (collectionId !== undefined) filters.collectionId = collectionId;
     if (smartScopeId !== undefined) filters.smartScopeId = smartScopeId;
+    if (seriesId !== undefined) filters.seriesId = seriesId;
     if (author) filters.author = author;
     if (series) filters.series = series;
     if (q) filters.q = q;
@@ -126,6 +132,7 @@ export class OpdsController {
       clampedSize,
       filters,
       user.isSuperuser,
+      user.contentFilters,
     );
 
     const selfParams = new URLSearchParams();
@@ -134,17 +141,14 @@ export class OpdsController {
     selfParams.set('size', String(clampedSize));
     const selfPath = `/api/v1/opds/catalog?${selfParams.toString()}`;
 
+    const filterSuffix = Object.entries(filters)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}:${encodeURIComponent(String(v))}`)
+      .join(':');
+    const feedId = filterSuffix ? `urn:bookorbit:catalog:${filterSuffix}` : 'urn:bookorbit:catalog';
+
     const feedTitle = q ? `Search: ${q}` : 'Catalog';
-    const xml = this.opdsService.generateAcquisitionFeed(
-      feedTitle,
-      'urn:bookorbit:catalog',
-      entries,
-      total,
-      clampedPage,
-      clampedSize,
-      selfPath,
-      user.coverToken,
-    );
+    const xml = this.opdsService.generateAcquisitionFeed(feedTitle, feedId, entries, total, clampedPage, clampedSize, selfPath, user.coverToken);
     this.sendXml(reply!, xml, OPDS_MIME_ACQ);
   }
 
@@ -159,7 +163,13 @@ export class OpdsController {
     const clampedPage = Math.max(page, 1);
     this.assertPaginationWindow(clampedPage, clampedSize);
 
-    const { entries, total } = await this.opdsBookService.getRecentBooksPage(user.userId, clampedPage, clampedSize, user.isSuperuser);
+    const { entries, total } = await this.opdsBookService.getRecentBooksPage(
+      user.userId,
+      clampedPage,
+      clampedSize,
+      user.isSuperuser,
+      user.contentFilters,
+    );
     const selfPath = `/api/v1/opds/recent?page=${clampedPage}&size=${clampedSize}`;
     const xml = this.opdsService.generateAcquisitionFeed(
       'Recent Books',
@@ -176,7 +186,7 @@ export class OpdsController {
 
   @Get('surprise')
   async surprise(@OpdsUser() user: OpdsRequestUser, @Res() reply: FastifyReply) {
-    const entries = await this.opdsBookService.getRandomBooks(user.userId, 25, user.isSuperuser);
+    const entries = await this.opdsBookService.getRandomBooks(user.userId, 25, user.isSuperuser, user.contentFilters);
     const xml = this.opdsService.generateAcquisitionFeed(
       'Random Books',
       'urn:bookorbit:surprise',
@@ -203,7 +213,7 @@ export class OpdsController {
     @Res() reply: FastifyReply,
     @Headers('if-none-match') ifNoneMatch?: string,
   ) {
-    await this.opdsBookService.validateBookAccess(bookId, user.userId, user.isSuperuser);
+    await this.opdsBookService.validateBookAccess(bookId, user.userId, user.isSuperuser, user.contentFilters);
     reply.header('Cross-Origin-Resource-Policy', 'cross-origin');
     const dir = bookCoverDirPath(this.appDataPath, bookId);
     try {
@@ -233,7 +243,7 @@ export class OpdsController {
     @Res() reply: FastifyReply,
     @Headers('if-none-match') ifNoneMatch?: string,
   ) {
-    await this.opdsBookService.validateBookAccess(bookId, user.userId, user.isSuperuser);
+    await this.opdsBookService.validateBookAccess(bookId, user.userId, user.isSuperuser, user.contentFilters);
     reply.header('Cross-Origin-Resource-Policy', 'cross-origin');
     const thumbnailPath = bookThumbnailPath(this.appDataPath, bookId);
     try {
@@ -259,21 +269,22 @@ export class OpdsController {
     @OpdsUser() user: OpdsRequestUser,
     @Res() reply: FastifyReply,
   ) {
-    await this.opdsBookService.validateBookAccess(bookId, user.userId, user.isSuperuser);
+    await this.opdsBookService.validateBookAccess(bookId, user.userId, user.isSuperuser, user.contentFilters);
 
     const bookFiles = await this.opdsBookService.getBookFiles(bookId, fileId);
     if (!bookFiles) throw new NotFoundException('File not found');
 
-    const { absolutePath, format, title, authorName } = bookFiles;
+    const { absolutePath, format } = bookFiles;
     const { size: fileSize } = await stat(absolutePath);
     const mime = fileMimeType(format);
 
-    const safeName =
-      [title, authorName]
-        .filter(Boolean)
-        .join(' - ')
-        .replace(/[^\w\s.-]/g, '') || `book-${bookId}`;
-    reply.header('Content-Disposition', `attachment; filename="${safeName}.${format}"`);
+    const filename = await this.bookService.resolveDownloadFilename({
+      bookId,
+      absolutePath,
+      format: format === 'unknown' ? null : format,
+    });
+
+    reply.header('Content-Disposition', contentDispositionHeader('attachment', filename, 'download'));
     reply.header('Content-Length', fileSize);
     reply.type(mime);
     reply.send(createReadStream(absolutePath));

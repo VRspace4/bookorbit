@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref, type Ref } from 'vue'
 import { useTableResize } from '../useTableResize'
-import type { ColumnDef, ColumnId } from '../useTableColumns'
+import type { ColumnDef } from '../useTableColumns'
 
 vi.mock('vue', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue')>()
@@ -21,13 +21,13 @@ function makeDefs(): ColumnDef[] {
 describe('useTableResize', () => {
   let scrollRef: Ref<HTMLDivElement | null>
   let displayColumns: Ref<ColumnDef[]>
-  let setWidthSpy: (id: ColumnId, px: number) => void
+  let setWidthSpy: (id: string, px: number) => void
   let isReadOnly: Ref<boolean>
 
   beforeEach(() => {
     scrollRef = ref(null)
     displayColumns = ref(makeDefs())
-    setWidthSpy = vi.fn<(id: ColumnId, px: number) => void>()
+    setWidthSpy = vi.fn<(id: string, px: number) => void>()
     isReadOnly = ref(false)
   })
 

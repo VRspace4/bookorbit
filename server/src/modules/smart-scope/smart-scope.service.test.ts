@@ -4,6 +4,7 @@ import type { BookQuery } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import type { SmartScope } from '../../db/schema/smart-scopes';
 import { SmartScopeService } from './smart-scope.service';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
   return {
@@ -20,6 +21,8 @@ function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -32,6 +35,7 @@ function makeSmartScope(overrides: Partial<SmartScope> = {}): SmartScope {
     filter: null,
     defaultSort: [],
     isPublic: false,
+    syncToKobo: false,
     displayOrder: 0,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),
     updatedAt: new Date('2026-01-01T00:00:00.000Z'),
@@ -61,6 +65,7 @@ function makeService() {
   };
   const bookService = {
     executeBooksQuery: vi.fn(),
+    executeJumpBucketsQuery: vi.fn(),
   };
 
   const service = new SmartScopeService(
@@ -141,6 +146,7 @@ describe('SmartScopeService', () => {
       filter: null,
       defaultSort: [{ field: 'title', dir: 'asc' }],
       isPublic: false,
+      syncToKobo: false,
     });
     expect(result).toEqual(created);
   });
@@ -312,7 +318,12 @@ describe('SmartScopeService', () => {
 
     const result = await service.executeSmartScope(5, makeUser({ id: 12 }), 1, 25);
 
-    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(smartScope.filter, { accessibleLibraryIds: [9], userId: 12, timeZone: 'UTC' });
+    expect(queryBuilder.buildWhere).toHaveBeenCalledWith(smartScope.filter, {
+      accessibleLibraryIds: [9],
+      userId: 12,
+      timeZone: 'UTC',
+      contentFilters: EMPTY_CONTENT_FILTER_RULES,
+    });
     expect(bookService.executeBooksQuery).toHaveBeenCalledWith(12, 'where', {
       filter: smartScope.filter,
       sort: [{ field: 'title', dir: 'asc' }],
@@ -343,6 +354,7 @@ describe('SmartScopeService', () => {
       sort: [{ field: 'author', dir: 'desc' }],
       pagination: { page: 0, size: 50 },
       q: 'needle',
+      collapseSeries: true,
     });
 
     expect(queryBuilder.buildWhere).toHaveBeenCalledWith(
@@ -351,7 +363,7 @@ describe('SmartScopeService', () => {
         join: 'AND',
         rules: [smartScope.filter, requestFilter],
       },
-      { accessibleLibraryIds: [9], userId: 12, q: 'needle', timeZone: 'UTC' },
+      { accessibleLibraryIds: [9], userId: 12, q: 'needle', timeZone: 'UTC', contentFilters: EMPTY_CONTENT_FILTER_RULES },
     );
     expect(bookService.executeBooksQuery).toHaveBeenCalledWith(12, 'combined-where', {
       filter: {
@@ -362,6 +374,58 @@ describe('SmartScopeService', () => {
       sort: [{ field: 'author', dir: 'desc' }],
       pagination: { page: 0, size: 50 },
       q: 'needle',
+      collapseSeries: true,
+    });
+  });
+
+  describe('queryJumpBuckets', () => {
+    it('returns empty buckets immediately when the smartScope has no filter', async () => {
+      const { service, smartScopeRepo, bookService } = makeService();
+      smartScopeRepo.findById.mockResolvedValue([makeSmartScope({ id: 5, userId: 12, filter: null })]);
+
+      const result = await service.queryJumpBuckets(5, makeUser({ id: 12 }), {
+        sort: [{ field: 'title', dir: 'asc' }],
+        pagination: { page: 0, size: 50 },
+      });
+
+      expect(bookService.executeJumpBucketsQuery).not.toHaveBeenCalled();
+      expect(result).toEqual({ buckets: [], total: 0 });
+    });
+
+    it('resolves the scope default sort before delegating so eligibility is checked post-resolution', async () => {
+      const { service, smartScopeRepo, libraryService, queryBuilder, bookService } = makeService();
+      const smartScope = makeSmartScope({
+        id: 5,
+        userId: 12,
+        filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'scope' }] },
+        defaultSort: [{ field: 'author', dir: 'desc' }],
+      });
+      smartScopeRepo.findById.mockResolvedValue([smartScope]);
+      libraryService.findAccessibleLibraryIds.mockResolvedValue([9]);
+      queryBuilder.buildWhere.mockReturnValue('where');
+      bookService.executeJumpBucketsQuery.mockResolvedValue({ buckets: [{ key: 'A', label: 'A', index: 0 }], total: 3 });
+
+      const result = await service.queryJumpBuckets(5, makeUser({ id: 12 }), {
+        sort: [],
+        pagination: { page: 0, size: 50 },
+      });
+
+      expect(bookService.executeJumpBucketsQuery).toHaveBeenCalledWith(
+        12,
+        'where',
+        expect.objectContaining({ sort: [{ field: 'author', dir: 'desc' }] }),
+      );
+      expect(result).toEqual({ buckets: [{ key: 'A', label: 'A', index: 0 }], total: 3 });
+    });
+
+    it('denies access to private scopes of other users', async () => {
+      const { service, smartScopeRepo, bookService } = makeService();
+      smartScopeRepo.findById.mockResolvedValue([makeSmartScope({ id: 5, userId: 99, isPublic: false, filter: null })]);
+
+      await expect(service.queryJumpBuckets(5, makeUser({ id: 12 }), { sort: [], pagination: { page: 0, size: 50 } })).rejects.toBeInstanceOf(
+        ForbiddenException,
+      );
+      expect(bookService.executeJumpBucketsQuery).not.toHaveBeenCalled();
     });
   });
 
@@ -416,7 +480,7 @@ describe('SmartScopeService', () => {
           join: 'AND',
           rules: [smartScope.filter, requestFilter],
         },
-        { accessibleLibraryIds: [9], userId: 12, q: 'needle', timeZone: 'UTC' },
+        { accessibleLibraryIds: [9], userId: 12, q: 'needle', timeZone: 'UTC', contentFilters: EMPTY_CONTENT_FILTER_RULES },
       );
       expect(bookService.executeBooksQuery).toHaveBeenCalledWith(12, 'combined-where', {
         ...query,

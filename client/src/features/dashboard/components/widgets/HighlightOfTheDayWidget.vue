@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { Highlighter, BookOpen, ExternalLink } from 'lucide-vue-next'
+import { Highlighter, ExternalLink } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
+import BookCoverArtwork from '@/features/book/components/BookCoverArtwork.vue'
 import BookCoverSurface from '@/features/book/components/BookCoverSurface.vue'
 import { useHighlightOfTheDayWidget } from '../../composables/useHighlightOfTheDayWidget'
 
 const { data, loading, error } = useHighlightOfTheDayWidget()
+const { t } = useI18n()
 const router = useRouter()
 const { coverUrl } = useCoverVersions()
 
@@ -20,7 +23,7 @@ function goToBook() {
   <div class="flex h-full flex-col p-3">
     <div class="mb-2 flex items-center gap-2 self-start">
       <Highlighter :size="16" class="text-primary/90" />
-      <span class="text-[15px] font-semibold text-foreground">Highlight of the Day</span>
+      <span class="text-[15px] font-semibold text-foreground">{{ t('dashboard.widgets.highlightOfTheDay.title') }}</span>
     </div>
 
     <!-- Loading -->
@@ -30,14 +33,16 @@ function goToBook() {
     </div>
 
     <!-- Error -->
-    <div v-else-if="error" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">Failed to load</div>
+    <div v-else-if="error" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+      {{ t('dashboard.common.failedToLoad') }}
+    </div>
 
     <!-- Empty -->
     <div v-else-if="!data" class="flex flex-1 flex-col items-center justify-center gap-2">
       <div class="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
         <Highlighter :size="16" class="text-muted-foreground/60" />
       </div>
-      <p class="text-center text-xs text-muted-foreground">Highlight passages while reading to see them here</p>
+      <p class="text-center text-xs text-muted-foreground">{{ t('dashboard.widgets.highlightOfTheDay.empty') }}</p>
     </div>
 
     <!-- Quote -->
@@ -48,14 +53,20 @@ function goToBook() {
         "{{ data.text.length > 200 ? data.text.slice(0, 200) + '...' : data.text }}"
       </blockquote>
       <button class="flex cursor-pointer items-center gap-2 rounded-lg pb-1 pl-1 text-left transition-colors hover:bg-muted/40" @click="goToBook">
-        <BookCoverSurface v-if="data.hasCover" size="mini" class="h-9 w-6 shrink-0 overflow-hidden rounded">
-          <img :src="coverUrl(data.bookId)" :alt="data.bookTitle ?? 'Cover'" class="h-full w-full object-cover" />
+        <BookCoverSurface size="mini" class="book-cover-surface--spine-fitted h-9 w-6 shrink-0 overflow-hidden rounded">
+          <BookCoverArtwork
+            :src="coverUrl(data.bookId)"
+            :has-cover="data.hasCover"
+            :title="data.bookTitle"
+            :author-line="null"
+            :is-audio="false"
+            :seed="data.bookTitle ?? String(data.bookId)"
+            :alt="data.bookTitle ?? t('dashboard.common.cover')"
+            frame-aspect-ratio="2/3"
+          />
         </BookCoverSurface>
-        <div v-else class="flex h-8 w-5 shrink-0 items-center justify-center rounded bg-muted">
-          <BookOpen :size="10" class="text-muted-foreground" />
-        </div>
         <div class="min-w-0 flex-1">
-          <p class="truncate text-[12px] font-medium leading-tight">{{ data.bookTitle ?? 'Untitled' }}</p>
+          <p class="truncate text-[12px] font-medium leading-tight">{{ data.bookTitle ?? t('dashboard.common.untitled') }}</p>
           <p v-if="data.chapterTitle" class="truncate text-[11px] text-muted-foreground">{{ data.chapterTitle }}</p>
         </div>
         <ExternalLink :size="14" class="mr-1 shrink-0 text-muted-foreground/50" />

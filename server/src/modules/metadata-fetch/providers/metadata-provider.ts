@@ -6,12 +6,13 @@ export interface MetadataProvider {
   readonly key: MetadataProviderKey;
   readonly label: string;
   readonly identifiable: boolean;
+  readonly timeoutMs?: number;
   search(params: MetadataSearchParams): Promise<MetadataCandidate[]>;
 }
 
 export interface IdentifiableProvider extends MetadataProvider {
   readonly identifiable: true;
-  lookupById(providerId: string, signal?: AbortSignal): Promise<MetadataCandidate | null>;
+  lookupById(providerId: string, signal?: AbortSignal, params?: MetadataSearchParams): Promise<MetadataCandidate | null>;
 }
 
 export function isIdentifiable(p: MetadataProvider): p is IdentifiableProvider {

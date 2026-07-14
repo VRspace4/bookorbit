@@ -77,6 +77,7 @@ export interface MigrationRunReport {
       counts: {
         statuses: number
         fileProgress: number
+        readingSessions: number
         bookmarks: number
         annotations: number
         shelves: number
@@ -191,6 +192,17 @@ export function validateSourceById(sourceId: number) {
   return api(`/api/v1/migration/sources/${sourceId}/validate`, { method: 'POST' }).then((res) =>
     expectJson<Record<string, unknown>>(res, 'Failed to validate migration source'),
   )
+}
+
+export async function resetSource(sourceId: number) {
+  const res = await api(`/api/v1/migration/sources/${sourceId}`, { method: 'DELETE' })
+  if (res.ok) return
+  const payload = await res.json().catch(() => ({}))
+  const message =
+    payload && typeof payload === 'object' && 'message' in payload && typeof payload.message === 'string'
+      ? payload.message
+      : 'Failed to reset migration setup'
+  throw new Error(message)
 }
 
 export function suggestUserMappings(sourceId: number) {

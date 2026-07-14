@@ -1,9 +1,11 @@
-import { readFile } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
 import { PDFDocument } from 'pdf-lib';
 
 import { BOOKORBIT_NS_PREFIX } from '../../../common/bookorbit-ns';
 import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
+import { parsePdfFileInWorker } from './pdf-parse-worker-runner';
 import { extractPdfCover } from './pdf-cover';
+import { extractPopplerPdfMetadata, type PopplerPdfMetadata } from './pdf-poppler-metadata';
 import { extractXmpXml, parseXmp, type XmpParsed } from './pdf-xmp-reader';
 
 export interface PdfParsed {
@@ -12,6 +14,7 @@ export interface PdfParsed {
   authors: { name: string; sortName: string | null }[];
   description: string | null;
   publisher: string | null;
+  publishedDate: string | null;
   publishedYear: number | null;
   language: string | null;
   genres: string[];
@@ -26,13 +29,18 @@ export interface PdfParsed {
   goodreadsId: string | null;
   amazonId: string | null;
   hardcoverId: string | null;
+  hardcoverEditionId: string | null;
   openLibraryId: string | null;
+  ranobedbId: string | null;
+  koboId: string | null;
+  lubimyczytacId: string | null;
+  aladinId: string | null;
   itunesId: string | null;
   coverBuffer: Buffer | null;
 }
 
 export interface PdfParseWarning {
-  code: 'buffered-large-pdf' | 'cover-extraction-failed' | 'parse-failed';
+  code: 'buffered-large-pdf' | 'cover-extraction-failed' | 'encrypted-metadata-fallback-failed' | 'parse-failed';
   absolutePath: string;
   errorClass?: string;
   errorMessage?: string;
@@ -61,6 +69,15 @@ function splitCommaList(value: string | null): string[] {
     .filter(Boolean);
 }
 
+function splitAuthorList(value: string | null): { name: string; sortName: string | null }[] {
+  if (!value) return [];
+  return value
+    .split(/[,;]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((name) => ({ name, sortName: null }));
+}
+
 function createWarning(code: PdfParseWarning['code'], absolutePath: string, error: unknown): PdfParseWarning {
   const errorClass = error instanceof Error ? error.name : 'Error';
   const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
@@ -78,69 +95,95 @@ function createLargeBufferWarning(absolutePath: string, sizeBytes: number): PdfP
 
 export async function parsePdfFile(absolutePath: string, options: PdfParseOptions = {}): Promise<PdfParsed | null> {
   try {
-    const buf = await readFile(absolutePath);
-    if (buf.length >= PDF_BUFFER_WARNING_BYTES) {
-      options.onWarning?.(createLargeBufferWarning(absolutePath, buf.length));
-    }
-    const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
-
-    // XMP is the authoritative source; Info Dictionary is fallback-only.
-    const xmpXml = extractXmpXml(doc);
-    const xmp: XmpParsed | null = xmpXml ? parseXmp(xmpXml) : null;
-    const hasXmp = xmp !== null;
-
-    const infoTitle = clean(doc.getTitle());
-    const infoAuthorRaw = clean(doc.getAuthor());
-    const infoCreator = clean(doc.getCreator());
-    const infoProducer = clean(doc.getProducer());
-    const infoSubject = clean(doc.getSubject());
-    const infoKeywords = splitCommaList(clean(doc.getKeywords()));
-    const isBookorbitInfo = infoCreator === BOOKORBIT_NS_PREFIX;
-
-    const infoAuthors = infoAuthorRaw
-      ? infoAuthorRaw
-          .split(/[,;]/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .map((name) => ({ name, sortName: null }))
-      : [];
-
-    let coverBuffer: Buffer | null = null;
-    if (options.extractCover === true) {
-      try {
-        coverBuffer = await extractPdfCover(absolutePath);
-      } catch (error) {
-        options.onWarning?.(createWarning('cover-extraction-failed', absolutePath, error));
+    const fileStats = await stat(absolutePath);
+    if (fileStats.size >= PDF_BUFFER_WARNING_BYTES) {
+      options.onWarning?.(createLargeBufferWarning(absolutePath, fileStats.size));
+      const result = await parsePdfFileInWorker({
+        absolutePath,
+        extractCover: options.extractCover === true,
+      });
+      for (const warning of result.warnings) {
+        options.onWarning?.(warning);
       }
+      return result.parsed;
     }
 
-    return {
-      title: hasXmp ? xmp.title : infoTitle,
-      subtitle: xmp?.subtitle ?? null,
-      authors: hasXmp ? xmp.authors : infoAuthors,
-      description: hasXmp ? xmp.description : infoSubject,
-      publisher: hasXmp ? (xmp.publisher ?? null) : isBookorbitInfo ? infoProducer : null,
-      publishedYear: xmp?.publishedYear ?? null,
-      language: xmp?.language ?? null,
-      genres: xmp?.genres?.length ? xmp.genres : [],
-      // Info Dict keywords are genres+tags mixed; only use as tags when XMP is absent.
-      tags: hasXmp ? xmp.tags : infoKeywords,
-      isbn10: xmp?.isbn10 ?? null,
-      isbn13: xmp?.isbn13 ?? null,
-      seriesName: xmp?.seriesName ?? null,
-      seriesIndex: xmp?.seriesIndex ?? null,
-      rating: xmp?.rating ?? null,
-      pageCount: hasXmp ? (xmp.pageCount ?? (isBookorbitInfo ? null : doc.getPageCount())) : doc.getPageCount(),
-      googleBooksId: xmp?.googleBooksId ?? null,
-      goodreadsId: xmp?.goodreadsId ?? null,
-      amazonId: xmp?.amazonId ?? null,
-      hardcoverId: xmp?.hardcoverId ?? null,
-      openLibraryId: xmp?.openLibraryId ?? null,
-      itunesId: xmp?.itunesId ?? null,
-      coverBuffer,
-    };
+    const buf = await readFile(absolutePath);
+    return await parsePdfBuffer(absolutePath, buf, options);
   } catch (error) {
     options.onWarning?.(createWarning('parse-failed', absolutePath, error));
     return null;
   }
+}
+
+export async function parsePdfBuffer(absolutePath: string, buf: Buffer, options: PdfParseOptions = {}): Promise<PdfParsed | null> {
+  const doc = await PDFDocument.load(buf, { ignoreEncryption: true, updateMetadata: false });
+  const isEncrypted = doc.isEncrypted === true;
+  let popplerMetadata: PopplerPdfMetadata | null = null;
+
+  if (isEncrypted) {
+    try {
+      popplerMetadata = await extractPopplerPdfMetadata(absolutePath);
+    } catch (error) {
+      options.onWarning?.(createWarning('encrypted-metadata-fallback-failed', absolutePath, error));
+    }
+  }
+
+  // XMP is the authoritative source; Info Dictionary is fallback-only.
+  const xmpXml = popplerMetadata?.xmpXml ?? (isEncrypted ? null : extractXmpXml(doc));
+  const xmp: XmpParsed | null = xmpXml ? parseXmp(xmpXml) : null;
+  const hasXmp = xmp !== null;
+
+  const canTrustPdfLibInfo = !isEncrypted || popplerMetadata !== null;
+  const infoTitle = popplerMetadata ? popplerMetadata.title : canTrustPdfLibInfo ? clean(doc.getTitle()) : null;
+  const infoAuthorRaw = popplerMetadata ? popplerMetadata.author : canTrustPdfLibInfo ? clean(doc.getAuthor()) : null;
+  const infoCreator = popplerMetadata ? popplerMetadata.creator : canTrustPdfLibInfo ? clean(doc.getCreator()) : null;
+  const infoProducer = popplerMetadata ? popplerMetadata.producer : canTrustPdfLibInfo ? clean(doc.getProducer()) : null;
+  const infoSubject = popplerMetadata ? popplerMetadata.subject : canTrustPdfLibInfo ? clean(doc.getSubject()) : null;
+  const infoKeywords = splitCommaList(popplerMetadata ? popplerMetadata.keywords : canTrustPdfLibInfo ? clean(doc.getKeywords()) : null);
+  const isBookorbitInfo = infoCreator === BOOKORBIT_NS_PREFIX;
+  const infoAuthors = splitAuthorList(infoAuthorRaw);
+
+  let coverBuffer: Buffer | null = null;
+  if (options.extractCover === true) {
+    try {
+      coverBuffer = await extractPdfCover(absolutePath);
+    } catch (error) {
+      options.onWarning?.(createWarning('cover-extraction-failed', absolutePath, error));
+    }
+  }
+
+  return {
+    title: hasXmp ? xmp.title : infoTitle,
+    subtitle: xmp?.subtitle ?? null,
+    authors: hasXmp ? xmp.authors : infoAuthors,
+    description: hasXmp ? xmp.description : infoSubject,
+    publisher: hasXmp ? (xmp.publisher ?? null) : isBookorbitInfo ? infoProducer : null,
+    publishedDate: xmp?.publishedDate ?? null,
+    publishedYear: xmp?.publishedYear ?? null,
+    language: xmp?.language ?? null,
+    genres: xmp?.genres?.length ? xmp.genres : [],
+    // Info Dict keywords are genres+tags mixed; only use as tags when XMP is absent.
+    tags: hasXmp ? xmp.tags : infoKeywords,
+    isbn10: xmp?.isbn10 ?? null,
+    isbn13: xmp?.isbn13 ?? null,
+    seriesName: xmp?.seriesName ?? null,
+    seriesIndex: xmp?.seriesIndex ?? null,
+    rating: xmp?.rating ?? null,
+    pageCount: hasXmp
+      ? (xmp.pageCount ?? (isBookorbitInfo ? null : (popplerMetadata?.pageCount ?? doc.getPageCount())))
+      : (popplerMetadata?.pageCount ?? doc.getPageCount()),
+    googleBooksId: xmp?.googleBooksId ?? null,
+    goodreadsId: xmp?.goodreadsId ?? null,
+    amazonId: xmp?.amazonId ?? null,
+    hardcoverId: xmp?.hardcoverId ?? null,
+    hardcoverEditionId: xmp?.hardcoverEditionId ?? null,
+    openLibraryId: xmp?.openLibraryId ?? null,
+    ranobedbId: xmp?.ranobedbId ?? null,
+    koboId: xmp?.koboId ?? null,
+    lubimyczytacId: xmp?.lubimyczytacId ?? null,
+    aladinId: xmp?.aladinId ?? null,
+    itunesId: xmp?.itunesId ?? null,
+    coverBuffer,
+  };
 }

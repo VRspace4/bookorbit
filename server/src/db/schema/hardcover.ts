@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, real, serial, text, timestamp, unique, varchar } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, pgTable, real, serial, text, timestamp, unique, varchar } from 'drizzle-orm/pg-core';
 
 import { books } from './books';
 import { users } from './auth';
@@ -11,6 +11,7 @@ export const hardcoverUserSettings = pgTable('hardcover_user_settings', {
     .unique(),
   apiToken: varchar('api_token', { length: 2048 }).notNull(),
   enabled: boolean('enabled').notNull().default(true),
+  bookSyncMode: varchar('book_sync_mode', { length: 20 }).notNull().default('all_eligible'),
   autoSyncOnStatusChange: boolean('auto_sync_on_status_change').notNull().default(true),
   autoSyncOnProgressUpdate: boolean('auto_sync_on_progress_update').notNull().default(true),
   autoSyncOnRatingChange: boolean('auto_sync_on_rating_change').notNull().default(true),
@@ -37,7 +38,7 @@ export const hardcoverBookState = pgTable(
     hardcoverEditionId: integer('hardcover_edition_id'),
     hardcoverUserBookId: integer('hardcover_user_book_id'),
     hardcoverReadId: integer('hardcover_read_id'),
-    matchMethod: varchar('match_method', { length: 10 }),
+    matchMethod: varchar('match_method', { length: 20 }),
     matchError: text('match_error'),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
     lastSyncedStatus: varchar('last_synced_status', { length: 20 }),
@@ -46,13 +47,15 @@ export const hardcoverBookState = pgTable(
     lastSyncedStartedAt: varchar('last_synced_started_at', { length: 10 }),
     lastSyncedFinishedAt: varchar('last_synced_finished_at', { length: 10 }),
     syncError: text('sync_error'),
+    syncOverride: varchar('sync_override', { length: 20 }),
+    syncExcluded: boolean('sync_excluded').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .defaultNow()
       .notNull()
       .$onUpdateFn(() => new Date()),
   },
-  (t) => [unique('hardcover_book_state_user_book_uidx').on(t.userId, t.bookId)],
+  (t) => [unique('hardcover_book_state_user_book_uidx').on(t.userId, t.bookId), index('hardcover_book_state_book_id_idx').on(t.bookId)],
 );
 
 export type HardcoverUserSetting = typeof hardcoverUserSettings.$inferSelect;

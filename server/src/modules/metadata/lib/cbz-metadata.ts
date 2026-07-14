@@ -1,13 +1,10 @@
 import { readFile } from 'fs/promises';
 import { XMLParser } from 'fast-xml-parser';
-import { inflateRawSync } from 'zlib';
 import { createExtractorFromData, UnrarError } from 'node-unrar-js';
+import { extractCbzZipEntry, isSupportedCbzZipCompression, readCbzZipIndex } from '../../../common/cbz-zip-reader';
 import { getSevenZip } from '../../../common/sevenzip';
+import { parsePublishedDateKey, parsePublishedYear } from '../../../common/utils/published-date.utils';
 import { cleanupSevenZipArtifacts, createSevenZipTempId, type SevenZipInstance } from './sevenzip-vfs';
-
-// ── ZIP binary constants ──────────────────────────────────────────────────────
-
-const EOCD_SIG = 0x06054b50; // end of central directory
 
 export interface ParsedCbzComicMetadata {
   issueNumber: string | null;
@@ -30,6 +27,7 @@ export interface ParsedCbzMetadata {
   seriesIndex: number | null;
   description: string | null;
   publisher: string | null;
+  publishedDate: string | null;
   publishedYear: number | null;
   language: string | null;
   pageCount: number | null;
@@ -43,85 +41,14 @@ export interface ParsedCbzMetadata {
   goodreadsId: string | null;
   amazonId: string | null;
   hardcoverId: string | null;
+  hardcoverEditionId: string | null;
   openLibraryId: string | null;
+  ranobedbId: string | null;
+  koboId: string | null;
+  lubimyczytacId: string | null;
+  aladinId: string | null;
   itunesId: string | null;
   comicMetadata: ParsedCbzComicMetadata | null;
-}
-
-// ── ZIP helpers ───────────────────────────────────────────────────────────────
-
-function findEocd(buf: Buffer): { offset: number; cdOffset: number; cdSize: number; comment: string | null } | null {
-  const searchFrom = Math.max(0, buf.length - 65557);
-  for (let i = buf.length - 22; i >= searchFrom; i--) {
-    if (buf.readUInt32LE(i) !== EOCD_SIG) continue;
-
-    const commentLen = buf.readUInt16LE(i + 20);
-    const eocdEnd = i + 22 + commentLen;
-    if (eocdEnd !== buf.length) continue;
-
-    const cdSize = buf.readUInt32LE(i + 12);
-    const cdOffset = buf.readUInt32LE(i + 16);
-    const comment = commentLen > 0 ? buf.subarray(i + 22, eocdEnd).toString('utf-8') : null;
-
-    return { offset: i, cdOffset, cdSize, comment };
-  }
-
-  return null;
-}
-
-function isZipBoundsValid(start: number, length: number, totalSize: number): boolean {
-  return start >= 0 && length >= 0 && start + length <= totalSize;
-}
-
-/** Extract a file by name from a ZIP buffer using central directory metadata. */
-function extractZipFile(buf: Buffer, targetName: string): Buffer | null {
-  const eocd = findEocd(buf);
-  if (!eocd) return null;
-
-  const cdStart = eocd.cdOffset;
-  const cdEnd = cdStart + eocd.cdSize;
-  if (!isZipBoundsValid(cdStart, eocd.cdSize, buf.length)) return null;
-
-  let pos = cdStart;
-  while (pos + 46 <= cdEnd) {
-    if (buf.readUInt32LE(pos) !== 0x02014b50) break;
-
-    const compression = buf.readUInt16LE(pos + 10);
-    const compressedSize = buf.readUInt32LE(pos + 20);
-    const fileNameLen = buf.readUInt16LE(pos + 28);
-    const extraLen = buf.readUInt16LE(pos + 30);
-    const commentLen = buf.readUInt16LE(pos + 32);
-    const localHeaderOffset = buf.readUInt32LE(pos + 42);
-
-    if (!isZipBoundsValid(pos + 46, fileNameLen, buf.length)) return null;
-    const fileName = buf.subarray(pos + 46, pos + 46 + fileNameLen).toString('utf-8');
-
-    if (fileName.toLowerCase() === targetName.toLowerCase()) {
-      if (!isZipBoundsValid(localHeaderOffset, 30, buf.length)) return null;
-      if (buf.readUInt32LE(localHeaderOffset) !== 0x04034b50) return null;
-
-      const lfhFileNameLen = buf.readUInt16LE(localHeaderOffset + 26);
-      const lfhExtraLen = buf.readUInt16LE(localHeaderOffset + 28);
-      const dataStart = localHeaderOffset + 30 + lfhFileNameLen + lfhExtraLen;
-      if (!isZipBoundsValid(dataStart, compressedSize, buf.length)) return null;
-
-      const compressed = buf.subarray(dataStart, dataStart + compressedSize);
-      if (compression === 0) return compressed;
-      if (compression === 8) return inflateRawSync(compressed);
-      return null;
-    }
-
-    pos += 46 + fileNameLen + extraLen + commentLen;
-  }
-
-  return null;
-}
-
-/** Extract the ZIP comment from the End of Central Directory record. */
-function readZipComment(buf: Buffer): string | null {
-  const eocd = findEocd(buf);
-  if (!eocd) return null;
-  return eocd.comment;
 }
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
@@ -154,7 +81,7 @@ function parseProjectxManagedNotes(notes: string | null): Map<string, string> {
 
 function parseProviderIdsFromWebUrl(
   webUrl: string | null,
-): Partial<Record<'goodreadsId' | 'amazonId' | 'hardcoverId' | 'googleBooksId' | 'openLibraryId', string>> {
+): Partial<Record<'goodreadsId' | 'amazonId' | 'hardcoverId' | 'googleBooksId' | 'openLibraryId' | 'koboId', string>> {
   if (!webUrl) return {};
 
   if (webUrl.startsWith('https://www.goodreads.com/book/show/')) {
@@ -171,6 +98,9 @@ function parseProviderIdsFromWebUrl(
   }
   if (webUrl.startsWith('https://openlibrary.org/works/')) {
     return { openLibraryId: webUrl.slice('https://openlibrary.org/works/'.length) || '' };
+  }
+  if (webUrl.startsWith('https://www.kobo.com/us/en/ebook/')) {
+    return { koboId: webUrl.slice('https://www.kobo.com/us/en/ebook/'.length) || '' };
   }
 
   return {};
@@ -207,7 +137,14 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
     };
 
     const writers = splitDelimited(str('Writer'));
-    const year = num('Year');
+    const rawYear = num('Year');
+    const year = rawYear !== null ? (parsePublishedYear(Math.floor(rawYear)) ?? null) : null;
+    const month = num('Month');
+    const day = num('Day');
+    const publishedDate =
+      year !== null && month !== null && day !== null
+        ? (parsePublishedDateKey(`${year}-${String(Math.floor(month)).padStart(2, '0')}-${String(Math.floor(day)).padStart(2, '0')}`) ?? null)
+        : null;
     const managedNotes = parseProjectxManagedNotes(str('Notes'));
     const providerIdsFromWeb = parseProviderIdsFromWebUrl(str('Web'));
 
@@ -246,7 +183,8 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
       seriesIndex: num('Number'),
       description: str('Summary') ?? str('Description'),
       publisher: str('Publisher'),
-      publishedYear: year != null ? Math.floor(year) : null,
+      publishedDate,
+      publishedYear: year,
       language: str('LanguageISO'),
       pageCount: num('PageCount'),
       rating: parseCbxRating(str('CommunityRating')),
@@ -259,7 +197,12 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
       goodreadsId: managedNotes.get('goodreadsId') ?? providerIdsFromWeb.goodreadsId ?? null,
       amazonId: managedNotes.get('amazonId') ?? providerIdsFromWeb.amazonId ?? null,
       hardcoverId: managedNotes.get('hardcoverId') ?? providerIdsFromWeb.hardcoverId ?? null,
+      hardcoverEditionId: managedNotes.get('hardcoverEditionId') ?? null,
       openLibraryId: managedNotes.get('openLibraryId') ?? providerIdsFromWeb.openLibraryId ?? null,
+      ranobedbId: managedNotes.get('ranobedbId') ?? null,
+      koboId: managedNotes.get('koboId') ?? providerIdsFromWeb.koboId ?? null,
+      lubimyczytacId: managedNotes.get('lubimyczytacId') ?? null,
+      aladinId: managedNotes.get('aladinId') ?? null,
       itunesId: null,
       comicMetadata: hasComicFields
         ? {
@@ -294,6 +237,15 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
 
     const tags = ((cbi['tags'] as string[]) ?? []).filter(Boolean);
 
+    const publicationYear = parsePublishedYear(cbi['publicationYear']) ?? null;
+    const publicationMonth = Number(cbi['publicationMonth']);
+    const publicationDay = Number(cbi['publicationDay']);
+    const publishedDate =
+      publicationYear !== null && Number.isInteger(publicationMonth) && Number.isInteger(publicationDay)
+        ? (parsePublishedDateKey(`${publicationYear}-${String(publicationMonth).padStart(2, '0')}-${String(publicationDay).padStart(2, '0')}`) ??
+          null)
+        : null;
+
     return {
       title: (cbi['title'] as string) ?? null,
       subtitle: null,
@@ -301,7 +253,8 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       seriesIndex: cbi['issue'] != null ? (Number.isFinite(Number(cbi['issue'])) ? Number(cbi['issue']) : null) : null,
       description: (cbi['comments'] as string) ?? null,
       publisher: (cbi['publisher'] as string) ?? null,
-      publishedYear: (cbi['publicationYear'] as number) ?? null,
+      publishedDate,
+      publishedYear: publicationYear,
       language: null,
       pageCount: null,
       rating: null,
@@ -314,7 +267,12 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       goodreadsId: null,
       amazonId: null,
       hardcoverId: null,
+      hardcoverEditionId: null,
       openLibraryId: null,
+      ranobedbId: null,
+      koboId: null,
+      lubimyczytacId: null,
+      aladinId: null,
       itunesId: null,
       comicMetadata: null,
     };
@@ -335,17 +293,20 @@ function toArrayBuffer(buf: Buffer): ArrayBuffer {
  */
 export async function extractCbzMetadata(absolutePath: string): Promise<ParsedCbzMetadata | null> {
   try {
-    const buf = await readFile(absolutePath);
+    const index = await readCbzZipIndex(absolutePath);
+    if (!index) return null;
 
-    const comicInfoBuf = extractZipFile(buf, 'ComicInfo.xml');
-    if (comicInfoBuf) {
-      const parsed = parseComicInfoXml(comicInfoBuf);
-      if (parsed) return parsed;
+    const comicInfoEntry = index.entries.find((entry) => entry.name.toLowerCase() === 'comicinfo.xml' && isSupportedCbzZipCompression(entry));
+    if (comicInfoEntry) {
+      const comicInfoBuf = await extractCbzZipEntry(absolutePath, comicInfoEntry);
+      if (comicInfoBuf) {
+        const parsed = parseComicInfoXml(comicInfoBuf);
+        if (parsed) return parsed;
+      }
     }
 
-    const comment = readZipComment(buf);
-    if (comment) {
-      const parsed = parseComicBookInfoJson(comment);
+    if (index.comment) {
+      const parsed = parseComicBookInfoJson(index.comment);
       if (parsed) return parsed;
     }
 

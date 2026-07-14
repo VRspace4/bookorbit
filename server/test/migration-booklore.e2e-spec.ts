@@ -18,6 +18,7 @@ import {
 } from './e2e/migration-booklore/migration-booklore-harness';
 import {
   seedCanonicalScenario,
+  seedCanonicalScenarioWithDuplicateUserStateRows,
   seedCompatibilityScenario,
   seedMissingRequiredTablesScenario,
   seedWarningsOnlyScenario,
@@ -60,7 +61,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       token: ctx.adminToken,
     });
     expect(supportedTypes.statusCode).toBe(200);
-    expect(supportedTypes.body).toEqual(['booklore']);
+    expect(supportedTypes.body).toEqual(expect.arrayContaining(['booklore', 'grimmory']));
 
     const testedSource = await apiJson<{
       ok: boolean;
@@ -222,7 +223,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
         perUserPreview: Array<{
           sourceUserId: string;
           targetUserId: number;
-          counts: { statuses: number; fileProgress: number; bookmarks: number; annotations: number; shelves: number };
+          counts: { statuses: number; fileProgress: number; readingSessions: number; bookmarks: number; annotations: number; shelves: number };
         }>;
       };
     }>(ctx, {
@@ -253,6 +254,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
           counts: expect.objectContaining({
             statuses: 1,
             fileProgress: 2,
+            readingSessions: 2,
             bookmarks: 1,
             annotations: 1,
             shelves: 2,
@@ -264,6 +266,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
           counts: expect.objectContaining({
             statuses: 1,
             fileProgress: 1,
+            readingSessions: 1,
             bookmarks: 1,
             annotations: 1,
             shelves: 1,
@@ -426,11 +429,11 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       expect.arrayContaining([
         expect.objectContaining({
           username: 'alice-source',
-          counts: expect.objectContaining({ statuses: 2, fileProgress: 2, bookmarks: 1, annotations: 1, shelves: 2 }),
+          counts: expect.objectContaining({ statuses: 2, fileProgress: 2, readingSessions: 2, bookmarks: 1, annotations: 1, shelves: 2 }),
         }),
         expect.objectContaining({
           username: 'bob-source',
-          counts: expect.objectContaining({ statuses: 1, fileProgress: 1, bookmarks: 1, annotations: 1, shelves: 1 }),
+          counts: expect.objectContaining({ statuses: 1, fileProgress: 1, readingSessions: 1, bookmarks: 1, annotations: 1, shelves: 1 }),
         }),
       ]),
     );
@@ -478,6 +481,13 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
     expect(metricByKey.get('user_state:audiobook_progress')).toMatchObject({
       processed: 1,
       imported: 1,
+    });
+    expect(metricByKey.get('user_state:reading_sessions')).toMatchObject({
+      processed: 4,
+      imported: 3,
+      unresolved: 1,
+      skipped: 0,
+      failed: 0,
     });
     expect(metricByKey.get('user_state:bookmarks')).toMatchObject({
       processed: 2,
@@ -621,6 +631,74 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
       }),
     ]);
 
+    const readingSessions = await ctx.db
+      .select()
+      .from(schema.readingSessions)
+      .where(inArray(schema.readingSessions.userId, [scenario.targetUsers.alice.id, scenario.targetUsers.bob.id]));
+    expect(readingSessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          userId: scenario.targetUsers.alice.id,
+          bookId: scenario.books.isbn.bookId,
+          bookFileId: scenario.books.isbn.primaryFileId,
+          sessionId: 'booklore:rs:9001',
+          source: 'web',
+          durationSeconds: 1700,
+          progressDelta: 25,
+          endProgress: 45,
+        }),
+        expect.objectContaining({
+          userId: scenario.targetUsers.alice.id,
+          bookId: scenario.books.hash.bookId,
+          bookFileId: scenario.books.hash.primaryFileId,
+          sessionId: 'booklore:rs:9002',
+          durationSeconds: 1200,
+          progressDelta: 3,
+          endProgress: 25,
+        }),
+        expect.objectContaining({
+          userId: scenario.targetUsers.bob.id,
+          bookId: scenario.books.audio.bookId,
+          bookFileId: scenario.books.audio.primaryFileId,
+          sessionId: 'booklore:rs:9003',
+          durationSeconds: 1800,
+          progressDelta: null,
+          endProgress: null,
+        }),
+      ]),
+    );
+    expect(readingSessions).toHaveLength(3);
+
+    const dailyStats = await ctx.db
+      .select()
+      .from(schema.userReadingDailyStats)
+      .where(inArray(schema.userReadingDailyStats.userId, [scenario.targetUsers.alice.id, scenario.targetUsers.bob.id]));
+    expect(dailyStats).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          userId: scenario.targetUsers.alice.id,
+          day: '2024-01-06',
+          readingSeconds: 1700,
+          progressDelta: 25,
+          sessionsCount: 1,
+        }),
+        expect.objectContaining({
+          userId: scenario.targetUsers.alice.id,
+          day: '2024-01-07',
+          readingSeconds: 1200,
+          progressDelta: 3,
+          sessionsCount: 1,
+        }),
+        expect.objectContaining({
+          userId: scenario.targetUsers.bob.id,
+          day: '2024-02-06',
+          readingSeconds: 1800,
+          progressDelta: 0,
+          sessionsCount: 1,
+        }),
+      ]),
+    );
+
     const bookmarks = await ctx.db.select().from(schema.bookmarks);
     expect(bookmarks).toEqual(
       expect.arrayContaining([
@@ -696,6 +774,126 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
     expect(audioCoverBytes[1]).toBe(0x50);
 
     await assertNoIntegrityViolations(ctx.db);
+  });
+
+  it('handles duplicate source user-state rows without failing migration and keeps latest values', async () => {
+    const scenario = await seedCanonicalScenarioWithDuplicateUserStateRows(ctx);
+
+    const createdSource = await apiJson<{ id: number }>(ctx, {
+      method: 'POST',
+      url: '/api/v1/migration/sources',
+      token: ctx.adminToken,
+      payload: {
+        type: 'booklore',
+        name: 'Canonical With Duplicate User State',
+        connectionConfig: scenario.connectionConfig,
+      },
+    });
+    expect(createdSource.statusCode).toBe(201);
+
+    const validatedSource = await apiJson<{ ok: boolean }>(ctx, {
+      method: 'POST',
+      url: `/api/v1/migration/sources/${createdSource.body.id}/validate`,
+      token: ctx.adminToken,
+    });
+    expect(validatedSource.statusCode).toBe(200);
+    expect(validatedSource.body.ok).toBe(true);
+
+    const profile = await apiJson<{ id: number }>(ctx, {
+      method: 'POST',
+      url: '/api/v1/migration/profiles',
+      token: ctx.adminToken,
+      payload: {
+        sourceId: createdSource.body.id,
+        name: 'Duplicate User State Profile',
+        userMappings: [
+          { sourceUserId: '1', targetUserId: scenario.targetUsers.alice.id },
+          { sourceUserId: '2', targetUserId: scenario.targetUsers.bob.id },
+        ],
+        pathMappings: scenario.pathMappings,
+      },
+    });
+    expect(profile.statusCode).toBe(201);
+
+    const validatedMappings = await apiJson<{ persistedProfileId: number | null }>(ctx, {
+      method: 'POST',
+      url: `/api/v1/migration/sources/${createdSource.body.id}/path-mappings/validate`,
+      token: ctx.adminToken,
+      payload: {
+        pathMappings: scenario.pathMappings,
+      },
+    });
+    expect(validatedMappings.statusCode).toBe(201);
+    expect(validatedMappings.body.persistedProfileId).toBe(profile.body.id);
+
+    const dryRun = await apiJson<{
+      id: number;
+      plan: { duplicateBookMatches: Array<{ targetBookId: number; sourceBookIds: string[] }> };
+    }>(ctx, {
+      method: 'POST',
+      url: '/api/v1/migration/plans/dry-run',
+      token: ctx.adminToken,
+      payload: { profileId: profile.body.id },
+    });
+    expect(dryRun.statusCode).toBe(201);
+    expect(dryRun.body.plan.duplicateBookMatches).toHaveLength(1);
+
+    const resolvedPlan = await apiJson<{
+      id: number;
+      plan: { duplicateBookMatches: unknown[] };
+      summary: { status: string };
+    }>(ctx, {
+      method: 'POST',
+      url: `/api/v1/migration/plans/${dryRun.body.id}/resolve-duplicates`,
+      token: ctx.adminToken,
+      payload: {
+        resolutions: [{ targetBookId: scenario.books.duplicate.bookId, selectedSourceBookId: scenario.sourceBookIds.duplicatePreferred }],
+      },
+    });
+    expect(resolvedPlan.statusCode).toBe(200);
+    expect(resolvedPlan.body.plan.duplicateBookMatches).toEqual([]);
+    expect(resolvedPlan.body.summary.status).toBe('ready_for_live_run');
+
+    const startedRun = await apiJson<{ id: number; state: string }>(ctx, {
+      method: 'POST',
+      url: '/api/v1/migration/runs/live',
+      token: ctx.adminToken,
+      payload: { planArtifactId: resolvedPlan.body.id },
+    });
+    expect(startedRun.statusCode).toBe(201);
+    expect(startedRun.body.state).toBe('running');
+
+    const finished = await waitForMigrationToFinish(ctx, startedRun.body.id);
+    expect(finished.progress.run.state).toBe('completed');
+
+    const statusRows = await ctx.db.select().from(schema.userBookStatus);
+    expect(statusRows.find((row) => row.userId === scenario.targetUsers.alice.id && row.bookId === scenario.books.isbn.bookId)).toMatchObject({
+      status: 'reading',
+    });
+    expect(statusRows.find((row) => row.userId === scenario.targetUsers.bob.id && row.bookId === scenario.books.audio.bookId)).toMatchObject({
+      status: 'read',
+    });
+
+    const progressRows = await ctx.db.select().from(schema.readingProgress);
+    expect(
+      progressRows.find((row) => row.userId === scenario.targetUsers.alice.id && row.bookFileId === scenario.books.isbn.primaryFileId),
+    ).toMatchObject({
+      percentage: 44.4,
+      cfi: 'epubcfi(/6/18!/4/2:10)',
+    });
+    expect(
+      progressRows.find((row) => row.userId === scenario.targetUsers.bob.id && row.bookFileId === scenario.books.audio.fileIds[1]),
+    ).toMatchObject({
+      percentage: 77,
+      positionSeconds: 45,
+    });
+
+    const audioProgressRows = await ctx.db.select().from(schema.audiobookProgress);
+    expect(audioProgressRows.find((row) => row.userId === scenario.targetUsers.bob.id && row.bookId === scenario.books.audio.bookId)).toMatchObject({
+      percentage: 77,
+      currentFileId: scenario.books.audio.fileIds[1],
+      positionSeconds: 45,
+    });
   });
 
   it('supports alternate Booklore schema variants and join-through file progress', async () => {
@@ -877,6 +1075,7 @@ describe('Migration Booklore API to DB (e2e)', { timeout: 240_000 }, () => {
         'book_metadata table not found; metadata overlays will be limited',
         'author mapping tables not found; author migration disabled',
         'user_book_progress table not found; status migration disabled',
+        'reading_sessions table not found; reading session migration disabled',
         'book_marks table not found; bookmark migration disabled',
         'mediaRootPath not configured; book cover/thumbnail import disabled',
       ]),

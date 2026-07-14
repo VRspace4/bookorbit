@@ -41,6 +41,18 @@ describe('useCoverVersions', () => {
     expect(coverUrl(7, 'cover')).toBe(`/api/v1/books/7/cover?t=${now}`)
   })
 
+  it('uses a server-provided timestamp as a cover version', async () => {
+    const { coverUrl } = await load()
+    expect(coverUrl(42, 'thumbnail', '2026-05-01T12:00:00.000Z')).toBe('/api/v1/books/42/thumbnail?t=1777636800000')
+  })
+
+  it('combines local and server versions when both are present', async () => {
+    const { coverUrl, bumpVersion } = await load()
+    bumpVersion(42)
+    const now = Date.now()
+    expect(coverUrl(42, 'thumbnail', '2020-01-01T00:00:00.000Z')).toBe(`/api/v1/books/42/thumbnail?t=1577836800000-${now}`)
+  })
+
   it('does not add ?t= to a different book that was not bumped', async () => {
     const { coverUrl, bumpVersion } = await load()
     bumpVersion(1)

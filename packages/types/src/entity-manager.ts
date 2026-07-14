@@ -1,9 +1,9 @@
 export type EntityType = "author" | "genre" | "tag" | "narrator" | "publisher" | "language" | "series";
-export type FirstClassEntityType = "author" | "genre" | "tag" | "narrator";
-export type InlineEntityType = "publisher" | "language" | "series";
+export type FirstClassEntityType = "author" | "genre" | "tag" | "narrator" | "series";
+export type InlineEntityType = "publisher" | "language";
 
-export const FIRST_CLASS_ENTITY_TYPES: readonly FirstClassEntityType[] = ["author", "genre", "tag", "narrator"] as const;
-export const INLINE_ENTITY_TYPES: readonly InlineEntityType[] = ["publisher", "language", "series"] as const;
+export const FIRST_CLASS_ENTITY_TYPES: readonly FirstClassEntityType[] = ["author", "genre", "tag", "narrator", "series"] as const;
+export const INLINE_ENTITY_TYPES: readonly InlineEntityType[] = ["publisher", "language"] as const;
 export const ALL_ENTITY_TYPES: readonly EntityType[] = [...FIRST_CLASS_ENTITY_TYPES, ...INLINE_ENTITY_TYPES] as const;
 
 export interface EntityTypeCapabilities {
@@ -24,6 +24,19 @@ export const ENTITY_CAPABILITIES: Record<EntityType, EntityTypeCapabilities> = {
 };
 
 // Browse
+export type BrowseEntitySortBy = "name" | "bookCount";
+export type BrowseEntitySortOrder = "asc" | "desc";
+export type BrowseEntityBookCountFilter = "any" | "empty";
+
+export interface BrowseEntitiesParams {
+  search?: string;
+  page?: number;
+  pageSize?: number;
+  sortBy?: BrowseEntitySortBy;
+  sortOrder?: BrowseEntitySortOrder;
+  bookCount?: BrowseEntityBookCountFilter;
+}
+
 export interface BrowseEntityItem {
   id: number | string;
   name: string;
@@ -73,7 +86,7 @@ export interface DuplicateScanResponse {
   pageSize: number;
 }
 
-export type DuplicateScanState = 'idle' | 'computing' | 'done' | 'error';
+export type DuplicateScanState = "idle" | "computing" | "done" | "error";
 
 export interface DuplicateScanStatus {
   entityType: EntityType;

@@ -26,11 +26,21 @@ export interface BookMetadataFetchConfig {
   conditions: BookMetadataFetchConditions;
 }
 
+export interface BookMetadataFetchConditionsOverride {
+  scoreThreshold?: Partial<BookMetadataFetchScoreCondition>;
+  missingFields?: Partial<BookMetadataFetchMissingFieldsCondition>;
+  neverFetched?: Partial<BookMetadataFetchNeverFetchedCondition>;
+}
+
 // Stored per-library. null = inherit everything from global.
 // Deep-merged by getEffectiveConfig: top-level keys first, then each conditions key individually.
-export type BookMetadataFetchConfigOverride = Partial<BookMetadataFetchConfig> | null;
+export type BookMetadataFetchConfigOverride =
+  | (Partial<Omit<BookMetadataFetchConfig, "conditions">> & {
+      conditions?: BookMetadataFetchConditionsOverride;
+    })
+  | null;
 
-// 'done' is not a queue status — rows are deleted on success to prevent unbounded growth.
+// 'done' is not a queue status - rows are deleted on success to prevent unbounded growth.
 export type BookMetadataFetchQueueStatus = "queued" | "processing" | "failed";
 
 export type BookMetadataFetchReason = "event_import" | "manual_trigger" | "manual_retry";
@@ -53,6 +63,7 @@ export interface BookMetadataFetchStatusEvent extends BookMetadataFetchStatus {
 
 // Library-level config response: effective config merged with per-library run history.
 export interface BookMetadataFetchLibraryConfig extends BookMetadataFetchConfig {
+  override: BookMetadataFetchConfigOverride;
   lastRunAt: string | null;
   lastQueuedCount: number | null;
 }

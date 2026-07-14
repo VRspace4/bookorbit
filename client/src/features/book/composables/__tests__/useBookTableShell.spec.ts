@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   promptDelete: vi.fn<(id: number) => void>(),
   cancelDelete: vi.fn<() => void>(),
   confirmDelete: vi.fn<() => void>(),
+  routerPush: vi.fn<(to: unknown) => void>(),
+  setBookContext: vi.fn<(ids: number[], total: number) => void>(),
   useBookBulkActions: vi.fn<(...args: unknown[]) => object>(() => ({
     handleBulkRefreshMetadata: vi.fn<() => void>(),
     handleBulkReExtractCover: vi.fn<() => void>(),
@@ -19,12 +21,19 @@ const mocks = vi.hoisted(() => ({
     handleBulkSetRating: vi.fn<() => void>(),
     handleBulkSetField: vi.fn<() => void>(),
     handleBulkSetMetadataLock: vi.fn<() => void>(),
-    handleBulkUpdateTags: vi.fn<() => void>(),
     handleDeleteSelected: vi.fn<() => void>(),
     handleDownloadFiles: vi.fn<() => void>(),
     inFlight: { value: null },
   })),
   useDeleteBookCallback: null as ((id: number) => void) | null,
+}))
+
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: mocks.routerPush }),
+}))
+
+vi.mock('../useBookNavigation', () => ({
+  useBookNavigation: () => ({ setBookContext: mocks.setBookContext }),
 }))
 
 vi.mock('../useTableViewControls', () => ({
@@ -71,6 +80,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     seriesName: null,
     seriesIndex: null,
     files: [],
+    publishedDate: null,
     publishedYear: null,
     language: null,
     genres: [],
@@ -89,6 +99,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     pageCount: null,
     isbn13: null,
     narrators: [],
+    customMetadata: [],
     ...overrides,
   }
 }
@@ -104,6 +115,8 @@ describe('useBookTableShell', () => {
     mocks.cancelDelete.mockClear()
     mocks.confirmDelete.mockClear()
     mocks.useBookBulkActions.mockClear()
+    mocks.routerPush.mockClear()
+    mocks.setBookContext.mockClear()
   })
 
   it('wires useBookBulkActions without an onBulkRefreshCompleted callback', () => {
@@ -183,6 +196,32 @@ describe('useBookTableShell', () => {
 
       expect(quickViewOpen.value).toBe(false)
       expect(mocks.promptDelete).toHaveBeenCalledWith(5)
+    })
+  })
+
+  describe('handleEditIndividually', () => {
+    it('opens the topmost selected book on the details tab with the selection as context', () => {
+      mockSelectedIds.value = new Set([30, 10])
+      const books = ref([makeBook({ id: 10 }), makeBook({ id: 20 }), makeBook({ id: 30 })])
+      const { handleEditIndividually } = useBookTableShell({ books })
+
+      handleEditIndividually()
+
+      expect(mocks.setBookContext).toHaveBeenCalledWith([10, 30], 2)
+      expect(mocks.routerPush).toHaveBeenCalledWith({ name: 'book-detail', params: { bookId: 10 }, query: { tab: 'edit' } })
+      expect(mocks.exitSelectionMode).toHaveBeenCalledOnce()
+    })
+
+    it('does nothing when no selected book is loaded in the list', () => {
+      mockSelectedIds.value = new Set([999])
+      const books = ref([makeBook({ id: 10 })])
+      const { handleEditIndividually } = useBookTableShell({ books })
+
+      handleEditIndividually()
+
+      expect(mocks.setBookContext).not.toHaveBeenCalled()
+      expect(mocks.routerPush).not.toHaveBeenCalled()
+      expect(mocks.exitSelectionMode).not.toHaveBeenCalled()
     })
   })
 
@@ -279,7 +318,6 @@ describe('useBookTableShell', () => {
     const shell = useBookTableShell({ books })
 
     expect(shell.addToCollectionOpen.value).toBe(false)
-    expect(shell.bulkTagsOpen.value).toBe(false)
     expect(shell.sendBookOpen.value).toBe(false)
     expect(shell.quickViewOpen.value).toBe(false)
     expect(shell.quickViewBookId.value).toBeNull()

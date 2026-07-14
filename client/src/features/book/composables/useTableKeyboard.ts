@@ -1,10 +1,11 @@
 import { ref, type Ref } from 'vue'
 import type { BookCard } from '@bookorbit/types'
-import type { ColumnDef, ColumnId } from './useTableColumns'
+import { copyToClipboard } from '@/lib/clipboard'
+import type { ColumnDef } from './useTableColumns'
 import { COLUMN_DEF_MAP } from './useTableColumns'
 
-function formatCellForClipboard(book: BookCard, colId: ColumnId): string {
-  const def = COLUMN_DEF_MAP.get(colId)
+function formatCellForClipboard(book: BookCard, colId: string, columnMap: Map<string, ColumnDef>): string {
+  const def = columnMap.get(colId)
   if (!def?.accessor) return ''
   const value = def.accessor(book)
   if (value == null) return ''
@@ -15,40 +16,11 @@ function formatCellForClipboard(book: BookCard, colId: ColumnId): string {
   return String(value)
 }
 
-function formatRowForClipboard(book: BookCard, columns: ColumnDef[]): string {
+function formatRowForClipboard(book: BookCard, columns: ColumnDef[], columnMap: Map<string, ColumnDef>): string {
   return columns
-    .map((column) => `${column.header ?? column.id}: ${formatCellForClipboard(book, column.id)}`)
+    .map((column) => `${column.header ?? column.id}: ${formatCellForClipboard(book, column.id, columnMap)}`)
     .filter((line) => line.trim().length > 0)
     .join('\n')
-}
-
-async function copyToClipboard(text: string): Promise<void> {
-  if (!text) return
-
-  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text)
-      return
-    } catch {
-      // Fall through to legacy API below.
-    }
-  }
-
-  if (typeof document === 'undefined') return
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.top = '-9999px'
-  textarea.style.left = '-9999px'
-  document.body.appendChild(textarea)
-  textarea.focus()
-  textarea.select()
-  try {
-    document.execCommand('copy')
-  } finally {
-    document.body.removeChild(textarea)
-  }
 }
 
 export function useTableKeyboard(opts: {
@@ -58,10 +30,11 @@ export function useTableKeyboard(opts: {
   selectionMode: () => boolean
   isReadOnly: () => boolean
   virtualizer: Ref<{ scrollToIndex: (index: number, opts?: Record<string, unknown>) => void }>
-  isCellReadOnly: (book: BookCard, col: { id: ColumnId; isEditable: boolean }) => boolean
-  onActivate: (book: BookCard, colId: ColumnId) => void
+  isCellReadOnly: (book: BookCard, col: { id: string; isEditable: boolean }) => boolean
+  onActivate: (book: BookCard, colId: string) => void
   onSelect: (id: number, event: MouseEvent) => void
   onCopyRow?: (book: BookCard) => void
+  columnMapGetter?: () => Map<string, ColumnDef>
 }) {
   const focusedRowIndex = ref<number | null>(null)
   const focusedColIndex = ref<number | null>(null)
@@ -198,8 +171,10 @@ export function useTableKeyboard(opts: {
       const book = books[target.rowIndex]
       if (!book) return
 
+      const columnMap = opts.columnMapGetter ? opts.columnMapGetter() : (COLUMN_DEF_MAP as Map<string, ColumnDef>)
+
       if (event.shiftKey) {
-        const text = formatRowForClipboard(book, columns)
+        const text = formatRowForClipboard(book, columns, columnMap)
         void copyToClipboard(text)
         opts.onCopyRow?.(book)
         return
@@ -207,7 +182,7 @@ export function useTableKeyboard(opts: {
 
       const col = columns[target.colIndex]
       if (col) {
-        const text = formatCellForClipboard(book, col.id)
+        const text = formatCellForClipboard(book, col.id, columnMap)
         void copyToClipboard(text)
       }
     }

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { X, Sparkles } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { X, Sparkles } from '@lucide/vue'
 import { isAudioFormat } from '@bookorbit/types'
-import type { BookDetail, BookMetadataLockField, MetadataCandidate, MetadataSource } from '@bookorbit/types'
+import type { BookDetail, BookMetadataLockField, MetadataCandidate, MetadataProviderKey, MetadataSource } from '@bookorbit/types'
 import { useMetadataSearch } from '../../../composables/useMetadataSearch'
 import { useCoverVersions } from '../../../composables/useCoverVersions'
 import type { MetadataPatch } from '../../../composables/useMetadataDiff'
@@ -15,8 +16,9 @@ const emit = defineEmits<{
   apply: [{ formPatch: MetadataPatch; coverUrl?: string }]
 }>()
 
+const { t } = useI18n()
 const { coverUrl } = useCoverVersions()
-const bookCoverUrl = computed(() => coverUrl(props.book.id, 'cover'))
+const bookCoverUrl = computed(() => coverUrl(props.book.id, 'cover', props.book.updatedAt ?? props.book.addedAt))
 const searchDefaults = computed(() => ({
   title: props.book.title ?? undefined,
   author: props.book.authors[0]?.name ?? undefined,
@@ -28,9 +30,11 @@ const currentSource = computed<MetadataSource>(() => ({
   subtitle: props.book.subtitle,
   description: props.book.description,
   publisher: props.book.publisher,
+  publishedDate: props.book.publishedDate,
   publishedYear: props.book.publishedYear,
   language: props.book.language,
   pageCount: props.book.pageCount,
+  communityRatings: props.book.communityRatings,
   seriesName: props.book.seriesName,
   seriesIndex: props.book.seriesIndex,
   isbn10: props.book.isbn10,
@@ -40,6 +44,7 @@ const currentSource = computed<MetadataSource>(() => ({
   narrators: props.book.audioMetadata?.narrators.map((n) => n.name) ?? [],
   durationSeconds: props.book.audioMetadata?.durationSeconds ?? null,
   abridged: props.book.audioMetadata?.abridged ?? null,
+  hardcoverEditionId: props.book.hardcoverEditionId,
 }))
 
 const {
@@ -52,29 +57,48 @@ const {
   loadProviders,
   search,
   toggleProvider,
+  selectFieldRuleProviders,
   clearProviderFilter,
 } = useMetadataSearch()
 
 const view = ref<'search' | 'diff'>('search')
 const selectedCandidate = ref<MetadataCandidate | null>(null)
-const drawerTitle = computed(() => (view.value === 'search' ? 'Search Metadata' : 'Compare Metadata'))
+const drawerTitle = computed(() =>
+  view.value === 'search' ? t('book.detail.editMetadata.searchDrawer.searchTitle') : t('book.detail.editMetadata.searchDrawer.compareTitle'),
+)
 const drawerSubtitle = computed(() =>
-  view.value === 'search' ? 'Find the best provider match for this book.' : 'Review differences and apply only what you want.',
+  view.value === 'search' ? t('book.detail.editMetadata.searchDrawer.searchSubtitle') : t('book.detail.editMetadata.searchDrawer.compareSubtitle'),
 )
 
 onMounted(() => {
-  loadProviders()
+  loadProviders(props.book.id)
 })
 
 function handleClose() {
   emit('close')
 }
 
-function handleSearch(params: { title: string; author: string; isbn: string }) {
+function runMetadataSearch(params: { title: string; author: string; isbn: string }) {
   const isAudiobook = props.book.files.some((f) => f.format != null && isAudioFormat(f.format))
+  search({ ...params, bookId: props.book.id, isAudiobook })
+}
+
+function handleSearch(params: { title: string; author: string; isbn: string }) {
   selectedCandidate.value = null
   view.value = 'search'
-  search({ ...params, bookId: props.book.id, isAudiobook })
+  runMetadataSearch(params)
+}
+
+function handleToggleProvider(provider: MetadataProviderKey) {
+  toggleProvider(provider)
+}
+
+function handleClearProviderFilter() {
+  clearProviderFilter()
+}
+
+function handleSelectFieldRules() {
+  selectFieldRuleProviders()
 }
 
 function handleSelect(candidate: MetadataCandidate) {
@@ -99,7 +123,7 @@ function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string }) {
       <div class="hidden sm:block flex-1 bg-black/50 backdrop-blur-sm" @click="handleClose" />
 
       <!-- Drawer panel -->
-      <div class="relative flex flex-col w-full sm:w-3/4 sm:max-w-4xl h-full bg-background sm:border-l border-border shadow-2xl overflow-hidden">
+      <div class="relative flex flex-col w-full sm:w-3/4 sm:max-w-5xl h-full bg-background sm:border-l border-border shadow-2xl overflow-hidden">
         <!-- Gradient accent strip -->
         <div class="h-px w-full bg-linear-to-r from-transparent via-primary to-transparent shrink-0 opacity-60" />
 
@@ -143,8 +167,9 @@ function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string }) {
             :is-streaming="isStreaming"
             :has-searched="hasSearched"
             @search="handleSearch"
-            @toggle-provider="toggleProvider"
-            @clear-filter="clearProviderFilter"
+            @toggle-provider="handleToggleProvider"
+            @clear-filter="handleClearProviderFilter"
+            @select-field-rules="handleSelectFieldRules"
             @select="handleSelect"
           />
 
@@ -158,7 +183,7 @@ function handleApply(patch: { formPatch: MetadataPatch; coverUrl?: string }) {
             :provider-ids="book.providerIds"
             :locked-fields="props.lockedFields"
             :filtered-results="filteredResults"
-            back-label="Results"
+            :back-label="t('book.detail.editMetadata.diffPanel.results')"
             @back="backToSearch"
             @apply="handleApply"
           />

@@ -32,6 +32,9 @@ export function useFileNamingPattern() {
   const downloadError = ref('')
   const loadingDownload = ref(false)
   const savingDownload = ref(false)
+  const crossPlatformSanitizationEnabled = ref(true)
+  const loadingCrossPlatformSanitization = ref(false)
+  const savingCrossPlatformSanitization = ref(false)
   const savingLibraryId = ref<number | null>(null)
 
   const { libraries, fetchLibraries } = useLibraries()
@@ -72,6 +75,19 @@ export function useFileNamingPattern() {
       }
     } finally {
       loadingDownload.value = false
+    }
+  }
+
+  async function fetchCrossPlatformSanitization() {
+    loadingCrossPlatformSanitization.value = true
+    try {
+      const res = await api('/api/v1/app-settings/cross-platform-path-sanitization')
+      if (res.ok) {
+        const data: { enabled: boolean } = await res.json()
+        crossPlatformSanitizationEnabled.value = data.enabled
+      }
+    } finally {
+      loadingCrossPlatformSanitization.value = false
     }
   }
 
@@ -147,6 +163,24 @@ export function useFileNamingPattern() {
     }
   }
 
+  async function saveCrossPlatformSanitization() {
+    savingCrossPlatformSanitization.value = true
+    try {
+      const res = await api('/api/v1/app-settings/cross-platform-path-sanitization', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: crossPlatformSanitizationEnabled.value }),
+      })
+      if (res.ok) {
+        toast.success('Cross-platform path sanitization saved')
+      } else {
+        toast.error('Failed to save cross-platform path sanitization')
+      }
+    } finally {
+      savingCrossPlatformSanitization.value = false
+    }
+  }
+
   async function saveLibraryPattern(library: Library) {
     savingLibraryId.value = library.id
     try {
@@ -182,6 +216,7 @@ export function useFileNamingPattern() {
     folderError,
     downloadPattern,
     downloadError,
+    crossPlatformSanitizationEnabled,
     libraries,
     loadingGlobal,
     savingGlobal,
@@ -189,10 +224,13 @@ export function useFileNamingPattern() {
     savingFolder,
     loadingDownload,
     savingDownload,
+    loadingCrossPlatformSanitization,
+    savingCrossPlatformSanitization,
     savingLibraryId,
     fetchGlobalPattern,
     fetchFolderPattern,
     fetchDownloadPattern,
+    fetchCrossPlatformSanitization,
     fetchLibraries,
     onGlobalPatternInput,
     onFolderPatternInput,
@@ -200,6 +238,7 @@ export function useFileNamingPattern() {
     saveGlobalPattern,
     saveFolderPattern,
     saveDownloadPattern,
+    saveCrossPlatformSanitization,
     saveLibraryPattern,
     clearLibraryPattern,
     getEffectivePreview,

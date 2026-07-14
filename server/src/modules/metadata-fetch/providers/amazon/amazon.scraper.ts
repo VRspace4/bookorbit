@@ -1,6 +1,8 @@
 import * as cheerio from 'cheerio';
 import type { CheerioAPI } from 'cheerio';
 
+import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../../common/utils/published-date.utils';
+
 export interface AmazonBookData {
   title?: string;
   subtitle?: string;
@@ -9,6 +11,7 @@ export interface AmazonBookData {
   isbn13?: string;
   isbn10?: string;
   publisher?: string;
+  publishedDate?: string;
   publishedYear?: number;
   language?: string;
   pageCount?: number;
@@ -16,6 +19,8 @@ export interface AmazonBookData {
   seriesIndex?: number;
   coverUrl?: string;
   tags?: string[];
+  communityRating?: number;
+  communityRatingCount?: number;
 }
 
 const SKIP_TITLE_PATTERNS = /box\s*set|collection\s*set|books\s*set|omnibus|summary\s*&\s*study|streamer|display\s*kit|bookstore\s*kit|shelf\s*kit/i;
@@ -23,6 +28,7 @@ const SKIP_TITLE_PATTERNS = /box\s*set|collection\s*set|books\s*set|omnibus|summ
 export function parseBookPage(html: string): AmazonBookData {
   const $ = cheerio.load(html);
   const { title, subtitle } = extractTitle($);
+  const publishedDate = extractPublishedDate($);
   return {
     title,
     subtitle,
@@ -31,13 +37,16 @@ export function parseBookPage(html: string): AmazonBookData {
     isbn13: extractIsbn($, 'isbn13'),
     isbn10: extractIsbn($, 'isbn10'),
     publisher: extractPublisher($),
-    publishedYear: extractPublishedYear($),
+    publishedDate,
+    publishedYear: publishedDate ? publishedYearFromDateKey(publishedDate) : extractPublishedYear($),
     language: extractLanguage($),
     pageCount: extractPageCount($),
     seriesName: extractSeriesName($),
     seriesIndex: extractSeriesIndex($),
     coverUrl: extractCoverUrl($),
     tags: extractCategories($),
+    communityRating: extractCommunityRating($),
+    communityRatingCount: extractCommunityRatingCount($),
   };
 }
 
@@ -159,15 +168,31 @@ function extractPublisher($: CheerioAPI): string | undefined {
   return raw.replace(/\s*\([^)]*\)\s*$/, '').trim() || undefined;
 }
 
-function extractPublishedYear($: CheerioAPI): number | undefined {
+function extractPublishedDate($: CheerioAPI): string | undefined {
   // Newer layout
+  const rpiText = $('#rpi-attribute-book_details-publication_date .rpi-attribute-value span').first().text().trim();
+  if (rpiText) {
+    const date = parsePublishedDateKey(rpiText);
+    if (date) return date;
+  }
+
+  // Older layout: extract date from parenthesised text in publisher bullet
+  const publisherBullet = detailBulletValue($, /publisher/i);
+  const match = publisherBullet.match(/\(([^)]+)\)/);
+  if (match) {
+    const date = parsePublishedDateKey(match[1]);
+    if (date) return date;
+  }
+  return undefined;
+}
+
+function extractPublishedYear($: CheerioAPI): number | undefined {
   const rpiText = $('#rpi-attribute-book_details-publication_date .rpi-attribute-value span').first().text().trim();
   if (rpiText) {
     const y = parseYearFromText(rpiText);
     if (y) return y;
   }
 
-  // Older layout: extract year from parenthesised date in publisher bullet
   const publisherBullet = detailBulletValue($, /publisher/i);
   const match = publisherBullet.match(/\(([^)]+)\)/);
   if (match) {
@@ -229,6 +254,32 @@ function extractCoverUrl($: CheerioAPI): string | undefined {
   return src ? src.replace(/\._[A-Z0-9_,]+_\./i, '.') : undefined;
 }
 
+function extractCommunityRating($: CheerioAPI): number | undefined {
+  const candidates = [
+    $('#averageCustomerReviews_feature_div #acrPopover').attr('title'),
+    $('#acrPopover').attr('title'),
+    $('#averageCustomerReviews_feature_div .a-icon-alt').first().text(),
+    $('#acrPopover .a-icon-alt').first().text(),
+    $('#acrPopover .a-size-base.a-color-base').first().text(),
+    $('#acrPopover .a-size-small.a-color-base').first().text(),
+  ];
+
+  for (const raw of candidates) {
+    const parsed = parseRating(raw);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
+function extractCommunityRatingCount($: CheerioAPI): number | undefined {
+  const candidates = [$('#acrCustomerReviewText').attr('aria-label'), $('#acrCustomerReviewText').first().text()];
+  for (const raw of candidates) {
+    const parsed = parseRatingCount(raw);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
 function extractCategories($: CheerioAPI): string[] {
   const seen = new Set<string>();
   const cats: string[] = [];
@@ -269,6 +320,21 @@ function detailBulletValue($: CheerioAPI, labelPattern: RegExp): string {
 }
 
 function parseYearFromText(text: string): number | undefined {
-  const match = text.match(/\b(1[0-9]{3}|2[0-9]{3})\b/);
-  return match ? parseInt(match[1], 10) : undefined;
+  return parsePublishedYear(text);
+}
+
+function parseRating(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const match = text.match(/(-?[0-9]+(?:[.,][0-9]+)?)\s*(?:out of\s*)?5/i) ?? text.trim().match(/^(-?[0-9]+(?:[.,][0-9]+)?)$/);
+  if (!match) return undefined;
+  const value = parseFloat(match[1].replace(',', '.'));
+  return Number.isFinite(value) && value >= 0 && value <= 5 ? value : undefined;
+}
+
+function parseRatingCount(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  const match = text.match(/(-?[0-9][0-9,.\s]*)/);
+  if (!match) return undefined;
+  const value = parseInt(match[1].replace(/[,\s]/g, ''), 10);
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
 }

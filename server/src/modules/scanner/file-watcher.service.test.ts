@@ -19,6 +19,7 @@ function makeService(db: any = {}) {
     emitBookMissing: vi.fn(),
     emitBookRestored: vi.fn(),
     emitBookMoved: vi.fn(),
+    emitBookTransferred: vi.fn(),
   } as unknown as ScanGateway;
 
   const scannerService = {
@@ -27,6 +28,7 @@ function makeService(db: any = {}) {
     scanBookDirectoryAsync: vi.fn(),
     isScanRunning: vi.fn().mockReturnValue(false),
     bufferWatcherNotification: vi.fn(),
+    bufferBookMissingEvent: vi.fn(),
     bufferBooksUnavailableNotification: vi.fn(),
     bufferBooksRestoredNotification: vi.fn(),
   } as unknown as ScannerService;
@@ -61,14 +63,15 @@ describe('onApplicationBootstrap()', () => {
 // ── process() routing ─────────────────────────────────────────────────────────
 
 describe('process()', () => {
-  it('emits book-missing when handleUnlink returns book-missing', async () => {
+  it('buffers book-missing when handleUnlink returns book-missing', async () => {
     const { service, processor, gateway, scannerService } = makeService();
     const missing = { type: 'book-missing', libraryId: 1, bookIds: [10, 11] };
     processor.handleUnlink = vi.fn().mockResolvedValue(missing);
 
     await (service as any).process('delete', '/books/Author/book.epub', 1);
 
-    expect(gateway.emitBookMissing).toHaveBeenCalledWith({ libraryId: 1, bookIds: [10, 11] });
+    expect(gateway.emitBookMissing).not.toHaveBeenCalled();
+    expect((scannerService as any).bufferBookMissingEvent).toHaveBeenCalledWith(1, [10, 11]);
     expect((scannerService as any).bufferBooksUnavailableNotification).toHaveBeenCalledWith(1, [10, 11]);
   });
 
@@ -82,7 +85,8 @@ describe('process()', () => {
 
     expect(processor.handleUnlink).toHaveBeenCalledWith('/books/Author', 3);
     expect(processor.handleUnlinkDir).toHaveBeenCalledWith('/books/Author', 3);
-    expect(gateway.emitBookMissing).toHaveBeenCalledWith({ libraryId: 3, bookIds: [20] });
+    expect(gateway.emitBookMissing).not.toHaveBeenCalled();
+    expect((scannerService as any).bufferBookMissingEvent).toHaveBeenCalledWith(3, [20]);
     expect((scannerService as any).bufferBooksUnavailableNotification).toHaveBeenCalledWith(3, [20]);
   });
 
@@ -151,6 +155,18 @@ describe('process()', () => {
     expect((gateway as any).emitBookMoved).toHaveBeenCalledWith({ libraryId: 1, bookIds: [5] });
     expect(scheduleFolderScanSpy).toHaveBeenCalledWith('/books/moved.epub', 1);
     expect(scannerService.startScanAsync).not.toHaveBeenCalled();
+  });
+
+  it('emits book-transferred when an event processor result crosses libraries', async () => {
+    const { service, processor, gateway, scannerService } = makeService();
+    processor.handleUnlink = vi.fn().mockResolvedValue({ type: 'book-transferred', fromLibraryId: 1, toLibraryId: 2, bookIds: [5] });
+
+    await (service as any).process('delete', '/books/moved.epub', 1);
+
+    expect((gateway as any).emitBookTransferred).toHaveBeenCalledWith({ fromLibraryId: 1, toLibraryId: 2, bookIds: [5] });
+    expect((gateway as any).emitBookMoved).not.toHaveBeenCalled();
+    expect((scannerService as any).bufferBookMissingEvent).not.toHaveBeenCalled();
+    expect((scannerService as any).bufferBooksUnavailableNotification).not.toHaveBeenCalled();
   });
 
   it('emits nothing when both handlers return noop', async () => {
@@ -232,19 +248,36 @@ describe('reconcile()', () => {
     expect((scannerService as any).bufferBooksRestoredNotification).toHaveBeenCalledWith(2, [20]);
   });
 
-  it('emits book-missing and book-moved for each result from reconcileMissingBooks', async () => {
+  it('buffers book-missing and emits move or transfer results from reconcileMissingBooks', async () => {
     const { service, processor, gateway, scannerService } = makeService();
     (service as any).subscriptions.set(1, []);
     (processor.reconcileMissingBooks as vi.Mock).mockResolvedValue([
       { type: 'book-missing', libraryId: 1, bookIds: [20] },
       { type: 'book-moved', libraryId: 1, bookIds: [30] },
+      { type: 'book-transferred', fromLibraryId: 1, toLibraryId: 2, bookIds: [40] },
     ]);
 
     await (service as any).reconcile();
 
-    expect(gateway.emitBookMissing).toHaveBeenCalledWith({ libraryId: 1, bookIds: [20] });
+    expect(gateway.emitBookMissing).not.toHaveBeenCalled();
+    expect((scannerService as any).bufferBookMissingEvent).toHaveBeenCalledWith(1, [20]);
     expect((scannerService as any).bufferBooksUnavailableNotification).toHaveBeenCalledWith(1, [20]);
     expect(gateway.emitBookMoved).toHaveBeenCalledWith({ libraryId: 1, bookIds: [30] });
+    expect((gateway as any).emitBookTransferred).toHaveBeenCalledWith({ fromLibraryId: 1, toLibraryId: 2, bookIds: [40] });
+  });
+
+  it('emits book-transferred from cross-library reconcile results', async () => {
+    const { service, processor, gateway } = makeService();
+    (service as any).subscriptions.set(1, []);
+    (service as any).subscriptions.set(2, []);
+    (processor.reconcileMissingBooks as vi.Mock).mockResolvedValue([{ type: 'book-transferred', fromLibraryId: 1, toLibraryId: 2, bookIds: [50] }]);
+
+    (service as any).scheduleCrossLibraryReconcile();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(processor.reconcileMissingBooks).toHaveBeenCalledWith([1, 2]);
+    expect((gateway as any).emitBookTransferred).toHaveBeenCalledWith({ fromLibraryId: 1, toLibraryId: 2, bookIds: [50] });
+    expect(gateway.emitBookMoved).not.toHaveBeenCalled();
   });
 
   it('does nothing when reconcileMissingBooks returns empty', async () => {

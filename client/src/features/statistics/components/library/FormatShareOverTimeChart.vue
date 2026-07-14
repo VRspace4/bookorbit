@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { shallowRef, watchEffect } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
-import { TrendingUp } from 'lucide-vue-next'
+import { TrendingUp } from '@lucide/vue'
 
 import { useFormatShareOverTime } from '../../composables/useFormatShareOverTime'
 import ChartCard from '../ChartCard.vue'
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+const { t } = useI18n()
 
 const { data, loading, error } = useFormatShareOverTime()
 const option = shallowRef({})
@@ -83,7 +86,14 @@ watchEffect(() => {
 </script>
 
 <template>
-  <ChartCard title="Format Share Over Time" :icon="TrendingUp" :color-index="3" :loading :error :empty="!data.items.length">
+  <ChartCard
+    :title="t('statistics.charts.formatShareOverTime.title')"
+    :icon="TrendingUp"
+    :color-index="3"
+    :loading
+    :error
+    :empty="!data.items.length"
+  >
     <VChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

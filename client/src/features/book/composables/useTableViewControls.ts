@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import type { SortSpec, TableLayoutState } from '@bookorbit/types'
-import type { ColumnDef, ColumnId } from './useTableColumns'
+import type { ColumnDef } from './useTableColumns'
 import type { TablePreset } from './useTablePresets'
 
 export type TableViewHandle = {
@@ -8,8 +8,8 @@ export type TableViewHandle = {
   currentLayout: TableLayoutState
   allPresets: TablePreset[]
   resetLayout: () => void
-  toggleColumn: (id: ColumnId) => void
-  setColumnOrder: (ids: ColumnId[]) => void
+  toggleColumn: (id: string) => void
+  setColumnOrder: (ids: string[]) => void
   applyPreset: (layout: TableLayoutState, sort?: SortSpec[]) => void
   saveCurrentPreset: (name: string) => void
   deletePreset: (id: string) => void
@@ -17,6 +17,7 @@ export type TableViewHandle = {
   duplicatePreset: (id: string) => void
   togglePresetFavorite: (id: string) => void
   importPresetBackup: (presets: TablePreset[]) => number
+  scrollToIndex: (index: number) => void
 }
 
 export function useTableViewControls() {
@@ -26,11 +27,11 @@ export function useTableViewControls() {
     tableRef.value?.resetLayout()
   }
 
-  function handleToggleColumn(id: ColumnId) {
+  function handleToggleColumn(id: string) {
     tableRef.value?.toggleColumn(id)
   }
 
-  function handleSetColumnOrder(ids: ColumnId[]) {
+  function handleSetColumnOrder(ids: string[]) {
     tableRef.value?.setColumnOrder(ids)
   }
 

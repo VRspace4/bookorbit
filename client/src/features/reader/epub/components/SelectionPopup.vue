@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { BookA, Copy, FileText, Highlighter, Languages, Search, Trash2 } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { BookA, Check, Copy, FileText, Highlighter, Languages, Search, Trash2 } from '@lucide/vue'
+import { ANNOTATION_HIGHLIGHT_COLORS } from '@bookorbit/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { copyToClipboard } from '@/lib/clipboard'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   visible: boolean
@@ -23,14 +28,9 @@ const emit = defineEmits<{
 }>()
 
 const showColorPicker = ref(false)
+const copied = ref(false)
 
-const colors = [
-  { hex: '#FACC15', label: 'Yellow' },
-  { hex: '#4ADE80', label: 'Green' },
-  { hex: '#38BDF8', label: 'Blue' },
-  { hex: '#F472B6', label: 'Pink' },
-  { hex: '#FB923C', label: 'Orange' },
-]
+const colors = ANNOTATION_HIGHLIGHT_COLORS
 
 const styles = [
   { id: 'highlight', label: 'H' },
@@ -58,8 +58,13 @@ function applyHighlight(color: string, style: string) {
   showColorPicker.value = false
 }
 
-function onCopy() {
-  navigator.clipboard.writeText(props.selectedText).catch(() => {})
+async function onCopy() {
+  const didCopy = await copyToClipboard(props.selectedText)
+  if (!didCopy) return
+
+  copied.value = true
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  copied.value = false
   emit('copy')
 }
 </script>
@@ -82,13 +87,15 @@ function onCopy() {
             <Tooltip>
               <TooltipTrigger as-child>
                 <button
-                  class="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                  class="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-muted transition-colors"
+                  :class="copied ? 'text-green-500' : 'text-muted-foreground hover:text-foreground'"
                   @click="onCopy"
                 >
-                  <Copy :size="15" />
+                  <Check v-if="copied" :size="15" />
+                  <Copy v-else :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Copy</TooltipContent>
+              <TooltipContent>{{ copied ? t('reader.selection.copied') : t('reader.selection.copy') }}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -101,7 +108,7 @@ function onCopy() {
                   <Highlighter :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Highlight</TooltipContent>
+              <TooltipContent>{{ t('reader.selection.highlight') }}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -113,7 +120,7 @@ function onCopy() {
                   <Search :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Search</TooltipContent>
+              <TooltipContent>{{ t('common.search') }}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -125,7 +132,7 @@ function onCopy() {
                   <Languages :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Translate</TooltipContent>
+              <TooltipContent>{{ t('reader.selection.translate') }}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -137,7 +144,7 @@ function onCopy() {
                   <BookA :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Define</TooltipContent>
+              <TooltipContent>{{ t('reader.selection.define') }}</TooltipContent>
             </Tooltip>
 
             <Tooltip>
@@ -149,7 +156,7 @@ function onCopy() {
                   <FileText :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Add note</TooltipContent>
+              <TooltipContent>{{ t('reader.note.title') }}</TooltipContent>
             </Tooltip>
 
             <Tooltip v-if="overlappingAnnotationId !== null">
@@ -161,46 +168,41 @@ function onCopy() {
                   <Trash2 :size="15" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>Delete annotation</TooltipContent>
+              <TooltipContent>{{ t('reader.selection.deleteAnnotation') }}</TooltipContent>
             </Tooltip>
           </div>
 
           <div v-if="showColorPicker" class="border-t border-border pt-1.5 space-y-1.5">
             <div class="flex gap-1 px-0.5">
-              <Tooltip v-for="c in colors" :key="c.hex">
-                <TooltipTrigger as-child>
-                  <button
-                    class="w-6 h-6 rounded-full border-2 transition-all hover:scale-110"
-                    :class="selectedColor === c.hex ? 'border-foreground scale-110' : 'border-transparent'"
-                    :style="{ background: c.hex }"
-                    @click="selectedColor = c.hex"
-                  />
-                </TooltipTrigger>
-                <TooltipContent>{{ c.label }}</TooltipContent>
-              </Tooltip>
+              <button
+                v-for="c in colors"
+                :key="c.hex"
+                class="w-6 h-6 rounded-full border-2 transition-all hover:scale-110"
+                :class="selectedColor === c.hex ? 'border-foreground scale-110' : 'border-transparent'"
+                :style="{ background: c.hex }"
+                :title="c.label"
+                @click="selectedColor = c.hex"
+              >
+                <span class="sr-only">{{ c.label }}</span>
+              </button>
             </div>
             <div class="flex gap-1 px-0.5">
-              <Tooltip v-for="s in styles" :key="s.id">
-                <TooltipTrigger as-child>
-                  <button
-                    class="w-6 h-6 rounded text-xs font-bold transition-colors border"
-                    :class="
-                      selectedStyle === s.id
-                        ? 'bg-primary text-primary-foreground border-primary'
-                        : 'border-border hover:bg-muted text-muted-foreground'
-                    "
-                    @click="selectedStyle = s.id"
-                  >
-                    {{ s.label }}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>{{ s.id }}</TooltipContent>
-              </Tooltip>
+              <button
+                v-for="s in styles"
+                :key="s.id"
+                class="w-6 h-6 rounded text-xs font-bold transition-colors border"
+                :class="
+                  selectedStyle === s.id ? 'bg-primary text-primary-foreground border-primary' : 'border-border hover:bg-muted text-muted-foreground'
+                "
+                @click="selectedStyle = s.id"
+              >
+                {{ s.label }}
+              </button>
               <button
                 class="flex-1 ml-1 px-2 py-0.5 rounded text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
                 @click="applyHighlight(selectedColor, selectedStyle)"
               >
-                Apply
+                {{ t('reader.selection.apply') }}
               </button>
             </div>
           </div>

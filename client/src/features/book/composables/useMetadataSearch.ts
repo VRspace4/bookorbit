@@ -20,9 +20,13 @@ export function useMetadataSearch() {
 
   let abortController: AbortController | null = null
 
-  async function loadProviders() {
-    const res = await api('/api/v1/metadata-fetch/providers')
-    if (res.ok) providers.value = (await res.json()) as MetadataProviderInfo[]
+  async function loadProviders(bookId?: number) {
+    const query = bookId != null ? `?bookId=${bookId}` : ''
+    const res = await api(`/api/v1/metadata-fetch/providers${query}`)
+    if (res.ok) {
+      providers.value = (await res.json()) as MetadataProviderInfo[]
+      selectAllProviders()
+    }
   }
 
   function cancel() {
@@ -39,7 +43,8 @@ export function useMetadataSearch() {
     for (const k of Object.keys(providerCounts)) delete providerCounts[k as MetadataProviderKey]
     hasSearched.value = true
     isStreaming.value = true
-    abortController = new AbortController()
+    const controller = new AbortController()
+    abortController = controller
 
     const query = new URLSearchParams()
     if (params.title) query.set('title', params.title)
@@ -47,11 +52,13 @@ export function useMetadataSearch() {
     if (params.isbn) query.set('isbn', params.isbn)
     if (params.bookId != null) query.set('bookId', String(params.bookId))
     if (params.isAudiobook != null) query.set('isAudiobook', String(params.isAudiobook))
-    if (selectedProviders.value.length) query.set('providers', selectedProviders.value.join(','))
+    const onlyProvider = providers.value.length === 1 ? providers.value[0] : undefined
+    const requestedProviders = selectedProviders.value.length ? selectedProviders.value : onlyProvider ? [onlyProvider.key] : []
+    if (requestedProviders.length) query.set('providers', requestedProviders.join(','))
 
     try {
       const res = await api(`/api/v1/metadata-fetch/stream?${query}`, {
-        signal: abortController.signal,
+        signal: controller.signal,
       })
       if (!res.ok || !res.body) return
 
@@ -80,8 +87,10 @@ export function useMetadataSearch() {
     } catch (e) {
       if (e instanceof Error && e.name === 'AbortError') return
     } finally {
-      isStreaming.value = false
-      abortController = null
+      if (abortController === controller) {
+        isStreaming.value = false
+        abortController = null
+      }
     }
   }
 
@@ -90,11 +99,14 @@ export function useMetadataSearch() {
     'amazon',
     'audible',
     'audnexus',
+    'librofm',
     'goodreads',
     'hardcover',
     'google',
     'itunes',
+    'kobo',
     'openLibrary',
+    'aladin',
   ]
 
   function sortResults(list: MetadataCandidate[]): MetadataCandidate[] {
@@ -124,11 +136,23 @@ export function useMetadataSearch() {
   function toggleProvider(key: MetadataProviderKey) {
     const idx = selectedProviders.value.indexOf(key)
     if (idx === -1) selectedProviders.value.push(key)
-    else selectedProviders.value.splice(idx, 1)
+    else {
+      selectedProviders.value.splice(idx, 1)
+      if (selectedProviders.value.length === 0) selectAllProviders()
+    }
+  }
+
+  function selectAllProviders() {
+    selectedProviders.value = providers.value.map((provider) => provider.key)
+  }
+
+  function selectFieldRuleProviders() {
+    const fieldRuleProviders = providers.value.filter((provider) => provider.selectedByFieldRules).map((provider) => provider.key)
+    selectedProviders.value = fieldRuleProviders.length ? fieldRuleProviders : providers.value.map((provider) => provider.key)
   }
 
   function clearProviderFilter() {
-    selectedProviders.value = []
+    selectAllProviders()
   }
 
   return {
@@ -141,6 +165,8 @@ export function useMetadataSearch() {
     loadProviders,
     search,
     toggleProvider,
+    selectAllProviders,
+    selectFieldRuleProviders,
     clearProviderFilter,
   }
 }

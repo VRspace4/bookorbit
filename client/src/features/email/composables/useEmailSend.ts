@@ -1,7 +1,7 @@
 import { api } from '@/lib/api'
+import type { BookSelectionPayload } from '@bookorbit/types'
 
-export interface SendBookPayload {
-  bookIds: number[]
+export type SendBookPayload = BookSelectionPayload & {
   recipientIds?: number[]
   groupIds?: number[]
   fileId?: number

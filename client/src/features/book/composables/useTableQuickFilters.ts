@@ -1,7 +1,8 @@
 import type { Rule, RuleField, TableViewType } from '@bookorbit/types'
-import type { ColumnId } from './tableColumnSchema'
 
-const TEXT_FIELD_MAP: Partial<Record<ColumnId, RuleField>> = {
+type QuickFilterField = Exclude<RuleField, 'communityRating'>
+
+const TEXT_FIELD_MAP: Partial<Record<string, QuickFilterField>> = {
   title: 'title',
   seriesName: 'series',
   publisher: 'publisher',
@@ -10,19 +11,20 @@ const TEXT_FIELD_MAP: Partial<Record<ColumnId, RuleField>> = {
   subtitle: 'description',
 }
 
-const VALUE_FIELD_MAP: Partial<Record<ColumnId, RuleField>> = {
+const VALUE_FIELD_MAP: Partial<Record<string, QuickFilterField>> = {
   authors: 'author',
   genres: 'genre',
   tags: 'tag',
   readStatus: 'readStatus',
   rating: 'rating',
   pageCount: 'pageCount',
+  publishedDate: 'publishedDate',
   publishedYear: 'publishedYear',
   metadataScore: 'metadataScore',
 }
 
 export function useTableQuickFilters(viewType: TableViewType) {
-  function getQuickFilterOptions(colId: ColumnId): { key: string; label: string }[] {
+  function getQuickFilterOptions(colId: string): { key: string; label: string }[] {
     if (viewType !== 'library') return []
 
     if (colId === 'format') {
@@ -53,6 +55,7 @@ export function useTableQuickFilters(viewType: TableViewType) {
         'readStatus',
         'rating',
         'pageCount',
+        'publishedDate',
         'publishedYear',
         'metadataScore',
       ].includes(colId)
@@ -66,7 +69,7 @@ export function useTableQuickFilters(viewType: TableViewType) {
     return []
   }
 
-  function buildQuickFilterRule(colId: ColumnId, key: string): Rule | null {
+  function buildQuickFilterRule(colId: string, key: string): Rule | null {
     if (colId === 'format') return { type: 'rule', field: 'fileAvailability', operator: key === 'missing' ? 'isMissing' : 'isPresent' }
     if (colId === 'cover') return { type: 'rule', field: 'cover', operator: key === 'missing' ? 'isMissing' : 'isPresent' }
 

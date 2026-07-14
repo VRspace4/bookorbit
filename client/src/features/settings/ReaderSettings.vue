@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Monitor, Cloud } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { Monitor, Cloud } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
@@ -17,6 +18,7 @@ const props = withDefaults(
   },
 )
 
+const { t } = useI18n()
 const { user } = useAuth()
 const { isDemoRestrictedAccount } = usePermissions()
 
@@ -25,7 +27,7 @@ const syncEnabled = computed(() => !isDemoRestrictedAccount.value && isReaderSyn
 async function setStorageMode(sync: boolean) {
   if (!user.value || syncEnabled.value === sync) return
   if (isDemoRestrictedAccount.value) {
-    toast.error('Demo-restricted account cannot change reader storage mode')
+    toast.error(t('settings.reader.general.demoCannotChangeStorage'))
     return
   }
   try {
@@ -39,12 +41,12 @@ async function setStorageMode(sync: boolean) {
       if (sync) {
         await pushLocalReaderPreferencesToBackend()
       }
-      toast.success(sync ? 'Preferences will now be synced' : 'Preferences will stay on this device')
+      toast.success(sync ? t('settings.reader.general.preferencesSynced') : t('settings.reader.general.preferencesLocal'))
     } else {
-      toast.error('Failed to update storage mode')
+      toast.error(t('settings.reader.general.storageUpdateFailed'))
     }
   } catch {
-    toast.error('An error occurred while updating storage mode')
+    toast.error(t('settings.reader.general.storageUpdateError'))
   }
 }
 </script>
@@ -53,11 +55,11 @@ async function setStorageMode(sync: boolean) {
   <div
     class="[&_.settings-hint]:overflow-hidden [&_.settings-hint]:text-ellipsis [&_.settings-hint]:whitespace-nowrap md:[&_.settings-hint]:overflow-visible md:[&_.settings-hint]:whitespace-normal"
   >
-    <SettingsPageHeader v-if="!props.embedded" title="Reading" subtitle="General behavior that applies across all reader types." />
+    <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.general.title')" :subtitle="t('settings.reader.general.subtitle')" />
 
     <!-- Preference storage -->
     <div class="mt-5 mb-2">
-      <p class="settings-group-label">Where to save reader preferences</p>
+      <p class="settings-group-label">{{ t('settings.reader.general.storageLabel') }}</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <!-- This device only -->
         <div
@@ -73,13 +75,13 @@ async function setStorageMode(sync: boolean) {
           </div>
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 mb-1">
-              <span class="settings-label">This device only</span>
+              <span class="settings-label">{{ t('settings.reader.general.deviceOnly') }}</span>
               <span v-if="!syncEnabled" class="text-xs font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                Active
+                {{ t('settings.reader.general.active') }}
               </span>
             </div>
             <span class="block text-xs text-muted-foreground leading-relaxed">
-              Preferences stay in your browser. Best if you always read on this device, or want different settings per device.
+              {{ t('settings.reader.general.deviceOnlyHint') }}
             </span>
           </div>
         </div>
@@ -101,19 +103,19 @@ async function setStorageMode(sync: boolean) {
           </div>
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 mb-1">
-              <span class="settings-label">My account</span>
+              <span class="settings-label">{{ t('settings.reader.general.myAccount') }}</span>
               <span v-if="syncEnabled" class="text-xs font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                Active
+                {{ t('settings.reader.general.active') }}
               </span>
               <span
                 v-if="isDemoRestrictedAccount"
                 class="text-xs font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
               >
-                Not available
+                {{ t('settings.reader.general.notAvailable') }}
               </span>
             </div>
             <span class="block text-xs text-muted-foreground leading-relaxed">
-              Preferences are saved to your account. Best if you log in from multiple devices and want a consistent experience everywhere.
+              {{ t('settings.reader.general.myAccountHint') }}
             </span>
           </div>
         </div>

@@ -19,15 +19,9 @@ describe('system-tabs', () => {
       }
     })
 
-    it('every entry has navLabel, titleLabel, subtitle, and permission', () => {
+    it('every entry has a permission', () => {
       for (const tab of SYSTEM_TABS) {
         const info = SYSTEM_TAB_INFO[tab]
-        expect(typeof info.navLabel).toBe('string')
-        expect(info.navLabel.length).toBeGreaterThan(0)
-        expect(typeof info.titleLabel).toBe('string')
-        expect(info.titleLabel.length).toBeGreaterThan(0)
-        expect(typeof info.subtitle).toBe('string')
-        expect(info.subtitle.length).toBeGreaterThan(0)
         expect(info.permission === null || typeof info.permission === 'string').toBe(true)
       }
     })

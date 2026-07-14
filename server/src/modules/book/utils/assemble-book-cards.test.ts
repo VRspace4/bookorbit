@@ -9,6 +9,7 @@ function makeBookRow(id: number, overrides?: Partial<Parameters<typeof assembleB
     title: `Book ${id}`,
     seriesName: null,
     seriesIndex: null,
+    publishedDate: null,
     publishedYear: null,
     language: null,
     rating: null,
@@ -18,6 +19,8 @@ function makeBookRow(id: number, overrides?: Partial<Parameters<typeof assembleB
     publisher: null,
     pageCount: null,
     isbn13: null,
+    hardcoverId: null,
+    hardcoverEditionId: null,
     ...overrides,
   };
 }
@@ -45,6 +48,15 @@ describe('assembleBookCards', () => {
     expect(card.updatedAt).toBe('2024-02-01T00:00:00.000Z');
     expect(card.metadataScore).toBe(88);
     expect(card.files).toEqual([{ id: 10, format: 'epub', role: 'primary', sizeBytes: 4096 }]);
+  });
+
+  it('passes through Hardcover book and edition identifiers', () => {
+    const rows = [makeBookRow(1, { hardcoverId: 'new-orleans-rush', hardcoverEditionId: '8941973' })];
+
+    const [card] = assembleBookCards(rows, [], [], [], []);
+
+    expect(card.hardcoverId).toBe('new-orleans-rush');
+    expect(card.hardcoverEditionId).toBe('8941973');
   });
 
   it('falls back to basename of folderPath when title is null', () => {
@@ -202,12 +214,15 @@ describe('assembleBookCards', () => {
   });
 
   it('includes all optional metadata fields', () => {
-    const rows = [makeBookRow(1, { seriesName: 'Dune', seriesIndex: 1, publishedYear: 1965, language: 'en', rating: 5 })];
+    const rows = [
+      makeBookRow(1, { seriesName: 'Dune', seriesIndex: 1, publishedDate: '1965-08-01', publishedYear: 1965, language: 'en', rating: 5 }),
+    ];
 
     const [card] = assembleBookCards(rows, [], [], [], []);
 
     expect(card.seriesName).toBe('Dune');
     expect(card.seriesIndex).toBe(1);
+    expect(card.publishedDate).toBe('1965-08-01');
     expect(card.publishedYear).toBe(1965);
     expect(card.language).toBe('en');
     expect(card.rating).toBe(5);
@@ -219,6 +234,7 @@ describe('assembleBookCards', () => {
 
     expect(card.seriesName).toBeNull();
     expect(card.seriesIndex).toBeNull();
+    expect(card.publishedDate).toBeNull();
     expect(card.publishedYear).toBeNull();
     expect(card.language).toBeNull();
     expect(card.rating).toBeNull();
@@ -321,6 +337,9 @@ function makeCollapsedRow(id: number, overrides?: Record<string, unknown>) {
     readCount: 1,
     coverBookIds: [id],
     seriesLatestAddedAt: new Date('2024-06-01T00:00:00.000Z'),
+    firstVolumeBookId: id,
+    latestVolumeBookId: id,
+    firstUnreadBookId: id,
     ...overrides,
   };
 }
@@ -348,6 +367,8 @@ function makeBookCard(id: number, overrides?: Record<string, unknown>) {
     publisher: null as string | null,
     pageCount: null as number | null,
     isbn13: null as string | null,
+    hardcoverId: null as string | null,
+    hardcoverEditionId: null as string | null,
     narrators: [] as string[],
     ...overrides,
   };
@@ -362,6 +383,9 @@ describe('assembleCollapsedBookCards', () => {
     expect(card!.collapsedSeries!.bookCount).toBe(3);
     expect(card!.collapsedSeries!.readCount).toBe(1);
     expect(card!.collapsedSeries!.coverBookIds).toEqual([1]);
+    expect(card!.collapsedSeries!.firstVolumeBookId).toBe(1);
+    expect(card!.collapsedSeries!.latestVolumeBookId).toBe(1);
+    expect(card!.collapsedSeries!.firstUnreadBookId).toBe(1);
   });
 
   it('does not set collapsedSeries on rows with null bookCount (standalones)', () => {
@@ -391,6 +415,44 @@ describe('assembleCollapsedBookCards', () => {
     const [card] = assembleCollapsedBookCards(rows, [], [], [], []);
 
     expect(card!.collapsedSeries!.coverBookIds).toEqual([]);
+  });
+
+  it('serializes cover timestamps for collapsed series covers', () => {
+    const rows = [
+      makeCollapsedRow(1, {
+        updatedAt: new Date('2024-01-15T00:00:00.000Z'),
+        coverBookIds: [2, 3],
+        coverUpdatedAtByBookId: {
+          2: new Date('2024-02-01T00:00:00.000Z'),
+          3: null,
+        },
+      }),
+    ];
+    const [card] = assembleCollapsedBookCards(rows, [], [], [], []);
+
+    expect(card!.collapsedSeries!.coverUpdatedAtByBookId).toEqual({
+      1: '2024-01-15T00:00:00.000Z',
+      2: '2024-02-01T00:00:00.000Z',
+      3: null,
+    });
+  });
+
+  it('passes through firstVolumeBookId, latestVolumeBookId, and firstUnreadBookId', () => {
+    const rows = [makeCollapsedRow(5, { firstVolumeBookId: 10, latestVolumeBookId: 30, firstUnreadBookId: 20 })];
+    const [card] = assembleCollapsedBookCards(rows, [], [], [], []);
+
+    expect(card!.collapsedSeries!.firstVolumeBookId).toBe(10);
+    expect(card!.collapsedSeries!.latestVolumeBookId).toBe(30);
+    expect(card!.collapsedSeries!.firstUnreadBookId).toBe(20);
+  });
+
+  it('sets volume IDs to null when source values are null', () => {
+    const rows = [makeCollapsedRow(1, { firstVolumeBookId: null, latestVolumeBookId: null, firstUnreadBookId: null })];
+    const [card] = assembleCollapsedBookCards(rows, [], [], [], []);
+
+    expect(card!.collapsedSeries!.firstVolumeBookId).toBeNull();
+    expect(card!.collapsedSeries!.latestVolumeBookId).toBeNull();
+    expect(card!.collapsedSeries!.firstUnreadBookId).toBeNull();
   });
 
   it('preserves base card fields alongside collapsedSeries', () => {
@@ -502,6 +564,19 @@ describe('collapseBookCards', () => {
     expect(result[0]!.collapsedSeries!.coverBookIds).toEqual([2, 3]);
   });
 
+  it('includes child cover timestamps when collapsing book cards client-side', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1, updatedAt: '2024-02-01T00:00:00.000Z' }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 2, updatedAt: null, addedAt: '2024-03-01T00:00:00.000Z' }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.coverUpdatedAtByBookId).toEqual({
+      1: '2024-02-01T00:00:00.000Z',
+      2: '2024-03-01T00:00:00.000Z',
+    });
+  });
+
   it('falls back to all sorted books when none have covers', () => {
     const cards = [
       makeBookCard(1, { seriesName: 'S', seriesIndex: 1, hasCover: false }),
@@ -547,5 +622,100 @@ describe('collapseBookCards', () => {
     const beta = result.find((c) => c.seriesName === 'Beta');
     expect(alpha!.collapsedSeries!.bookCount).toBe(2);
     expect(beta!.collapsedSeries!.bookCount).toBe(3);
+  });
+
+  it('sets firstVolumeBookId to the first book by series index', () => {
+    const cards = [
+      makeBookCard(3, { seriesName: 'S', seriesIndex: 3 }),
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1 }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 2 }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstVolumeBookId).toBe(1);
+  });
+
+  it('sets latestVolumeBookId to the last book by series index', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1 }),
+      makeBookCard(3, { seriesName: 'S', seriesIndex: 3 }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 2 }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.latestVolumeBookId).toBe(3);
+  });
+
+  it('sets firstUnreadBookId to the first unread book by series index', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1, readStatus: { status: 'read' } }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 2, readStatus: { status: 'reading' } }),
+      makeBookCard(3, { seriesName: 'S', seriesIndex: 3, readStatus: null }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstUnreadBookId).toBe(2);
+  });
+
+  it('sets firstUnreadBookId to null when all books are read', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1, readStatus: { status: 'read' } }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 2, readStatus: { status: 'read' } }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstUnreadBookId).toBeNull();
+  });
+
+  it('sets firstUnreadBookId to first volume when no read statuses exist', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1, readStatus: null }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 2, readStatus: null }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstUnreadBookId).toBe(1);
+  });
+
+  it('sets all three volume IDs to the same book for single-book series', () => {
+    const cards = [makeBookCard(42, { seriesName: 'Solo', seriesIndex: 1 })];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstVolumeBookId).toBe(42);
+    expect(result[0]!.collapsedSeries!.latestVolumeBookId).toBe(42);
+    expect(result[0]!.collapsedSeries!.firstUnreadBookId).toBe(42);
+  });
+
+  it('handles null series indices correctly for volume IDs', () => {
+    const cards = [
+      makeBookCard(2, { seriesName: 'S', seriesIndex: null, addedAt: '2024-03-01T00:00:00.000Z' }),
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1, addedAt: '2024-01-01T00:00:00.000Z' }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstVolumeBookId).toBe(1);
+    expect(result[0]!.collapsedSeries!.latestVolumeBookId).toBe(1);
+  });
+
+  it('falls back to last sorted book when all series indices are null', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: null, addedAt: '2024-01-01T00:00:00.000Z' }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: null, addedAt: '2024-03-01T00:00:00.000Z' }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.firstVolumeBookId).toBe(1);
+    expect(result[0]!.collapsedSeries!.latestVolumeBookId).toBe(2);
+  });
+
+  it('does not treat null-index book as latest volume when numeric indexes exist', () => {
+    const cards = [
+      makeBookCard(1, { seriesName: 'S', seriesIndex: 1 }),
+      makeBookCard(2, { seriesName: 'S', seriesIndex: 5 }),
+      makeBookCard(3, { seriesName: 'S', seriesIndex: null }),
+    ];
+    const result = collapseBookCards(cards);
+
+    expect(result[0]!.collapsedSeries!.latestVolumeBookId).toBe(2);
   });
 });

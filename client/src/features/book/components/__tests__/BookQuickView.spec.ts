@@ -4,6 +4,10 @@ import { ref } from 'vue'
 import type { BookDetail } from '@bookorbit/types'
 import BookQuickView from '../BookQuickView.vue'
 
+const displaySettings = {
+  bookCoverDisplayMode: ref('blurred-fit'),
+}
+
 const permissionState = {
   canDelete: true,
   canEditMetadata: true,
@@ -53,6 +57,10 @@ vi.mock('@/features/book/composables/useSafeHtml', () => ({
   useSafeHtml: () => '',
 }))
 
+vi.mock('@/composables/useDisplaySettings', () => ({
+  useDisplaySettings: () => displaySettings,
+}))
+
 function makeDetail(overrides: Partial<BookDetail> = {}): BookDetail {
   return {
     id: 42,
@@ -61,19 +69,25 @@ function makeDetail(overrides: Partial<BookDetail> = {}): BookDetail {
     status: 'present',
     folderPath: '/books',
     addedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: null,
     title: 'Quick View Book',
     subtitle: null,
     description: null,
     isbn10: null,
     isbn13: null,
     publisher: null,
+    publishedDate: null,
     publishedYear: null,
     language: null,
     pageCount: null,
     seriesName: null,
     seriesIndex: null,
     rating: null,
+    personalNote: null,
+    personalNoteUpdatedAt: null,
+    communityRatings: [],
     coverSource: null,
+    hardcoverEditionId: null,
     providerIds: {},
     authors: [],
     genres: [],
@@ -96,6 +110,7 @@ function makeDetail(overrides: Partial<BookDetail> = {}): BookDetail {
     audioMetadata: null,
     formatPriority: [],
     comicMetadata: null,
+    customMetadata: [],
     lockedFields: [],
     collections: [],
     ...overrides,
@@ -131,6 +146,7 @@ describe('BookQuickView', () => {
     fetchMock.mockReset()
     pushMock.mockReset()
     loadingRef.value = false
+    displaySettings.bookCoverDisplayMode.value = 'blurred-fit'
     detailRef.value = makeDetail()
   })
 
@@ -188,5 +204,61 @@ describe('BookQuickView', () => {
     })
 
     expect(wrapper.find('[data-testid="quick-view-action-delete"]').exists()).toBe(false)
+  })
+
+  it('renders RanobeDB provider icon link', () => {
+    detailRef.value = makeDetail({
+      providerIds: {
+        ranobedb: '1287',
+      },
+    })
+
+    const wrapper = mount(BookQuickView, {
+      props: {
+        open: true,
+        bookId: 42,
+      },
+      global: globalStubs,
+    })
+
+    const ranobedbLink = wrapper.find('a[title="Open in RanobeDB"]')
+    expect(ranobedbLink.exists()).toBe(true)
+    expect(ranobedbLink.attributes('href')).toBe('https://ranobedb.org/book/1287')
+    expect(ranobedbLink.find('img[alt="RanobeDB"][src="/assets/provider-icons/ranobedb.svg"]').exists()).toBe(true)
+  })
+
+  it('renders Libro.fm provider icon link', () => {
+    detailRef.value = makeDetail({ providerIds: { librofm: '9781234567890' } })
+
+    const wrapper = mount(BookQuickView, {
+      props: { open: true, bookId: 42 },
+      global: globalStubs,
+    })
+
+    const libroFmLink = wrapper.find('a[title="Open in Libro.fm"]')
+    expect(libroFmLink.exists()).toBe(true)
+    expect(libroFmLink.attributes('href')).toBe('https://libro.fm/audiobooks/9781234567890')
+    expect(libroFmLink.find('img[alt="Libro.fm"][src="/assets/provider-icons/librofm.svg"]').exists()).toBe(true)
+  })
+
+  it('shrinks natural-bottom quick-view cover to the loaded cover ratio', async () => {
+    displaySettings.bookCoverDisplayMode.value = 'natural-bottom'
+    detailRef.value = makeDetail({ coverSource: 'extracted' })
+
+    const wrapper = mount(BookQuickView, {
+      props: {
+        open: true,
+        bookId: 42,
+      },
+      global: globalStubs,
+    })
+    const image = wrapper.get('img[alt="Quick View Book"]')
+    Object.defineProperty(image.element, 'naturalWidth', { configurable: true, value: 1200 })
+    Object.defineProperty(image.element, 'naturalHeight', { configurable: true, value: 600 })
+
+    await image.trigger('load')
+
+    const surface = wrapper.get('.book-cover-surface')
+    expect(surface.attributes('style')).toContain('aspect-ratio: 2 / 1')
   })
 })

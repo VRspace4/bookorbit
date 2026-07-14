@@ -106,12 +106,14 @@ export interface EpubReaderSettings {
   /** Effective highlight colors for the current theme (derived from theme defaults + overrides). */
   ttsSentenceHighlightColor: string;
   ttsWordHighlightColor: string;
+  // Fixed-layout EPUB spread handling. auto = respect book metadata; none = force one spine item per page.
+  fixedLayoutSpread: "auto" | "none";
 }
 
 export interface PdfReaderSettings {
-  scrollMode: "vertical" | "horizontal" | "wrapped" | "page";
-  spread: "none" | "odd" | "even";
-  zoomMode: "fit-width" | "fit-page" | "custom";
+  scrollMode: "vertical" | "horizontal" | "page";
+  spread: "none" | "odd" | "even" | "auto";
+  zoomMode: "fit-width" | "fit-page" | "automatic" | "custom";
   customScale: number; // 0.25-4.0, used when zoomMode is 'custom'
   rotation: 0 | 90 | 180 | 270;
 }
@@ -172,6 +174,7 @@ export const EPUB_READER_DEFAULTS: EpubReaderSettings = {
   ttsSkipForwardSeconds: 30,
   ttsSentenceHighlightColor: DEFAULT_TTS_SENTENCE_HIGHLIGHT_COLOR,
   ttsWordHighlightColor: DEFAULT_TTS_WORD_HIGHLIGHT_COLOR,
+  fixedLayoutSpread: "auto",
 };
 
 export const PDF_READER_DEFAULTS: PdfReaderSettings = {

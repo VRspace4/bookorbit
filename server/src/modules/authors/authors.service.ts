@@ -14,12 +14,13 @@ import type {
 import { assembleBookCards } from '../book/utils/assemble-book-cards';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { normalizeMetadataText } from '../../common/utils/metadata-text-normalize.utils';
 import type { RequestUser } from '../../common/types/request-user';
 import { books } from '../../db/schema';
 import { BookReadService } from '../book/book-read.service';
 import { LibraryService } from '../library/library.service';
 import { AppSettingsService } from '../app-settings/app-settings.service';
-import { AuthorImageStorageService } from './author-image-storage.service';
+import { AuthorImageStorageError, AuthorImageStorageService } from './author-image-storage.service';
 import { AUTHOR_ENRICHMENT_REASONS } from './author-enrichment-reasons';
 import { AuthorEnrichmentExecutorService } from './author-enrichment-executor.service';
 import { AuthorEnrichmentOrchestratorService } from './author-enrichment-orchestrator.service';
@@ -35,6 +36,7 @@ import { AuthorMetadataFetchService } from './metadata/author-metadata-fetch.ser
 
 @Injectable()
 export class AuthorsService {
+  static readonly MAX_AUTHOR_IMAGE_BYTES = 20 * 1024 * 1024;
   private static readonly BULK_AUDNEXUS_DELAY_MIN_MS = 250;
   private static readonly BULK_AUDNEXUS_DELAY_MAX_MS = 1_000;
   private readonly logger = new Logger(AuthorsService.name);
@@ -72,6 +74,7 @@ export class AuthorsService {
       libraryIds,
       hasPhoto: dto.hasPhoto,
       minBookCount: dto.minBookCount,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
     });
 
     const mapped = page.items.map((item) => this.mapAuthorSummary(item));
@@ -83,7 +86,7 @@ export class AuthorsService {
 
   async findOne(user: RequestUser, authorId: number): Promise<AuthorDetail> {
     const libraryIds = await this.resolveLibraryIds(user);
-    const row = await this.authorsRepo.findById(authorId, libraryIds);
+    const row = await this.authorsRepo.findById(authorId, libraryIds, user.isSuperuser ? undefined : user.contentFilters);
     if (!row) throw new NotFoundException('Author not found');
     return this.withAuthorImageUrl(this.mapAuthorSummary(row) as AuthorDetail, 'full');
   }
@@ -95,7 +98,7 @@ export class AuthorsService {
       return { items: [], total: 0, page: dto.page ?? 0, size: dto.size ?? 50 };
     }
 
-    const author = await this.authorsRepo.findById(authorId, libraryIds);
+    const author = await this.authorsRepo.findById(authorId, libraryIds, user.isSuperuser ? undefined : user.contentFilters);
     if (!author) throw new NotFoundException('Author not found');
 
     const page = await this.authorsRepo.findBookIdsPage({
@@ -105,6 +108,7 @@ export class AuthorsService {
       sort: dto.sort ?? 'addedAt',
       order: dto.order ?? 'desc',
       libraryIds,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
     });
 
     if (page.bookIds.length === 0) {
@@ -203,13 +207,13 @@ export class AuthorsService {
       const values: Parameters<AuthorsRepository['updateAuthorById']>[1] = {};
 
       if ('name' in dto) {
-        const name = dto.name?.trim();
+        const name = normalizeMetadataText(dto.name);
         if (!name) throw new BadRequestException('name cannot be empty');
         values.name = name;
       }
 
       if ('sortName' in dto) {
-        values.sortName = dto.sortName?.trim() || null;
+        values.sortName = normalizeMetadataText(dto.sortName);
       }
 
       if ('description' in dto) {
@@ -352,6 +356,76 @@ export class AuthorsService {
     return this.authorImageStorage.getImagePath(authorId);
   }
 
+  async uploadImage(user: RequestUser, authorId: number, bytes: Buffer, mimeType: string): Promise<AuthorDetail> {
+    const event = 'author.upload_image';
+    const startedAt = Date.now();
+    this.logger.log(
+      `[${event}] [start] userId=${user.id} authorId=${authorId} mimeType=${mimeType} bytes=${bytes.length} - author image upload started`,
+    );
+    try {
+      if (!mimeType.startsWith('image/')) {
+        throw new BadRequestException('File must be an image');
+      }
+      if (bytes.length === 0) {
+        throw new BadRequestException('File is empty');
+      }
+      if (bytes.length > AuthorsService.MAX_AUTHOR_IMAGE_BYTES) {
+        throw new BadRequestException('Image exceeds 20 MB limit');
+      }
+
+      await this.assertMutationAccess(user, [authorId]);
+
+      try {
+        await this.authorImageStorage.saveFromBuffer(authorId, bytes);
+      } catch (error) {
+        if (error instanceof AuthorImageStorageError) {
+          if (this.isLikelyInvalidImageError(error)) {
+            throw new BadRequestException('Invalid image file');
+          }
+          throw new ServiceUnavailableException('Failed to persist author image');
+        }
+        throw error;
+      }
+
+      await this.authorsRepo.updateAuthorById(authorId, { hasPhoto: true });
+      const detail = await this.findOne(user, authorId);
+      this.logger.log(
+        `[${event}] [end] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} hasPhoto=true - author image upload completed`,
+      );
+      return detail;
+    } catch (error) {
+      const errorClass = error instanceof Error ? error.name : 'Error';
+      const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
+      this.logger.warn(
+        `[${event}] [fail] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - author image upload failed`,
+      );
+      throw error;
+    }
+  }
+
+  async deleteImage(user: RequestUser, authorId: number): Promise<AuthorDetail> {
+    const event = 'author.delete_image';
+    const startedAt = Date.now();
+    this.logger.log(`[${event}] [start] userId=${user.id} authorId=${authorId} - author image delete started`);
+    try {
+      await this.assertMutationAccess(user, [authorId]);
+      await this.authorImageStorage.deleteAuthorDir(authorId);
+      await this.authorsRepo.updateAuthorById(authorId, { hasPhoto: false });
+      const detail = await this.findOne(user, authorId);
+      this.logger.log(
+        `[${event}] [end] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} hasPhoto=false - author image delete completed`,
+      );
+      return detail;
+    } catch (error) {
+      const errorClass = error instanceof Error ? error.name : 'Error';
+      const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
+      this.logger.warn(
+        `[${event}] [fail] userId=${user.id} authorId=${authorId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - author image delete failed`,
+      );
+      throw error;
+    }
+  }
+
   async bulkRefreshMetadata(
     authorIds: number[],
     user: RequestUser,
@@ -407,7 +481,7 @@ export class AuthorsService {
         try {
           onProgress?.({ authorId, updated: didUpdate, imageUpdated, imageUrl, error: errorMessage });
         } catch {
-          // callback threw (e.g. client disconnected) — stop the loop
+          // callback threw (e.g. client disconnected) - stop the loop
           callbackInterrupted = true;
           break;
         }
@@ -541,5 +615,17 @@ export class AuthorsService {
     const min = AuthorsService.BULK_AUDNEXUS_DELAY_MIN_MS;
     const max = AuthorsService.BULK_AUDNEXUS_DELAY_MAX_MS;
     return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  private isLikelyInvalidImageError(error: AuthorImageStorageError): boolean {
+    const msg = error.message.toLowerCase();
+    return (
+      msg.includes('image bytes are empty') ||
+      msg.includes('input buffer') ||
+      msg.includes('unsupported image format') ||
+      msg.includes('vips') ||
+      msg.includes('corrupt') ||
+      msg.includes('invalid')
+    );
   }
 }

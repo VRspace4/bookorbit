@@ -1,10 +1,15 @@
 import { api } from '@/lib/api'
 import type {
-  HardcoverAdminSettings,
+  ApplyHardcoverImportPayload,
   HardcoverActiveSyncStatus,
+  HardcoverBookSyncState,
+  HardcoverBookSyncNowResult,
+  HardcoverImportApplyResult,
+  HardcoverImportPreview,
   HardcoverSyncPendingSummary,
   HardcoverSettings,
   HardcoverTokenValidationResult,
+  UpdateHardcoverBookSyncPayload,
   UpsertHardcoverSettingsPayload,
 } from '@bookorbit/types'
 
@@ -98,17 +103,52 @@ export async function fetchHardcoverSyncPendingSummary(): Promise<HardcoverSyncP
   return res.json()
 }
 
-export async function fetchHardcoverAdminSettings(): Promise<HardcoverAdminSettings> {
-  const res = await api('/api/v1/admin/hardcover/settings')
-  if (!res.ok) throw new Error('Failed to fetch admin settings')
+export async function fetchHardcoverBookSyncState(bookId: number): Promise<HardcoverBookSyncState> {
+  const res = await api(`${BASE}/books/${bookId}/sync-state`)
+  if (!res.ok) throw new Error('Failed to fetch Hardcover book sync state')
   return res.json()
 }
 
-export async function setHardcoverFeatureEnabled(enabled: boolean): Promise<void> {
-  const res = await api('/api/v1/admin/hardcover/settings', {
+export async function updateHardcoverBookSyncState(bookId: number, payload: UpdateHardcoverBookSyncPayload): Promise<HardcoverBookSyncState> {
+  const res = await api(`${BASE}/books/${bookId}/sync-state`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(payload),
   })
-  if (!res.ok) throw new Error('Failed to update Hardcover feature flag')
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error((body as { message?: string }).message ?? 'Failed to save Hardcover book sync state')
+  }
+  return res.json()
+}
+
+export async function startHardcoverBookSync(bookId: number): Promise<HardcoverBookSyncNowResult> {
+  const res = await api(`${BASE}/books/${bookId}/sync`, { method: 'POST' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error((body as { message?: string }).message ?? 'Failed to sync Hardcover book')
+  }
+  return res.json()
+}
+
+export async function previewHardcoverImport(): Promise<HardcoverImportPreview> {
+  const res = await api(`${BASE}/import/preview`, { method: 'POST' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error((body as { message?: string }).message ?? 'Failed to preview Hardcover import')
+  }
+  return res.json()
+}
+
+export async function applyHardcoverImport(payload: ApplyHardcoverImportPayload = {}): Promise<HardcoverImportApplyResult> {
+  const res = await api(`${BASE}/import/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error((body as { message?: string }).message ?? 'Failed to import Hardcover read status')
+  }
+  return res.json()
 }

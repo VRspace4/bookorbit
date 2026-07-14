@@ -16,7 +16,10 @@ describe('KoboUserController', () => {
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
   };
-  const controller = new KoboUserController(deviceService as never, settingsService as never);
+  const historyService = {
+    listForUser: vi.fn(),
+  };
+  const controller = new KoboUserController(deviceService as never, settingsService as never, historyService as never);
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -40,22 +43,42 @@ describe('KoboUserController', () => {
   });
 
   it('delegates settings reads and writes with current user id', async () => {
-    settingsService.getSettings.mockResolvedValue({ convertToKepub: true, forceEnableHyphenation: false, kepubConversionLimitMb: 100 });
-    settingsService.updateSettings.mockResolvedValue({ convertToKepub: false, forceEnableHyphenation: true, kepubConversionLimitMb: 150 });
+    settingsService.getSettings.mockResolvedValue({
+      convertToKepub: true,
+      forceEnableHyphenation: false,
+      kepubConversionLimitMb: 100,
+      twoWayProgressSync: false,
+    });
+    settingsService.updateSettings.mockResolvedValue({
+      convertToKepub: true,
+      forceEnableHyphenation: true,
+      kepubConversionLimitMb: 150,
+      twoWayProgressSync: true,
+    });
 
     await expect(controller.getSettings({ id: 5 } as never)).resolves.toEqual({
       convertToKepub: true,
       forceEnableHyphenation: false,
       kepubConversionLimitMb: 100,
+      twoWayProgressSync: false,
     });
-    await expect(controller.updateSettings({ convertToKepub: false } as never, { id: 5 } as never)).resolves.toEqual({
-      convertToKepub: false,
+    await expect(controller.updateSettings({ convertToKepub: false, twoWayProgressSync: true } as never, { id: 5 } as never)).resolves.toEqual({
+      convertToKepub: true,
       forceEnableHyphenation: true,
       kepubConversionLimitMb: 150,
+      twoWayProgressSync: true,
     });
 
     expect(settingsService.getSettings).toHaveBeenCalledWith(5);
-    expect(settingsService.updateSettings).toHaveBeenCalledWith(5, { convertToKepub: false });
+    expect(settingsService.updateSettings).toHaveBeenCalledWith(5, { convertToKepub: false, twoWayProgressSync: true });
+  });
+
+  it('delegates history reads with current user id and limit', async () => {
+    historyService.listForUser.mockResolvedValue([{ id: 1, event: 'library_sync' }]);
+
+    await expect(controller.listHistory({ id: 9 } as never, 15)).resolves.toEqual([{ id: 1, event: 'library_sync' }]);
+
+    expect(historyService.listForUser).toHaveBeenCalledWith(9, 15);
   });
 
   it('registers auditable metadata for create/rename/remove actions', () => {

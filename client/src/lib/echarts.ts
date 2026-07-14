@@ -28,6 +28,8 @@ import {
   TooltipComponent,
   VisualMapComponent,
 } from 'echarts/components'
+import { ACCENT_IDS, type Accent } from '@bookorbit/types'
+import { ACCENT_HUE, ACCENT_PRIMARY, DEFAULT_ACCENT, resolveAccent } from '@/lib/theme-accent-meta'
 
 // SVG renderer: events fire on real DOM elements, not via canvas hit-test.
 // This eliminates the cursor-flicker / hover-disappear bug that canvas
@@ -73,86 +75,11 @@ export function readCssColor(varName: string): string {
 
 type ProjectxThemeMode = 'light' | 'dark'
 
-// --primary oklch(L C H) per accent, sourced from accents.css.
-// [lightL, lightC, darkL, darkC] — hue is always the tint-h value.
-type PrimaryDef = [lightL: number, lightC: number, darkL: number, darkC: number]
-const ACCENT_PRIMARY: Record<string, PrimaryDef> = {
-  white: [0.2, 0, 0.985, 0],
-  grey: [0.55, 0, 0.75, 0],
-  rose: [0.57, 0.24, 0.73, 0.2],
-  orange: [0.64, 0.22, 0.78, 0.18],
-  amber: [0.72, 0.17, 0.82, 0.17],
-  yellow: [0.75, 0.18, 0.84, 0.16],
-  lime: [0.64, 0.2, 0.77, 0.18],
-  green: [0.527, 0.18, 0.72, 0.18],
-  emerald: [0.52, 0.17, 0.72, 0.15],
-  teal: [0.52, 0.18, 0.74, 0.16],
-  cyan: [0.52, 0.2, 0.75, 0.17],
-  sky: [0.54, 0.21, 0.75, 0.18],
-  blue: [0.487, 0.25, 0.72, 0.2],
-  indigo: [0.51, 0.26, 0.72, 0.22],
-  violet: [0.491, 0.27, 0.72, 0.23],
-  fuchsia: [0.56, 0.27, 0.75, 0.22],
-  pink: [0.56, 0.26, 0.75, 0.22],
-  coral: [0.6, 0.12, 0.76, 0.1],
-  peach: [0.63, 0.11, 0.78, 0.09],
-  butter: [0.66, 0.13, 0.8, 0.11],
-  lemon: [0.7, 0.12, 0.82, 0.1],
-  celadon: [0.61, 0.1, 0.76, 0.08],
-  sage: [0.52, 0.1, 0.72, 0.09],
-  mint: [0.6, 0.1, 0.75, 0.09],
-  seafoam: [0.61, 0.09, 0.76, 0.08],
-  powder: [0.59, 0.1, 0.75, 0.09],
-  mist: [0.56, 0.1, 0.74, 0.09],
-  periwinkle: [0.54, 0.11, 0.73, 0.1],
-  wisteria: [0.55, 0.1, 0.73, 0.09],
-  lavender: [0.55, 0.11, 0.73, 0.1],
-  orchid: [0.56, 0.11, 0.74, 0.1],
-  blush: [0.54, 0.11, 0.73, 0.1],
-}
-
-const ACCENT_HUE: Record<string, number> = {
-  white: 0,
-  grey: 0,
-  rose: 15,
-  orange: 42,
-  amber: 70,
-  yellow: 95,
-  lime: 118,
-  green: 142,
-  emerald: 162,
-  teal: 180,
-  cyan: 197,
-  sky: 213,
-  blue: 263,
-  indigo: 276,
-  violet: 292,
-  fuchsia: 312,
-  pink: 328,
-  coral: 25,
-  peach: 38,
-  butter: 80,
-  lemon: 100,
-  celadon: 122,
-  sage: 142,
-  mint: 158,
-  seafoam: 178,
-  powder: 205,
-  mist: 218,
-  periwinkle: 265,
-  wisteria: 285,
-  lavender: 300,
-  orchid: 315,
-  blush: 345,
-}
-
 const THEME_MODES: ProjectxThemeMode[] = ['light', 'dark']
-const DEFAULT_ACCENT = 'blue'
-
 // Staggered hue offsets so adjacent chart series have more contrast.
 const HUE_OFFSETS = [0, 72, 144, 216, 288, 36, 108, 180, 252, 324]
 
-function oklchToHex(L: number, C: number, H: number): string {
+export function oklchToHex(L: number, C: number, H: number): string {
   const h = (H * Math.PI) / 180
   const a = C * Math.cos(h)
   const b = C * Math.sin(h)
@@ -182,20 +109,20 @@ function oklchToHex(L: number, C: number, H: number): string {
 }
 
 export function getThemePalette(mode: ProjectxThemeMode, accent: string, chromaScale = 1, lightnessScale = 1): string[] {
-  const resolvedAccent = accent in ACCENT_PRIMARY ? accent : DEFAULT_ACCENT
-  const def = ACCENT_PRIMARY[resolvedAccent]!
+  const resolvedAccent = resolveAccent(accent)
+  const def = ACCENT_PRIMARY[resolvedAccent]
   const dark = mode === 'dark'
   const L = (dark ? def[2] : def[0]) * lightnessScale
   const C = (dark ? def[3] : def[1]) * chromaScale
-  const H = ACCENT_HUE[resolvedAccent]!
+  const H = ACCENT_HUE[resolvedAccent]
   return HUE_OFFSETS.map((off) => oklchToHex(L, C, H + off))
 }
 
-function buildTheme(accent: string, dark: boolean) {
-  const def = ACCENT_PRIMARY[accent] ?? ACCENT_PRIMARY[DEFAULT_ACCENT]!
+function buildTheme(accent: Accent, dark: boolean) {
+  const def = ACCENT_PRIMARY[accent]
   const L = dark ? def[2] : def[0]
   const C = dark ? def[3] : def[1]
-  const H = ACCENT_HUE[accent] ?? ACCENT_HUE[DEFAULT_ACCENT]!
+  const H = ACCENT_HUE[accent]
 
   const colors = HUE_OFFSETS.map((off) => oklchToHex(L, C, H + off))
 
@@ -226,14 +153,14 @@ function buildTheme(accent: string, dark: boolean) {
 }
 
 export function getBookorbitThemeName(mode: ProjectxThemeMode = 'dark', accent: string = DEFAULT_ACCENT): string {
-  const resolvedAccent = accent in ACCENT_PRIMARY ? accent : DEFAULT_ACCENT
+  const resolvedAccent = resolveAccent(accent)
   return `bookorbit-${mode}-${resolvedAccent}`
 }
 
 export function initChartThemes(): void {
   if (themeRegistered) return
   for (const mode of THEME_MODES) {
-    for (const accent of Object.keys(ACCENT_PRIMARY)) {
+    for (const accent of ACCENT_IDS) {
       registerTheme(getBookorbitThemeName(mode, accent), buildTheme(accent, mode === 'dark'))
     }
   }

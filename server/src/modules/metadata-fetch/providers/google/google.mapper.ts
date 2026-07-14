@@ -1,19 +1,26 @@
 import { MetadataCandidate, MetadataProviderKey } from '@bookorbit/types';
 
+import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../../common/utils/published-date.utils';
 import { GoogleVolumeItem } from './google.types';
 
 function parseYear(dateString: string | undefined): number | undefined {
-  if (!dateString) return undefined;
-  const year = parseInt(dateString.substring(0, 4), 10);
-  if (Number.isNaN(year) || year < 1000 || year > 2200) return undefined;
-  return year;
+  return parsePublishedYear(dateString);
+}
+
+function normalizeCommunityRating(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 5 ? value : undefined;
+}
+
+function normalizeCommunityRatingCount(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 export function mapGoogleVolume(raw: GoogleVolumeItem): MetadataCandidate {
   const info = raw.volumeInfo;
   const identifiers = info.industryIdentifiers ?? [];
 
-  const publishedYear = parseYear(info.publishedDate);
+  const publishedDate = parsePublishedDateKey(info.publishedDate);
+  const publishedYear = publishedDate ? publishedYearFromDateKey(publishedDate) : parseYear(info.publishedDate);
 
   const isbn10 = identifiers.find((i) => i.type === 'ISBN_10')?.identifier;
   const isbn13 = identifiers.find((i) => i.type === 'ISBN_13')?.identifier;
@@ -21,6 +28,8 @@ export function mapGoogleVolume(raw: GoogleVolumeItem): MetadataCandidate {
   const coverUrl = info.imageLinks?.thumbnail
     ? info.imageLinks.thumbnail.replace('http://', 'https://').replace('&edge=curl', '').replace('zoom=1', 'zoom=0')
     : undefined;
+  const communityRating = normalizeCommunityRating(info.averageRating);
+  const communityRatingCount = normalizeCommunityRatingCount(info.ratingsCount);
 
   return {
     provider: MetadataProviderKey.GOOGLE,
@@ -30,6 +39,7 @@ export function mapGoogleVolume(raw: GoogleVolumeItem): MetadataCandidate {
     authors: info.authors,
     description: info.description,
     publisher: info.publisher,
+    publishedDate,
     publishedYear,
     language: info.language,
     pageCount: info.pageCount,
@@ -38,5 +48,7 @@ export function mapGoogleVolume(raw: GoogleVolumeItem): MetadataCandidate {
     genres: info.categories,
     coverUrl,
     sourceUrl: `https://books.google.com/books?id=${raw.id}`,
+    ...(communityRating !== undefined ? { communityRating } : {}),
+    ...(communityRatingCount !== undefined ? { communityRatingCount } : {}),
   };
 }

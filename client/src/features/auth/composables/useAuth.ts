@@ -2,11 +2,18 @@ import { ref } from 'vue'
 import type { AuthUser, AuthResponse } from '@bookorbit/types'
 import { api, getAccessToken, hydrateAccessTokenFromStorage, refreshAccessToken, setAccessToken, setOnAuthFailure } from '@/lib/api'
 import router from '@/router'
+import { cancelPendingDisplaySettingsSync, initDisplaySettingsSync, loadDisplaySettingsFromServer } from '@/composables/useDisplaySettingsSync'
+import { cancelPendingThemeSync, initThemeSync, loadFromServer } from '@/composables/useThemeSync'
+import { cancelPendingLocaleSync, hydrateLocalePreference, initLocaleSync } from '@/composables/useLocaleSync'
 import { useSetupStatus } from './useSetupStatus'
 import { disconnectAuthorEnrichmentSocket } from '@/features/settings/composables/useAuthorEnrichmentStatus'
 import { disconnectBookMetadataFetchSocket } from '@/features/book-metadata-fetch/composables/useBookMetadataFetchStatus'
 import { clearBookorbitRuntimeCaches, clearPwaUserState } from '@/features/pwa/lib/native-app'
 import { shouldRefreshAccessToken } from '../lib/access-token'
+import { resetWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
+import { resetLibraries } from '@/features/library/composables/useLibraries'
+import { resetSmartScopes } from '@/features/smart-scope/composables/useSmartScopes'
+import { resetCollections } from '@/features/collection/composables/useCollections'
 
 const SESSION_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 const FOREGROUND_REFRESH_DEBOUNCE_MS = 30 * 1000
@@ -59,13 +66,20 @@ if (typeof document !== 'undefined') {
 }
 
 function clearAuth() {
+  cancelPendingThemeSync()
+  cancelPendingDisplaySettingsSync()
+  cancelPendingLocaleSync()
   stopSessionRefresh()
+  resetLibraries()
+  resetSmartScopes()
+  resetCollections()
   user.value = null
   setAccessToken(null)
   clearPwaUserState()
   void clearBookorbitRuntimeCaches()
   disconnectAuthorEnrichmentSocket()
   disconnectBookMetadataFetchSocket()
+  resetWhatsNew()
 }
 
 setOnAuthFailure(() => {
@@ -80,6 +94,22 @@ async function me(): Promise<void> {
   user.value = await res.json()
 }
 
+async function hydratePreferences(options: { refreshUser?: boolean } = {}): Promise<void> {
+  if (options.refreshUser) {
+    await me()
+  }
+
+  if (user.value?.settings?.syncThemePreferences) {
+    await loadFromServer()
+    await loadDisplaySettingsFromServer()
+  }
+  await hydrateLocalePreference()
+
+  initThemeSync()
+  initDisplaySettingsSync()
+  initLocaleSync()
+}
+
 export function useAuth() {
   async function init(): Promise<void> {
     isLoading.value = true
@@ -88,6 +118,7 @@ export function useAuth() {
       if (getAccessToken() && !shouldRefreshAccessToken(getAccessToken())) {
         try {
           await me()
+          await hydratePreferences()
           startSessionRefresh()
           return
         } catch {
@@ -97,10 +128,14 @@ export function useAuth() {
 
       await refreshAccessToken()
       await me()
+      await hydratePreferences()
       startSessionRefresh()
     } catch {
       // no valid session
     } finally {
+      initThemeSync()
+      initDisplaySettingsSync()
+      initLocaleSync()
       isLoading.value = false
     }
   }
@@ -121,6 +156,7 @@ export function useAuth() {
     const data: AuthResponse = await res.json()
     setAccessToken(data.accessToken)
     user.value = data.user
+    await hydratePreferences({ refreshUser: true })
     startSessionRefresh()
 
     if (data.user.isDefaultPassword) {
@@ -157,6 +193,7 @@ export function useAuth() {
     const data: AuthResponse = await res.json()
     setAccessToken(data.accessToken)
     user.value = data.user
+    await hydratePreferences()
     startSessionRefresh()
 
     useSetupStatus().markSetupComplete()
@@ -196,6 +233,7 @@ export function useAuth() {
     const data: AuthResponse = await res.json()
     setAccessToken(data.accessToken)
     user.value = data.user
+    await hydratePreferences()
     startSessionRefresh()
     router.push('/')
   }

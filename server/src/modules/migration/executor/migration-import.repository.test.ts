@@ -24,8 +24,9 @@ describe('MigrationImportRepository', () => {
     const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
     const values = vi.fn().mockReturnValue({ onConflictDoUpdate });
     const insert = vi.fn().mockReturnValue({ values });
+    const execute = vi.fn().mockResolvedValue({ rowCount: 0, rows: [] });
 
-    const repo = new MigrationImportRepository({ insert } as never);
+    const repo = new MigrationImportRepository({ insert, execute } as never);
     await repo.batchUpsertBookMetadata([
       {
         bookId: 1,
@@ -54,6 +55,34 @@ describe('MigrationImportRepository', () => {
     );
   });
 
+  it('resolves series identity for batch metadata imports', async () => {
+    const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+    const values = vi.fn().mockReturnValue({ onConflictDoUpdate });
+    const insert = vi.fn().mockReturnValue({ values });
+    const db = { insert };
+    const seriesIdentity = {
+      resolveMetadataPatch: vi.fn().mockResolvedValue({ bookId: 1, seriesName: 'Dune', seriesId: 88 }),
+    };
+    const seriesMemberships = {
+      syncPrimaryFromMetadata: vi.fn().mockResolvedValue([]),
+    };
+
+    const repo = new MigrationImportRepository(db as never, seriesIdentity as never, seriesMemberships as never);
+    await repo.batchUpsertBookMetadata([{ bookId: 1, seriesName: '  Dune  ' }]);
+
+    expect(seriesIdentity.resolveMetadataPatch).toHaveBeenCalledWith({ bookId: 1, seriesName: '  Dune  ' }, db);
+    expect(seriesMemberships.syncPrimaryFromMetadata).toHaveBeenCalledWith(1, db);
+    expect(values).toHaveBeenCalledWith({ bookId: 1, seriesName: 'Dune', seriesId: 88 });
+    expect(onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        set: expect.objectContaining({
+          seriesName: expect.anything(),
+          seriesId: expect.anything(),
+        }),
+      }),
+    );
+  });
+
   it('clearUserBookStatuses no-ops for empty targets and deduplicates ids otherwise', async () => {
     const where = vi.fn().mockResolvedValue(undefined);
     const deleteFn = vi.fn().mockReturnValue({ where });
@@ -68,6 +97,33 @@ describe('MigrationImportRepository', () => {
     expect(where).toHaveBeenCalledTimes(1);
   });
 
+  it('clearUserBookRatings no-ops for empty targets and deduplicates ids otherwise', async () => {
+    const where = vi.fn().mockResolvedValue(undefined);
+    const deleteFn = vi.fn().mockReturnValue({ where });
+    const repo = new MigrationImportRepository({ delete: deleteFn } as never);
+
+    await repo.clearUserBookRatings([], [1, 2]);
+    await repo.clearUserBookRatings([1], []);
+    expect(deleteFn).not.toHaveBeenCalled();
+
+    await repo.clearUserBookRatings([1, 1, 2], [10, 10, 11]);
+    expect(deleteFn).toHaveBeenCalledTimes(1);
+    expect(where).toHaveBeenCalledTimes(1);
+  });
+
+  it('chunks user/book clear queries for large migration runs', async () => {
+    const where = vi.fn().mockResolvedValue(undefined);
+    const deleteFn = vi.fn().mockReturnValue({ where });
+    const repo = new MigrationImportRepository({ delete: deleteFn } as never);
+    const userIds = Array.from({ length: 501 }, (_, index) => index + 1);
+    const bookIds = Array.from({ length: 1001 }, (_, index) => index + 1);
+
+    await repo.clearUserBookStatuses(userIds, bookIds);
+
+    expect(deleteFn).toHaveBeenCalledTimes(6);
+    expect(where).toHaveBeenCalledTimes(6);
+  });
+
   it('batchUpsertAuthors returns name-to-id mapping from inserted rows', async () => {
     const returning = vi.fn().mockResolvedValue([
       { id: 10, name: 'Frank Herbert' },
@@ -76,8 +132,9 @@ describe('MigrationImportRepository', () => {
     const onConflictDoUpdate = vi.fn().mockReturnValue({ returning });
     const values = vi.fn().mockReturnValue({ onConflictDoUpdate });
     const insert = vi.fn().mockReturnValue({ values });
+    const execute = vi.fn().mockResolvedValue({ rowCount: 0, rows: [] });
 
-    const repo = new MigrationImportRepository({ insert } as never);
+    const repo = new MigrationImportRepository({ execute, insert } as never);
     const map = await repo.batchUpsertAuthors([
       { name: 'Frank Herbert', sortName: 'Herbert, Frank' },
       { name: 'Brian Herbert', sortName: 'Herbert, Brian' },
@@ -117,6 +174,37 @@ describe('MigrationImportRepository', () => {
     expect(result.audiobookPrimaryFilesByBookId).toEqual(new Map([[2, 202]]));
   });
 
+  it('chunks primary file lookups for large matched book sets', async () => {
+    const where = vi
+      .fn()
+      .mockResolvedValueOnce([{ bookId: 1, primaryFileId: 101, primaryFileFormat: 'epub' }])
+      .mockResolvedValueOnce([{ bookId: 501, primaryFileId: 50101, primaryFileFormat: 'm4b' }])
+      .mockResolvedValueOnce([{ bookId: 1001, primaryFileId: 100101, primaryFileFormat: 'mp3' }]);
+    const leftJoin = vi.fn().mockReturnValue({ where });
+    const from = vi.fn().mockReturnValue({ leftJoin });
+    const select = vi.fn().mockReturnValue({ from });
+    const repo = new MigrationImportRepository({ select } as never);
+    const bookIds = Array.from({ length: 1001 }, (_, index) => index + 1);
+    bookIds.push(1, Number.NaN);
+
+    const result = await repo.fetchTargetBookPrimaryFiles(bookIds);
+
+    expect(where).toHaveBeenCalledTimes(3);
+    expect(result.primaryFilesByBookId).toEqual(
+      new Map([
+        [1, 101],
+        [501, 50101],
+        [1001, 100101],
+      ]),
+    );
+    expect(result.audiobookPrimaryFilesByBookId).toEqual(
+      new Map([
+        [501, 50101],
+        [1001, 100101],
+      ]),
+    );
+  });
+
   it('groups target files by book id and supports empty input short-circuit', async () => {
     const where = vi.fn().mockResolvedValue([
       { id: 11, bookId: 1, hash: 'h1', absolutePath: '/books/1.epub' },
@@ -143,6 +231,26 @@ describe('MigrationImportRepository', () => {
     );
   });
 
+  it('chunks target file lookups for large matched book sets', async () => {
+    const where = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: 11, bookId: 1, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub' }])
+      .mockResolvedValueOnce([{ id: 5011, bookId: 501, hash: 'h501', absolutePath: '/books/501.epub', format: 'epub' }])
+      .mockResolvedValueOnce([{ id: 10011, bookId: 1001, hash: 'h1001', absolutePath: '/books/1001.epub', format: 'epub' }]);
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+    const repo = new MigrationImportRepository({ select } as never);
+    const bookIds = Array.from({ length: 1001 }, (_, index) => index + 1);
+    bookIds.push(1);
+
+    const result = await repo.fetchTargetBookFiles(bookIds);
+
+    expect(where).toHaveBeenCalledTimes(3);
+    expect(result.get(1)).toEqual([{ id: 11, hash: 'h1', absolutePath: '/books/1.epub', format: 'epub' }]);
+    expect(result.get(501)).toEqual([{ id: 5011, hash: 'h501', absolutePath: '/books/501.epub', format: 'epub' }]);
+    expect(result.get(1001)).toEqual([{ id: 10011, hash: 'h1001', absolutePath: '/books/1001.epub', format: 'epub' }]);
+  });
+
   it('returns library-id map for book ids and skips query for empty input', async () => {
     const where = vi.fn().mockResolvedValue([
       { id: 1, libraryId: 10 },
@@ -160,6 +268,28 @@ describe('MigrationImportRepository', () => {
         [2, 20],
       ]),
     );
+  });
+
+  it('chunks library-id lookups for large matched book sets', async () => {
+    const where = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: 1, libraryId: 10 }])
+      .mockResolvedValueOnce([{ id: 501, libraryId: 50 }])
+      .mockResolvedValueOnce([{ id: 1001, libraryId: 100 }]);
+    const from = vi.fn().mockReturnValue({ where });
+    const select = vi.fn().mockReturnValue({ from });
+    const repo = new MigrationImportRepository({ select } as never);
+    const bookIds = Array.from({ length: 1001 }, (_, index) => index + 1);
+    bookIds.push(1);
+
+    await expect(repo.fetchLibraryIdsByBookIds(bookIds)).resolves.toEqual(
+      new Map([
+        [1, 10],
+        [501, 50],
+        [1001, 100],
+      ]),
+    );
+    expect(where).toHaveBeenCalledTimes(3);
   });
 
   it('upsertCollectionBook reflects whether insert produced a row', async () => {
@@ -184,8 +314,9 @@ describe('MigrationImportRepository', () => {
     const onConflictDoNothing = vi.fn().mockResolvedValue(undefined);
     const values = vi.fn().mockReturnValue({ onConflictDoNothing });
     const insert = vi.fn().mockReturnValue({ values });
+    const execute = vi.fn().mockResolvedValue({ rowCount: 0, rows: [] });
 
-    const repo = new MigrationImportRepository({ delete: deleteFn, insert } as never);
+    const repo = new MigrationImportRepository({ delete: deleteFn, execute, insert } as never);
 
     await repo.deleteBookAuthors(1);
     await repo.deleteBookNarrators(1);
@@ -303,6 +434,7 @@ describe('MigrationImportRepository', () => {
       .mockResolvedValueOnce([{ id: 102 }])
       .mockResolvedValueOnce([{ id: 103 }])
       .mockResolvedValueOnce([{ id: 104 }])
+      .mockResolvedValueOnce([{ id: 105, userId: 1 }])
       .mockResolvedValueOnce([{ id: 500 }]);
     const onConflictDoUpdate = vi.fn().mockReturnValue({ returning });
     const onConflictDoNothing = vi.fn().mockReturnValue({ returning });
@@ -312,8 +444,9 @@ describe('MigrationImportRepository', () => {
     const where = vi.fn().mockResolvedValue([{ id: 7, userId: 10, name: 'Sci-fi' }]);
     const from = vi.fn().mockReturnValue({ where });
     const select = vi.fn().mockReturnValue({ from });
+    const execute = vi.fn().mockResolvedValue({ rowCount: 0, rows: [] });
 
-    const repo = new MigrationImportRepository({ insert, select } as never);
+    const repo = new MigrationImportRepository({ execute, insert, select } as never);
 
     await repo.upsertBookMetadata(1, { title: 'Dune' });
     await expect(repo.upsertAuthor({ name: 'Frank Herbert', sortName: 'Herbert, Frank' } as never)).resolves.toEqual({ id: 101 });
@@ -332,6 +465,7 @@ describe('MigrationImportRepository', () => {
     expect(insert).toHaveBeenCalledWith(schema.genres);
     expect(insert).toHaveBeenCalledWith(schema.tags);
     expect(insert).toHaveBeenCalledWith(schema.annotations);
+    expect(insert).toHaveBeenCalledWith(schema.annotationPositions);
     expect(insert).toHaveBeenCalledWith(schema.collections);
     expect(select).toHaveBeenCalled();
   });
@@ -365,8 +499,9 @@ describe('MigrationImportRepository', () => {
     const insert = vi.fn().mockReturnValue({ values });
     const where = vi.fn().mockResolvedValue(undefined);
     const deleteFn = vi.fn().mockReturnValue({ where });
+    const execute = vi.fn().mockResolvedValue({ rowCount: 0, rows: [] });
 
-    const repo = new MigrationImportRepository({ insert, delete: deleteFn } as never);
+    const repo = new MigrationImportRepository({ execute, insert, delete: deleteFn } as never);
 
     await repo.batchUpsertBookMetadata([]);
     await repo.batchDeleteBookAuthors([]);
@@ -401,7 +536,8 @@ describe('MigrationImportRepository', () => {
   it('runs batch user-state write methods for non-empty and empty batches', async () => {
     const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
     const onConflictDoNothing = vi.fn().mockResolvedValue(undefined);
-    const values = vi.fn().mockReturnValue({ onConflictDoUpdate, onConflictDoNothing });
+    const returning = vi.fn().mockResolvedValue([{ id: 1, userId: 1 }]);
+    const values = vi.fn().mockReturnValue({ onConflictDoUpdate, onConflictDoNothing, returning });
     const insert = vi.fn().mockReturnValue({ values });
     const repo = new MigrationImportRepository({ insert } as never);
 
@@ -427,6 +563,7 @@ describe('MigrationImportRepository', () => {
     expect(insert).toHaveBeenCalledWith(schema.audiobookProgress);
     expect(insert).toHaveBeenCalledWith(schema.bookmarks);
     expect(insert).toHaveBeenCalledWith(schema.annotations);
+    expect(insert).toHaveBeenCalledWith(schema.annotationPositions);
     expect(insert).toHaveBeenCalledWith(schema.collectionBooks);
   });
 });

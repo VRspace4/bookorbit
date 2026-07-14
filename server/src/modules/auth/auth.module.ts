@@ -16,6 +16,7 @@ import { MagicLinkRepository } from './magic-link.repository';
 import { MagicLinkService } from './magic-link.service';
 import { BackchannelLogoutService } from './oidc/backchannel-logout.service';
 import { OidcClaimExtractorService } from './oidc/oidc-claim-extractor.service';
+import { OidcCleanupJob } from './oidc/oidc-cleanup.job';
 import { OidcCleanupService } from './oidc/oidc-cleanup.service';
 import { OidcDiscoveryService } from './oidc/oidc-discovery.service';
 import { OidcGroupMappingService } from './oidc/oidc-group-mapping.service';
@@ -57,6 +58,7 @@ import { OidcTokenValidatorService } from './oidc/oidc-token-validator.service';
     OidcGroupMappingService,
     BackchannelLogoutService,
     OidcCleanupService,
+    OidcCleanupJob,
   ],
   exports: [AuthService],
 })

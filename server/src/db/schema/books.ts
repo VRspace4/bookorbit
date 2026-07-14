@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { bigint, check, foreignKey, index, integer, pgTable, serial, timestamp, unique, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
+import { bigint, check, foreignKey, index, integer, numeric, pgTable, serial, timestamp, unique, uniqueIndex, varchar } from 'drizzle-orm/pg-core';
 
 import { libraryFolders, libraries } from './libraries';
 
@@ -14,6 +14,7 @@ export const books = pgTable(
       .notNull()
       .references(() => libraryFolders.id, { onDelete: 'cascade' }),
     primaryFileId: integer('primary_file_id').references(() => bookFiles.id, { onDelete: 'set null' }),
+    primaryAuthorSortName: varchar('primary_author_sort_name', { length: 500 }),
     folderPath: varchar('folder_path', { length: 4096 }).notNull(),
     status: varchar('status', { length: 20 }).notNull().default('present'),
     addedAt: timestamp('added_at', { withTimezone: true }).defaultNow().notNull(),
@@ -28,6 +29,15 @@ export const books = pgTable(
     index('books_primary_file_id_idx').on(t.primaryFileId),
     index('books_library_status_idx').on(t.libraryId, t.status),
     index('books_library_added_at_idx').on(t.libraryId, sql`${t.addedAt} desc`),
+    index('books_library_visible_added_id_idx')
+      .on(t.libraryId, sql`${t.addedAt} desc`, t.id)
+      .where(sql`${t.status} <> 'processing'`),
+    index('books_library_author_sort_id_idx')
+      .on(t.libraryId, sql`${t.primaryAuthorSortName} asc nulls last`, t.id)
+      .where(sql`${t.status} <> 'processing'`),
+    index('books_library_author_sort_desc_id_idx')
+      .on(t.libraryId, sql`${t.primaryAuthorSortName} desc nulls last`, t.id)
+      .where(sql`${t.status} <> 'processing'`),
     foreignKey({
       columns: [t.libraryFolderId, t.libraryId],
       foreignColumns: [libraryFolders.id, libraryFolders.libraryId],
@@ -49,7 +59,7 @@ export const bookFiles = pgTable(
       .references(() => libraryFolders.id, { onDelete: 'cascade' }),
     absolutePath: varchar('absolute_path', { length: 4096 }).notNull(),
     relPath: varchar('rel_path', { length: 4096 }),
-    ino: bigint('ino', { mode: 'number' }).notNull(),
+    ino: numeric('ino', { precision: 20, scale: 0, mode: 'bigint' }).notNull(),
     sizeBytes: bigint('size_bytes', { mode: 'number' }),
     mtime: timestamp('mtime', { withTimezone: true }),
     fileHash: varchar('file_hash', { length: 32 }),
@@ -76,7 +86,9 @@ export const bookFiles = pgTable(
       columns: [t.bookId, t.libraryFolderId],
       foreignColumns: [books.id, books.libraryFolderId],
       name: 'book_files_book_folder_consistency_fk',
-    }).onUpdate('cascade'),
+    })
+      .onUpdate('cascade')
+      .onDelete('cascade'),
     check('book_files_role_chk', sql`${t.role} in ('content', 'cover', 'metadata', 'supplement')`),
     check('book_files_size_bytes_nonnegative_chk', sql`${t.sizeBytes} is null or ${t.sizeBytes} >= 0`),
     check('book_files_duration_seconds_nonnegative_chk', sql`${t.durationSeconds} is null or ${t.durationSeconds} >= 0`),

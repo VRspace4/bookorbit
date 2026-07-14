@@ -6,6 +6,7 @@ import type { BookQuery } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
 import { AUDITABLE_KEY } from '../../common/decorators/auditable.decorator';
 import { CollectionController } from './collection.controller';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 const USER: RequestUser = {
   id: 1,
@@ -20,11 +21,14 @@ const USER: RequestUser = {
   provisioningMethod: 'local',
   isSuperuser: false,
   permissions: [],
+
+  contentFilters: EMPTY_CONTENT_FILTER_RULES,
 };
 
 function makeController() {
   const service = {
     findAll: vi.fn(),
+    findAllWithSelectionMembership: vi.fn(),
     findOne: vi.fn(),
     create: vi.fn(),
     reorder: vi.fn(),
@@ -34,6 +38,7 @@ function makeController() {
     removeBooks: vi.fn(),
     getBooks: vi.fn(),
     queryBooks: vi.fn(),
+    queryJumpBuckets: vi.fn(),
   };
   const controller = new CollectionController(service as never);
   return { controller, service };
@@ -75,6 +80,16 @@ describe('CollectionController', () => {
       await expectBadRequest(() => controller.findAll(USER, '-1,2'));
       await expectBadRequest(() => controller.findAll(USER, '0,2'));
       await expectBadRequest(() => controller.findAll(USER, '   '));
+    });
+
+    it('delegates membership payloads to the selection-aware service method', async () => {
+      const { controller, service } = makeController();
+      const selection = { query: { libraryId: 5, q: 'dune' } };
+      service.findAllWithSelectionMembership.mockResolvedValue([]);
+
+      await controller.findAllWithMembership(selection, USER);
+
+      expect(service.findAllWithSelectionMembership).toHaveBeenCalledWith(selection, USER);
     });
   });
 
@@ -138,6 +153,18 @@ describe('CollectionController', () => {
     expect(service.queryBooks).toHaveBeenCalledWith(10, USER, query);
   });
 
+  it('forwards jump bucket queries to the collection service', async () => {
+    const { controller, service } = makeController();
+    const query: BookQuery = {
+      sort: [{ field: 'title', dir: 'asc' }],
+      pagination: { page: 0, size: 50 },
+    };
+
+    await controller.queryJumpBuckets(10, query, USER);
+
+    expect(service.queryJumpBuckets).toHaveBeenCalledWith(10, USER, query);
+  });
+
   describe('mutation endpoints', () => {
     it('delegates create, update, remove, reorder, and membership mutations', async () => {
       const { controller, service } = makeController();
@@ -174,11 +201,11 @@ describe('CollectionController', () => {
     };
     const addBooksMeta = Reflect.getMetadata(AUDITABLE_KEY, CollectionController.prototype.addBooks) as {
       getResourceId: (req: { params: { id: string } }) => number;
-      description: (req: { params: { id: string }; body: { bookIds?: number[] } }) => string;
+      description: (req: { params: { id: string }; body: { bookIds?: number[]; query?: unknown } }) => string;
     };
     const removeBooksMeta = Reflect.getMetadata(AUDITABLE_KEY, CollectionController.prototype.removeBooks) as {
       getResourceId: (req: { params: { id: string } }) => number;
-      description: (req: { params: { id: string }; body: { bookIds?: number[] } }) => string;
+      description: (req: { params: { id: string }; body: { bookIds?: number[]; query?: unknown } }) => string;
     };
 
     expect(createMeta.description({} as never, { name: 'Favorites' })).toBe("Created collection 'Favorites'");
@@ -188,7 +215,13 @@ describe('CollectionController', () => {
     expect(removeMeta.description({ params: { id: '10' } })).toBe('Deleted collection #10');
     expect(addBooksMeta.getResourceId({ params: { id: '10' } })).toBe(10);
     expect(addBooksMeta.description({ params: { id: '10' }, body: { bookIds: [1, 2] } })).toBe('Added 2 books to collection #10');
+    expect(addBooksMeta.description({ params: { id: '10' }, body: { query: { libraryId: 5 } } })).toBe('Added all matching books to collection #10');
+    expect(addBooksMeta.description({ params: { id: '10' }, body: {} })).toBe('Added 0 books to collection #10');
     expect(removeBooksMeta.getResourceId({ params: { id: '10' } })).toBe(10);
     expect(removeBooksMeta.description({ params: { id: '10' }, body: { bookIds: [1] } })).toBe('Removed 1 book from collection #10');
+    expect(removeBooksMeta.description({ params: { id: '10' }, body: { query: { libraryId: 5 } } })).toBe(
+      'Removed all matching books from collection #10',
+    );
+    expect(removeBooksMeta.description({ params: { id: '10' }, body: {} })).toBe('Removed 0 books from collection #10');
   });
 });

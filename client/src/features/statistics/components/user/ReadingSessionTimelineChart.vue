@@ -1,14 +1,25 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { formatDate } from '@/i18n/formatters'
 import VChart from 'vue-echarts'
-import { CalendarRange } from 'lucide-vue-next'
+import { CalendarRange } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import type { UserReadingSessionTimeline, UserReadingSessionTimelineItem } from '@bookorbit/types'
+import type { UserReadingSessionTimeline, UserReadingSessionTimelineItem, ReadingSessionSourceBucket } from '@bookorbit/types'
+import { READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 
+import { useThemeStore } from '@/stores/theme'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
-import { getFormatColor } from '@/features/book/lib/format-colors'
+import {
+  DEFAULT_BREAKDOWN_DIMENSION,
+  getBreakdownColor,
+  getBreakdownSeries,
+  type BreakdownDimension,
+  type BreakdownSeries,
+} from '../../lib/breakdown'
 import { fetchUserReadingSessionTimeline, updateUserReadingSessionTimelineSession } from '../../api/statistics.api'
 import { useStatisticsConfig } from '../../composables/useStatisticsConfig'
+import BreakdownSelect from '../BreakdownSelect.vue'
 import ChartCard from '../ChartCard.vue'
 import ChartEmptyState from '../ChartEmptyState.vue'
 
@@ -22,6 +33,7 @@ interface SessionSegment {
   bookId: number
   bookTitle: string | null
   bookFormat: string | null
+  bookSource: ReadingSessionSourceBucket
   dayIndex: number
   startMinute: number
   endMinute: number
@@ -52,12 +64,16 @@ interface PointerOffset {
   y: number
 }
 
+const { t } = useI18n()
 const { filters } = useStatisticsConfig()
 const { coverUrl } = useCoverVersions()
+const themeStore = useThemeStore()
+const themeKey = computed(() => `${themeStore.theme}:${themeStore.accent}`)
+const dimension = ref<BreakdownDimension>(DEFAULT_BREAKDOWN_DIMENSION)
 
 const now = new Date()
-const selectedYear = ref(getUtcIsoWeekYear(now))
-const selectedWeek = ref(getUtcIsoWeek(now))
+const selectedYear = ref(getIsoWeekYear(now))
+const selectedWeek = ref(getIsoWeek(now))
 
 const loading = ref(true)
 const error = ref(false)
@@ -71,25 +87,30 @@ const option = shallowRef({})
 const timeline = ref<UserReadingSessionTimeline>({
   year: selectedYear.value,
   week: selectedWeek.value,
-  weekStart: formatYmd(getUtcIsoWeekStart(selectedYear.value, selectedWeek.value)),
-  weekEnd: formatYmd(addUtcDays(getUtcIsoWeekStart(selectedYear.value, selectedWeek.value), 6)),
+  weekStart: formatYmd(getIsoWeekStart(selectedYear.value, selectedWeek.value)),
+  weekEnd: formatYmd(addDays(getIsoWeekStart(selectedYear.value, selectedWeek.value), 6)),
   items: [],
 })
 
 const isEmpty = computed(() => timeline.value.items.length === 0)
 
-const weekStartDate = computed(() => parseYmdUtc(timeline.value.weekStart) ?? getUtcIsoWeekStart(selectedYear.value, selectedWeek.value))
-const weekEndExclusive = computed(() => addUtcDays(weekStartDate.value, 7))
+const legendItems = computed<BreakdownSeries[]>(() => {
+  const formatKeys = [...new Set(timeline.value.items.map((item) => (item.bookFormat ?? 'UNKNOWN').toUpperCase()))].sort()
+  return getBreakdownSeries(dimension.value, themeKey.value, formatKeys)
+})
+
+const weekStartDate = computed(() => parseYmdLocal(timeline.value.weekStart) ?? getIsoWeekStart(selectedYear.value, selectedWeek.value))
+const weekEndExclusive = computed(() => addDays(weekStartDate.value, 7))
 
 const weekRangeLabel = computed(() => `${formatDateLabel(timeline.value.weekStart)} - ${formatDateLabel(timeline.value.weekEnd)}`)
 
 const weekOptions = computed(() => {
-  const count = getUtcIsoWeeksInYear(selectedYear.value)
+  const count = getIsoWeeksInYear(selectedYear.value)
   return Array.from({ length: count }, (_, i) => i + 1)
 })
 
 const yearOptions = computed(() => {
-  const currentIsoYear = getUtcIsoWeekYear(new Date())
+  const currentIsoYear = getIsoWeekYear(new Date())
   const years = Array.from({ length: 11 }, (_, i) => currentIsoYear - i)
   if (!years.includes(selectedYear.value)) {
     years.push(selectedYear.value)
@@ -109,7 +130,7 @@ const sessionsById = computed(() => {
 })
 
 watch(selectedYear, (year) => {
-  const maxWeek = getUtcIsoWeeksInYear(year)
+  const maxWeek = getIsoWeeksInYear(year)
   if (selectedWeek.value > maxWeek) selectedWeek.value = maxWeek
 })
 
@@ -127,9 +148,9 @@ watch(dragEnabled, (enabled) => {
 })
 
 watch(
-  [segments, dragPreview, dragEnabled],
+  [segments, dragPreview, dragEnabled, dimension, themeKey],
   () => {
-    option.value = makeOption(segments.value, dragPreview.value)
+    option.value = makeOption(segments.value, dragPreview.value, dimension.value, themeKey.value)
   },
   { immediate: true },
 )
@@ -154,16 +175,17 @@ async function loadTimeline() {
   }
 }
 
-function makeOption(data: SessionSegment[], preview: DragPreview | null) {
+function makeOption(data: SessionSegment[], preview: DragPreview | null, dim: BreakdownDimension, themeKeyValue: string) {
   const seriesData = data.map((segment) => ({
     value: [segment.dayIndex, segment.startMinute, segment.endMinute, segment.track, segment.totalTracks, segment.durationMinutes],
     sessionId: segment.sessionId,
     bookId: segment.bookId,
     bookTitle: segment.bookTitle,
     bookFormat: segment.bookFormat,
+    bookSource: segment.bookSource,
     durationMinutes: segment.durationMinutes,
     itemStyle: {
-      color: getFormatColor(segment.bookFormat),
+      color: getBreakdownColor(dim, dim === 'source' ? segment.bookSource : (segment.bookFormat ?? 'UNKNOWN').toUpperCase(), themeKeyValue),
       opacity: 0.9,
     },
   }))
@@ -206,7 +228,14 @@ function makeOption(data: SessionSegment[], preview: DragPreview | null) {
     tooltip: {
       trigger: 'item',
       formatter: (params: {
-        data: { bookId?: number; bookTitle?: string | null; bookFormat?: string | null; durationMinutes?: number; value: number[] }
+        data: {
+          bookId?: number
+          bookTitle?: string | null
+          bookFormat?: string | null
+          bookSource?: ReadingSessionSourceBucket
+          durationMinutes?: number
+          value: number[]
+        }
       }) => {
         const d = params.data
         if (!d || !d.value) return ''
@@ -215,6 +244,7 @@ function makeOption(data: SessionSegment[], preview: DragPreview | null) {
         const duration = formatDuration(Math.max(0, d.durationMinutes ?? 0))
         const title = escapeHtml(d.bookTitle ?? 'Reading session')
         const format = escapeHtml(d.bookFormat ?? 'Unknown')
+        const source = d.bookSource ? READING_SESSION_SOURCE_BUCKET_LABELS[d.bookSource] : ''
         const cover = d.bookId
           ? `<img src="${coverUrl(d.bookId)}" alt="Cover" style="width:32px;height:48px;object-fit:cover;border-radius:4px;" />`
           : ''
@@ -226,7 +256,7 @@ function makeOption(data: SessionSegment[], preview: DragPreview | null) {
           `<div style="font-weight:600;margin-bottom:2px;">${title}</div>`,
           `<div style="opacity:0.85;">${start} - ${end}</div>`,
           `<div style="opacity:0.85;">${duration}</div>`,
-          `<div style="opacity:0.72;">${format}</div>`,
+          `<div style="opacity:0.72;">${format}${source ? ` · ${source}` : ''}</div>`,
           '</div>',
           '</div>',
         ].join('')
@@ -329,10 +359,10 @@ function renderTimelineItem(
 }
 
 function shiftWeek(delta: number) {
-  const base = getUtcIsoWeekStart(selectedYear.value, selectedWeek.value)
-  base.setUTCDate(base.getUTCDate() + delta * 7)
-  selectedYear.value = getUtcIsoWeekYear(base)
-  selectedWeek.value = getUtcIsoWeek(base)
+  const base = getIsoWeekStart(selectedYear.value, selectedWeek.value)
+  base.setDate(base.getDate() + delta * 7)
+  selectedYear.value = getIsoWeekYear(base)
+  selectedWeek.value = getIsoWeek(base)
 }
 
 function handleChartMouseDown(params: { seriesId?: string; dataIndex?: number; event?: unknown } | null) {
@@ -423,7 +453,7 @@ async function commitDrag() {
 
   if (!state || !preview) return
   if (preview.hasConflict) {
-    toast.error('Session overlaps another session in this window')
+    toast.error(t('statistics.charts.readingSessionTimeline.overlapError'))
     return
   }
 
@@ -435,7 +465,7 @@ async function commitDrag() {
       items: timeline.value.items.map((item) => (item.sessionId === updated.sessionId ? updated : item)),
     }
   } catch {
-    toast.error('Failed to move session')
+    toast.error(t('statistics.charts.readingSessionTimeline.moveError'))
     await loadTimeline()
   } finally {
     persistLoading.value = false
@@ -472,16 +502,16 @@ function buildSegments(items: UserReadingSessionTimelineItem[], weekStart: Date,
 
     let cursor = new Date(clippedStart)
     while (cursor < clippedEnd) {
-      const dayStart = startOfUtcDay(cursor)
-      const nextDay = addUtcDays(dayStart, 1)
+      const dayStart = startOfDay(cursor)
+      const nextDay = addDays(dayStart, 1)
       const segmentEnd = clippedEnd < nextDay ? clippedEnd : nextDay
-      const dayIndex = (cursor.getUTCDay() + 6) % 7
+      const dayIndex = (cursor.getDay() + 6) % 7
 
-      const startMinute = cursor.getUTCHours() * 60 + cursor.getUTCMinutes() + cursor.getUTCSeconds() / 60
+      const startMinute = cursor.getHours() * 60 + cursor.getMinutes() + cursor.getSeconds() / 60
       const endMinute =
         segmentEnd.getTime() === nextDay.getTime()
           ? MINUTES_PER_DAY
-          : segmentEnd.getUTCHours() * 60 + segmentEnd.getUTCMinutes() + segmentEnd.getUTCSeconds() / 60
+          : segmentEnd.getHours() * 60 + segmentEnd.getMinutes() + segmentEnd.getSeconds() / 60
 
       if (!byDay.has(dayIndex)) byDay.set(dayIndex, [])
       byDay.get(dayIndex)!.push({
@@ -489,6 +519,7 @@ function buildSegments(items: UserReadingSessionTimelineItem[], weekStart: Date,
         bookId: item.bookId,
         bookTitle: item.bookTitle,
         bookFormat: item.bookFormat,
+        bookSource: item.bookSource,
         dayIndex,
         startMinute,
         endMinute: Math.max(startMinute + 0.5, endMinute),
@@ -556,7 +587,7 @@ function formatDateLabel(ymd: string): string {
   if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return ymd
   const [year, month, day] = parts
   const date = new Date(year!, (month ?? 1) - 1, day ?? 1)
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return formatDate(date, { month: 'short', day: 'numeric' })
 }
 
 function formatHourLabel(minutes: number): string {
@@ -598,72 +629,80 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
-function parseYmdUtc(value: string): Date | null {
+function parseYmdLocal(value: string): Date | null {
   const [yearStr, monthStr, dayStr] = value.split('-')
   const year = Number(yearStr)
   const month = Number(monthStr)
   const day = Number(dayStr)
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null
-  return new Date(Date.UTC(year, month - 1, day))
+  return new Date(year, month - 1, day)
 }
 
 function formatYmd(date: Date): string {
-  const y = date.getUTCFullYear()
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const d = String(date.getUTCDate()).padStart(2, '0')
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
   return `${y}-${m}-${d}`
 }
 
-function startOfUtcDay(date: Date): Date {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
 }
 
-function addUtcDays(date: Date, days: number): Date {
+function addDays(date: Date, days: number): Date {
   const next = new Date(date)
-  next.setUTCDate(next.getUTCDate() + days)
+  next.setDate(next.getDate() + days)
   return next
 }
 
-function startOfUtcIsoWeek(date: Date): Date {
-  const start = startOfUtcDay(date)
-  const day = (start.getUTCDay() + 6) % 7
-  start.setUTCDate(start.getUTCDate() - day)
+function startOfIsoWeek(date: Date): Date {
+  const start = startOfDay(date)
+  const day = (start.getDay() + 6) % 7
+  start.setDate(start.getDate() - day)
   return start
 }
 
-function getUtcIsoWeekYear(date: Date): number {
-  const d = startOfUtcDay(date)
-  const day = (d.getUTCDay() + 6) % 7
-  d.setUTCDate(d.getUTCDate() - day + 3)
-  return d.getUTCFullYear()
+function getIsoWeekYear(date: Date): number {
+  const d = startOfDay(date)
+  const day = (d.getDay() + 6) % 7
+  d.setDate(d.getDate() - day + 3)
+  return d.getFullYear()
 }
 
-function getUtcIsoWeek(date: Date): number {
-  const d = startOfUtcDay(date)
-  const day = (d.getUTCDay() + 6) % 7
-  d.setUTCDate(d.getUTCDate() - day + 3)
-  const firstThursday = new Date(Date.UTC(d.getUTCFullYear(), 0, 4))
-  const firstDay = (firstThursday.getUTCDay() + 6) % 7
-  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDay + 3)
+function getIsoWeek(date: Date): number {
+  const d = startOfDay(date)
+  const day = (d.getDay() + 6) % 7
+  d.setDate(d.getDate() - day + 3)
+  const firstThursday = new Date(d.getFullYear(), 0, 4)
+  const firstDay = (firstThursday.getDay() + 6) % 7
+  firstThursday.setDate(firstThursday.getDate() - firstDay + 3)
   return 1 + Math.round((d.getTime() - firstThursday.getTime()) / 604_800_000)
 }
 
-function getUtcIsoWeeksInYear(year: number): number {
-  return getUtcIsoWeek(new Date(Date.UTC(year, 11, 28)))
+function getIsoWeeksInYear(year: number): number {
+  return getIsoWeek(new Date(year, 11, 28))
 }
 
-function getUtcIsoWeekStart(year: number, week: number): Date {
-  const jan4 = new Date(Date.UTC(year, 0, 4))
-  const week1Start = startOfUtcIsoWeek(jan4)
+function getIsoWeekStart(year: number, week: number): Date {
+  const jan4 = new Date(year, 0, 4)
+  const week1Start = startOfIsoWeek(jan4)
   const start = new Date(week1Start)
-  start.setUTCDate(start.getUTCDate() + (week - 1) * 7)
+  start.setDate(start.getDate() + (week - 1) * 7)
   return start
 }
 </script>
 
 <template>
-  <ChartCard title="Reading Session Timeline" :icon="CalendarRange" :color-index="11" :loading="loading" :error="error" :empty="false">
+  <ChartCard
+    :title="t('statistics.charts.readingSessionTimeline.title')"
+    :icon="CalendarRange"
+    :color-index="11"
+    :loading="loading"
+    :error="error"
+    :empty="false"
+  >
     <template #controls>
+      <BreakdownSelect v-model="dimension" />
       <button
         type="button"
         :disabled="persistLoading"
@@ -674,7 +713,7 @@ function getUtcIsoWeekStart(year: number, week: number): Date {
         ]"
         @click="dragEnabled = !dragEnabled"
       >
-        {{ dragEnabled ? 'Drag: On' : 'Drag: Off' }}
+        {{ dragEnabled ? t('statistics.charts.readingSessionTimeline.dragOn') : t('statistics.charts.readingSessionTimeline.dragOff') }}
       </button>
     </template>
 
@@ -687,7 +726,7 @@ function getUtcIsoWeekStart(year: number, week: number): Date {
             :disabled="persistLoading"
             @click="shiftWeek(-1)"
           >
-            Prev
+            {{ t('statistics.charts.readingSessionTimeline.prev') }}
           </button>
 
           <button
@@ -696,7 +735,7 @@ function getUtcIsoWeekStart(year: number, week: number): Date {
             :disabled="persistLoading"
             @click="shiftWeek(1)"
           >
-            Next
+            {{ t('statistics.charts.readingSessionTimeline.next') }}
           </button>
 
           <select
@@ -712,23 +751,33 @@ function getUtcIsoWeekStart(year: number, week: number): Date {
             class="border-border bg-background text-foreground rounded-md border px-2 py-1 text-xs"
             :disabled="persistLoading"
           >
-            <option v-for="week in weekOptions" :key="week" :value="week">Week {{ week }}</option>
+            <option v-for="week in weekOptions" :key="week" :value="week">
+              {{ t('statistics.charts.readingSessionTimeline.week', { week }) }}
+            </option>
           </select>
         </div>
 
-        <p class="text-muted-foreground text-xs">{{ weekRangeLabel }}</p>
+        <div class="flex items-center gap-3">
+          <div class="flex items-center gap-2">
+            <span v-for="entry in legendItems" :key="entry.key" class="text-muted-foreground flex items-center gap-1 text-xs">
+              <span class="inline-block h-2.5 w-2.5 rounded-full" :style="{ backgroundColor: entry.color }" />
+              {{ entry.label }}
+            </span>
+          </div>
+          <p class="text-muted-foreground text-xs">{{ weekRangeLabel }}</p>
+        </div>
       </div>
 
       <p v-if="dragEnabled" class="text-muted-foreground border-border/60 bg-muted/20 rounded-md border px-2 py-1 text-xs">
-        Drag bars to move sessions. Duration is locked and overlapping sessions are rejected.
+        {{ t('statistics.charts.readingSessionTimeline.dragHint') }}
       </p>
 
       <div class="border-border/60 bg-muted/5 min-h-0 flex-1 rounded-lg border p-2">
         <ChartEmptyState
           v-if="isEmpty"
           :icon="CalendarRange"
-          title="No sessions this week"
-          description="Use Prev/Next or the week selector to view a different week."
+          :title="t('statistics.charts.readingSessionTimeline.noSessionsTitle')"
+          :description="t('statistics.charts.readingSessionTimeline.noSessionsDescription')"
         />
 
         <VChart

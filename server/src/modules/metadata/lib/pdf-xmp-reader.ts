@@ -2,12 +2,14 @@ import { XMLParser } from 'fast-xml-parser';
 import { decodePDFRawStream, PDFDocument, PDFName, PDFRawStream, PDFRef } from 'pdf-lib';
 
 import { BOOKORBIT_NS_PREFIX } from '../../../common/bookorbit-ns';
+import { parsePublishedDateKey, parsePublishedYear } from '../../../common/utils/published-date.utils';
 
 export interface XmpParsed {
   title: string | null;
   subtitle: string | null;
   description: string | null;
   publisher: string | null;
+  publishedDate: string | null;
   publishedYear: number | null;
   language: string | null;
   authors: { name: string; sortName: string | null }[];
@@ -23,7 +25,12 @@ export interface XmpParsed {
   goodreadsId: string | null;
   amazonId: string | null;
   hardcoverId: string | null;
+  hardcoverEditionId: string | null;
   openLibraryId: string | null;
+  ranobedbId: string | null;
+  koboId: string | null;
+  lubimyczytacId: string | null;
+  aladinId: string | null;
   itunesId: string | null;
 }
 
@@ -96,6 +103,15 @@ function str(val: unknown): string | null {
   return t ?? null;
 }
 
+function splitListText(val: unknown): string[] {
+  const t = getText(val);
+  if (!t) return [];
+  return t
+    .split(/[,;]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function num(val: unknown): number | null {
   const t = getText(val);
   if (!t) return null;
@@ -105,9 +121,7 @@ function num(val: unknown): number | null {
 
 function parseYear(val: unknown): number | null {
   const t = getText(val);
-  if (!t) return null;
-  const m = t.match(/^(\d{4})/);
-  return m ? parseInt(m[1], 10) : null;
+  return parsePublishedYear(t) ?? null;
 }
 
 export function parseXmp(xmpXml: string): XmpParsed | null {
@@ -133,17 +147,19 @@ export function parseXmp(xmpXml: string): XmpParsed | null {
   }
 
   const px = BOOKORBIT_NS_PREFIX;
+  const tags = getList(merged[`${px}:tags`]);
 
   return {
     title: str(merged['dc:title']),
     subtitle: str(merged[`${px}:subtitle`]),
     description: str(merged['dc:description']),
     publisher: str(merged['dc:publisher']),
+    publishedDate: parsePublishedDateKey(getText(merged['dc:date'])) ?? null,
     publishedYear: parseYear(merged['dc:date']),
     language: str(merged['dc:language']),
     authors: getList(merged['dc:creator']).map((name) => ({ name, sortName: null })),
     genres: getList(merged['dc:subject']),
-    tags: getList(merged[`${px}:tags`]),
+    tags: tags.length ? tags : splitListText(merged['pdf:Keywords']),
     isbn10: str(merged[`${px}:isbn10`]),
     isbn13: str(merged[`${px}:isbn13`]),
     seriesName: str(merged[`${px}:seriesName`]),
@@ -154,7 +170,12 @@ export function parseXmp(xmpXml: string): XmpParsed | null {
     goodreadsId: str(merged[`${px}:goodreadsId`]),
     amazonId: str(merged[`${px}:amazonId`]),
     hardcoverId: str(merged[`${px}:hardcoverId`]),
+    hardcoverEditionId: str(merged[`${px}:hardcoverEditionId`]),
     openLibraryId: str(merged[`${px}:openLibraryId`]),
+    ranobedbId: str(merged[`${px}:ranobedbId`]),
+    koboId: str(merged[`${px}:koboId`]),
+    lubimyczytacId: str(merged[`${px}:lubimyczytacId`]),
+    aladinId: str(merged[`${px}:aladinId`]),
     itunesId: str(merged[`${px}:itunesId`]),
   };
 }

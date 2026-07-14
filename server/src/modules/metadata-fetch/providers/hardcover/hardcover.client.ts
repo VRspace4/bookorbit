@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { toBearerAuthorization } from '../../../../common/utils/bearer-token.utils';
 import { fetchWithThrottle } from '../../fetch-with-throttle';
 import { ProviderThrottleError } from '../../provider-throttle.error';
 import { PROVIDER_DELAYS_MS, PROVIDER_LIMITS, PROVIDER_TIMEOUT_MS } from '../provider-constants';
@@ -37,7 +38,13 @@ const EDITION_FIELDS = `
   isbn_10
   isbn_13
   language { code2 }
+  reading_format_id
+  audio_seconds
 `;
+
+// Fetch several editions on slug lookup so the mapper can rank by format
+// instead of resolving to whatever single edition Hardcover returns first.
+const EDITION_LOOKUP_LIMIT = 50;
 
 const SEARCH_BY_ISBN_QUERY = `
   query BookSearchByIsbn($isbn: String!) {
@@ -62,7 +69,7 @@ const LOOKUP_BY_SLUG_QUERY = `
   query BookBySlug($slug: String!) {
     books(where: { slug: { _eq: $slug } }) {
       ${BOOK_FIELDS}
-      editions(limit: 1) {
+      editions(limit: ${EDITION_LOOKUP_LIMIT}) {
         ${EDITION_FIELDS}
       }
     }
@@ -125,7 +132,7 @@ export class HardcoverClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: apiKey,
+          Authorization: toBearerAuthorization(apiKey),
         },
         body: JSON.stringify({ query, variables }),
         signal: buildRequestSignal(PROVIDER_TIMEOUT_MS.DEFAULT, signal),

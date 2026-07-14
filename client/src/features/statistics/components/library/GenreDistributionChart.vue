@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
-import { Tag } from 'lucide-vue-next'
+import { Tag } from '@lucide/vue'
 
 import { useThemeStore } from '@/stores/theme'
 import { getThemePalette, readCssColor } from '@/lib/echarts'
@@ -9,6 +10,8 @@ import { useGenreDistribution } from '../../composables/useGenreDistribution'
 import ChartCard from '../ChartCard.vue'
 
 const themeStore = useThemeStore()
+const { t } = useI18n()
+
 const { data, loading, error } = useGenreDistribution()
 
 const total = computed(() => data.value.items.reduce((s, d) => s + d.count, 0))
@@ -71,7 +74,15 @@ watchEffect(() => {
 </script>
 
 <template>
-  <ChartCard title="Genre Distribution" :icon="Tag" :color-index="8" :loading :error :empty="!data.items.length" :unknown-count="data.unknownCount">
+  <ChartCard
+    :title="t('statistics.charts.genreDistribution.title')"
+    :icon="Tag"
+    :color-index="8"
+    :loading
+    :error
+    :empty="!data.items.length"
+    :unknown-count="data.unknownCount"
+  >
     <VChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

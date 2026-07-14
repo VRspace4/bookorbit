@@ -28,7 +28,7 @@ describe('BookSortBuilder', () => {
   it('returns default title sort when no sorts are provided', () => {
     const result = service.build([]);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ type: 'sql', text: ' ASC NULLS LAST' });
   });
 
@@ -38,19 +38,20 @@ describe('BookSortBuilder', () => {
     const ascResult = service.build([{ field: 'title', dir: 'asc' }]);
     const descResult = service.build([{ field: 'title', dir: 'desc' }]);
 
-    expect(ascResult).toHaveLength(1);
-    expect(descResult).toHaveLength(1);
+    expect(ascResult).toHaveLength(2);
+    expect(descResult).toHaveLength(2);
     expect(raw).toHaveBeenNthCalledWith(1, 'ASC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
   });
 
-  it('builds author sort with a correlated subquery', () => {
+  it('builds author sort with the denormalized sort key', () => {
     const raw = (sql as unknown as { raw: vi.Mock }).raw;
 
     const result = service.build([{ field: 'author', dir: 'asc' }]);
 
-    expect(result).toHaveLength(1);
-    expect(raw).toHaveBeenCalledWith(expect.stringContaining('SELECT a.sort_name FROM book_authors'));
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ type: 'sql', text: '  NULLS LAST' });
+    expect(raw).toHaveBeenCalledWith('ASC');
   });
 
   it('builds fileSize sort with a correlated subquery', () => {
@@ -58,7 +59,7 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'fileSize', dir: 'desc' }]);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(raw).toHaveBeenCalledWith(expect.stringContaining('SELECT bf.size_bytes FROM book_files'));
   });
 
@@ -67,8 +68,19 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'format', dir: 'asc' }]);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(raw).toHaveBeenCalledWith(expect.stringContaining('SELECT bf.format FROM book_files'));
+  });
+
+  it('builds publishedDate sort with published year fallback', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    const result = service.build([{ field: 'publishedDate', dir: 'asc' }]);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ type: 'sql', text: expect.stringContaining('coalesce(') });
+    expect(result[0]?.text).toContain('make_date(');
+    expect(raw).toHaveBeenCalledWith('ASC');
   });
 
   it('builds random sort with md5 hash expression', () => {
@@ -78,7 +90,7 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'random', dir: 'desc' }], 7);
 
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(3);
     expect(result[0]).toMatchObject({ type: 'sql', text: expect.stringContaining('md5(') });
     expect(result[0]?.values[1]).toBe(Math.floor(new Date('2025-01-15T00:00:00Z').getTime() / 86_400_000) + 7);
     expect(raw).toHaveBeenNthCalledWith(1, 'DESC');
@@ -96,7 +108,7 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'readProgress', dir: 'asc' }], 42);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ type: 'sql', text: expect.stringContaining('SELECT max(rp.percentage)') });
     expect(result[0]?.values[0]).toBe(42);
     expect(raw).toHaveBeenCalledWith('ASC');
@@ -125,7 +137,7 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'startedAt', dir: 'desc' }], 42);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ type: 'sql', text: expect.stringContaining('SELECT ubs.started_at FROM user_book_status ubs') });
     expect(result[0]?.values[0]).toBe(42);
     expect(raw).toHaveBeenCalledWith('DESC');
@@ -141,12 +153,42 @@ describe('BookSortBuilder', () => {
     );
   });
 
+  it('builds readStatus sort that coalesces a missing status row to unread', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    const result = service.build([{ field: 'readStatus', dir: 'asc' }], 42);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({
+      type: 'sql',
+      text: expect.stringContaining('COALESCE((SELECT ubs.status FROM user_book_status ubs'),
+    });
+    expect(result[0]?.text).toContain("), 'unread') ");
+    expect(result[0]?.values[0]).toBe(42);
+    expect(raw).toHaveBeenCalledWith('ASC');
+  });
+
+  it('keeps explicit unread and missing-row books in the same sort group when sorted with a secondary author key', () => {
+    const result = service.build(
+      [
+        { field: 'readStatus', dir: 'asc' },
+        { field: 'author', dir: 'asc' },
+      ],
+      42,
+    );
+
+    expect(result).toHaveLength(3);
+    expect(result[0]?.text).toContain('COALESCE(');
+    expect(result[0]?.text).toContain("'unread'");
+    expect(result[1]?.text).toContain(' NULLS LAST');
+  });
+
   it('adds series name fallback when sorting by seriesIndex without series sort', () => {
     const raw = (sql as unknown as { raw: vi.Mock }).raw;
 
     const result = service.build([{ field: 'seriesIndex', dir: 'desc' }]);
 
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(3);
     expect(raw).toHaveBeenNthCalledWith(1, 'DESC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
   });
@@ -159,7 +201,7 @@ describe('BookSortBuilder', () => {
       { field: 'seriesIndex', dir: 'desc' },
     ]);
 
-    expect(result).toHaveLength(2);
+    expect(result).toHaveLength(3);
     expect(raw).toHaveBeenNthCalledWith(1, 'ASC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
   });
@@ -173,7 +215,7 @@ describe('BookSortBuilder', () => {
       { field: 'publisher', dir: 'asc' },
     ]);
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(raw).toHaveBeenNthCalledWith(1, 'ASC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
     expect(raw).toHaveBeenNthCalledWith(3, 'ASC');
@@ -184,7 +226,7 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'unknown', dir: 'asc' } as never]);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(raw).not.toHaveBeenCalled();
   });
 
@@ -193,7 +235,7 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'title', dir: 'asc; DROP TABLE books' } as never]);
 
-    expect(result).toHaveLength(1);
+    expect(result).toHaveLength(2);
     expect(raw).not.toHaveBeenCalled();
   });
 });

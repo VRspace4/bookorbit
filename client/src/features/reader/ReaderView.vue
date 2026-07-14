@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { useFoliate, type RelocateDetail } from './epub/composables/useFoliate'
 import { useReaderProgress } from './shared/composables/useReaderProgress'
@@ -48,8 +49,11 @@ import { readTtsPlaybackSession, writeTtsPlaybackSession } from './epub/tts/tts-
 
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 const bookId = Number(route.params.bookId)
 const fileId = Number(route.params.fileId)
+const isPeekMode = computed(() => route.query.peek === '1' || route.query.peek === 'true')
+const trackingEnabled = computed(() => !isPeekMode.value)
 const fileFormat = (route.query.format as string) || 'epub'
 const isAudioFormat = getFormatGroup(fileFormat) === 'audio'
 const isPdfFormat = fileFormat === 'pdf'
@@ -96,6 +100,7 @@ const {
   setThemeName,
   setFlow,
   setFontFaceCSS,
+  setFixedLayoutSpread,
 } = readerState
 
 const customFonts = useCustomFonts()
@@ -106,7 +111,7 @@ const { onActivity, elapsedMinutes } = useReadingSession(fileId, () => ({
   pageNumber: progress.pageNumber.value,
 }))
 
-const progress = useReaderProgress(bookId, fileId, elapsedMinutes)
+const progress = useReaderProgress(bookId, fileId, elapsedMinutes, 0, { trackingEnabled })
 const { cfi, chapterTitle, sectionIndex, totalSections, fraction, locationTotal, footerMode, cycleFooterMode, updateHeadsFeet } = progress
 
 const { seekBookmark, placeBookmarkBeforeSeek, clearBookmark } = useSeekBookmark(() => ({
@@ -477,6 +482,7 @@ onMounted(async () => {
   const hadProgress = progress.percentage.value > 0 || cachedProgress !== null
   await open(bookId, fileId, fileFormat, progress.cfi.value, hadProgress ? progress.percentage.value / 100 : undefined, {
     hasCachedProgress: hadProgress,
+    fixedLayoutSpread: state.value.fixedLayoutSpread,
   })
   setChapters(getChapters())
   sectionFractions.value = getSectionFractions()
@@ -531,6 +537,7 @@ const epubSetters: Record<string, (v: unknown) => void> = {
   isDark: (v) => setIsDark(v as boolean),
   themeName: (v) => setThemeName(v as string),
   flow: (v) => setFlow(v as 'paginated' | 'scrolled'),
+  fixedLayoutSpread: (v) => setFixedLayoutSpread(v as EpubReaderSettings['fixedLayoutSpread']),
 }
 
 // Applies settings to reactive refs (and renderer if open) without touching the delta.
@@ -545,16 +552,26 @@ function seedState(partial: Partial<ReaderState>) {
 
 // Applies a user-initiated change: updates reactive refs AND saves the changed field to delta.
 // Also enables style injection from this point forward (user has opted in by changing something).
-function applyUpdate(partial: Partial<ReaderState>) {
+async function applyUpdate(partial: Partial<ReaderState>) {
+  const shouldReopenForSpread =
+    partial.fixedLayoutSpread !== undefined && partial.fixedLayoutSpread !== state.value.fixedLayoutSpread
   shouldApplyStyles.value = true
   seedState(partial)
 
   if ('themeName' in partial && partial.themeName) {
     bookSettings.updateGlobalSettings(buildThemeSwitchHighlightPatch(effectiveEpubSettings.value, partial.themeName) as Partial<ReaderState>)
-    return
+  } else {
+    bookSettings.updateGlobalSettings(partial)
   }
 
-  bookSettings.updateGlobalSettings(partial)
+  if (shouldReopenForSpread) {
+    const fallbackFraction =
+      fraction.value > 0 ? fraction.value : progress.percentage.value > 0 ? progress.percentage.value / 100 : undefined
+    await open(bookId, fileId, fileFormat, null, fallbackFraction, {
+      fixedLayoutSpread: state.value.fixedLayoutSpread,
+    })
+    sectionFractions.value = getSectionFractions()
+  }
 }
 
 function toggleFullscreen() {

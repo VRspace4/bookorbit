@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { ref } from 'vue'
 import { useReadingSession } from '../useReadingSession'
 
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>())
@@ -93,5 +94,17 @@ describe('useReadingSession - elapsedMinutes', () => {
     // New activity starts a new session
     onActivity()
     expect(elapsedMinutes.value).toBe(0)
+  })
+
+  it('does not track elapsed time or save sessions when tracking is disabled', async () => {
+    const trackingEnabled = ref(false)
+    const { onActivity, elapsedMinutes, endSession } = useReadingSession(1, () => ({ percentage: 10 }), { trackingEnabled })
+
+    onActivity()
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000)
+    endSession()
+
+    expect(elapsedMinutes.value).toBe(0)
+    expect(apiMock).not.toHaveBeenCalled()
   })
 })

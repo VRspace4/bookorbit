@@ -1,9 +1,10 @@
 import { EventEmitter } from 'events';
+import { PassThrough, Readable } from 'stream';
 import type { MockedFunction } from 'vitest';
 import { createWriteStream } from 'fs';
 import * as fs from 'fs/promises';
 import * as unzipper from 'unzipper';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 
 import { patch, readEntry } from './epub-zip-patcher';
 
@@ -37,7 +38,7 @@ let lastArchive: EventEmitter & {
 };
 
 vi.mock('archiver', () => ({
-  default: vi.fn(() => {
+  ZipArchive: vi.fn(function () {
     let output: EventEmitter | null = null;
     const emitter = new EventEmitter() as EventEmitter & {
       append: vi.Mock;
@@ -60,6 +61,7 @@ const mockCreateWriteStream = createWriteStream as MockedFunction<typeof createW
 const mockRename = fs.rename as MockedFunction<typeof fs.rename>;
 const mockUnlink = fs.unlink as MockedFunction<typeof fs.unlink>;
 const mockOpenFile = unzipper.Open.file as MockedFunction<typeof unzipper.Open.file>;
+const streamFrom = (value: string) => Readable.from([Buffer.from(value)]);
 
 describe('epub-zip-patcher', () => {
   beforeEach(() => {
@@ -85,8 +87,8 @@ describe('epub-zip-patcher', () => {
 
   it('patch writes mimetype first, patches existing entries, and appends new ones', async () => {
     const opfEntry = { path: 'OPS/content.opf', stream: vi.fn(() => Buffer.from('old-opf')) };
-    const chapterEntry = { path: 'OPS/ch1.xhtml', stream: vi.fn(() => Buffer.from('old-ch1')) };
-    const mimetypeEntry = { path: 'mimetype', stream: vi.fn(() => Buffer.from('old-mimetype')) };
+    const chapterEntry = { path: 'OPS/ch1.xhtml', stream: vi.fn(() => streamFrom('old-ch1')) };
+    const mimetypeEntry = { path: 'mimetype', stream: vi.fn(() => streamFrom('old-mimetype')) };
 
     mockOpenFile.mockResolvedValue({ files: [mimetypeEntry, opfEntry, chapterEntry] } as never);
 
@@ -97,12 +99,31 @@ describe('epub-zip-patcher', () => {
 
     await patch('/book.epub', patches);
 
-    expect(archiver).toHaveBeenCalledWith('zip', { zlib: { level: 6 } });
+    expect(ZipArchive).toHaveBeenCalledWith({ zlib: { level: 6 } });
     expect(lastArchive.append).toHaveBeenNthCalledWith(1, Buffer.from('application/epub+zip'), { name: 'mimetype', store: true });
     expect(lastArchive.append).toHaveBeenCalledWith(Buffer.from('new-opf'), { name: 'OPS/content.opf' });
-    expect(lastArchive.append).toHaveBeenCalledWith(chapterEntry.stream(), { name: 'OPS/ch1.xhtml' });
+    expect(chapterEntry.stream).toHaveBeenCalledTimes(1);
+    expect(lastArchive.append).toHaveBeenCalledWith(expect.objectContaining({ pipe: expect.any(Function) }), { name: 'OPS/ch1.xhtml' });
     expect(lastArchive.append).toHaveBeenCalledWith(Buffer.from('new-cover'), { name: 'OPS/images/cover.jpg' });
     expect(mockRename).toHaveBeenCalledWith('/book.epub.tmp', '/book.epub');
+  });
+
+  it('rejects when a source entry stream errors while patching', async () => {
+    const sourceError = Object.assign(new Error('ENOENT: no such file or directory, open /book.epub'), { code: 'ENOENT' });
+    const missingEntry = {
+      path: 'OPS/ch1.xhtml',
+      stream: vi.fn(() => {
+        const source = new PassThrough();
+        process.nextTick(() => source.emit('error', sourceError));
+        return source;
+      }),
+    };
+    mockOpenFile.mockResolvedValue({ files: [missingEntry] } as never);
+
+    await expect(patch('/book.epub', new Map())).rejects.toThrow('ENOENT');
+
+    expect(missingEntry.stream).toHaveBeenCalledTimes(1);
+    expect(mockRename).not.toHaveBeenCalled();
   });
 
   it('deletes temp file when rename fails', async () => {

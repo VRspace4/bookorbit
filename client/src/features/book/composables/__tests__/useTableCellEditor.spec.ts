@@ -25,6 +25,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     seriesName: 'My Series',
     seriesIndex: 1,
     files: [],
+    publishedDate: null,
     publishedYear: 2020,
     language: 'en',
     genres: [],
@@ -43,6 +44,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     pageCount: null,
     isbn13: null,
     narrators: [],
+    customMetadata: [],
     ...overrides,
   }
 }
@@ -411,5 +413,161 @@ describe('useTableCellEditor', () => {
     await editor.saveCell(1, 'title', 'Old Cell Save', vi.fn<(patch: Partial<BookCard>) => void>())
 
     expect(editor.activeCellKey.value).toBe('2:title')
+  })
+})
+
+describe('useTableCellEditor - custom field saving', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('saveCell for custom:N calls PATCH /metadata with customMetadata payload', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({ id: 5 })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:42', 'Winner', onSuccess, book)
+
+    expect(mocks.api).toHaveBeenCalledWith(
+      '/api/v1/books/5/metadata',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ customMetadata: [{ fieldId: 42, value: 'Winner' }] }),
+      }),
+    )
+  })
+
+  it('saveCell for custom:N calls onSuccess with patched customMetadata for existing entry', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({
+      id: 5,
+      customMetadata: [{ fieldId: 42, key: 'award', label: 'Award', type: 'text', displayOrder: 0, value: 'Old Value' }],
+    })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:42', 'New Value', onSuccess, book)
+
+    expect(onSuccess).toHaveBeenCalledWith({
+      customMetadata: [{ fieldId: 42, key: 'award', label: 'Award', type: 'text', displayOrder: 0, value: 'New Value' }],
+    })
+  })
+
+  it('saveCell for custom:N preserves other customMetadata entries when patching', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({
+      id: 5,
+      customMetadata: [
+        { fieldId: 1, key: 'f1', label: 'F1', type: 'text', displayOrder: 0, value: 'keep' },
+        { fieldId: 42, key: 'award', label: 'Award', type: 'text', displayOrder: 1, value: 'old' },
+      ],
+    })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:42', 'new', onSuccess, book)
+
+    const result = onSuccess.mock.calls[0]![0] as Partial<BookCard>
+    expect(result.customMetadata).toHaveLength(2)
+    expect(result.customMetadata!.find((f) => f.fieldId === 1)?.value).toBe('keep')
+    expect(result.customMetadata!.find((f) => f.fieldId === 42)?.value).toBe('new')
+  })
+
+  it('saveCell for custom:N with no existing entry in book leaves customMetadata unchanged', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({ id: 5, customMetadata: [] })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:42', 'first value', onSuccess, book)
+
+    const result = onSuccess.mock.calls[0]![0] as Partial<BookCard>
+    expect(result.customMetadata).toHaveLength(0)
+  })
+
+  it('saveCell for custom:N uses empty array when currentBook is not provided', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:42', 'value', onSuccess)
+
+    const result = onSuccess.mock.calls[0]![0] as Partial<BookCard>
+    expect(result.customMetadata).toEqual([])
+  })
+
+  it('saveCell for custom:N shows error toast on API failure', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: false, status: 500, json: async () => ({}) } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({ id: 5 })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:42', 'value', onSuccess, book)
+
+    expect(onSuccess).not.toHaveBeenCalled()
+    expect(mocks.toastError).toHaveBeenCalled()
+  })
+
+  it('saveCell for custom:N shows error toast for invalid field ID', async () => {
+    const editor = useTableCellEditor()
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:notanumber', 'value', onSuccess)
+
+    expect(mocks.api).not.toHaveBeenCalled()
+    expect(mocks.toastError).toHaveBeenCalledWith('Cannot save: invalid custom field ID in "custom:notanumber"')
+  })
+
+  it('saveCell for custom:N saves boolean values correctly', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({
+      id: 5,
+      customMetadata: [{ fieldId: 7, key: 'featured', label: 'Featured', type: 'boolean', displayOrder: 0, value: false }],
+    })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:7', true, onSuccess, book)
+
+    expect(mocks.api).toHaveBeenCalledWith(
+      '/api/v1/books/5/metadata',
+      expect.objectContaining({ body: JSON.stringify({ customMetadata: [{ fieldId: 7, value: true }] }) }),
+    )
+    const result = onSuccess.mock.calls[0]![0] as Partial<BookCard>
+    expect(result.customMetadata!.find((f) => f.fieldId === 7)?.value).toBe(true)
+  })
+
+  it('saveCell for custom:N saves number values correctly', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({ ok: true } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({
+      id: 5,
+      customMetadata: [{ fieldId: 3, key: 'score', label: 'Score', type: 'number', displayOrder: 0, value: null }],
+    })
+    const onSuccess = vi.fn<(patch: Partial<BookCard>) => void>()
+
+    await editor.saveCell(5, 'custom:3', 95, onSuccess, book)
+
+    expect(mocks.api).toHaveBeenCalledWith(
+      '/api/v1/books/5/metadata',
+      expect.objectContaining({ body: JSON.stringify({ customMetadata: [{ fieldId: 3, value: 95 }] }) }),
+    )
+    const result = onSuccess.mock.calls[0]![0] as Partial<BookCard>
+    expect(result.customMetadata!.find((f) => f.fieldId === 3)?.value).toBe(95)
+  })
+
+  it('saveCell shows a friendly message when field is not enabled for the book library', async () => {
+    ;(mocks.api as Mock).mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ message: 'Custom metadata field 42 is not enabled for this book' }),
+    } as Response)
+    const editor = useTableCellEditor()
+    const book = makeBook({ id: 5 })
+
+    await editor.saveCell(5, 'custom:42', 'value', vi.fn<(patch: Partial<BookCard>) => void>(), book)
+
+    expect(mocks.toastError).toHaveBeenCalledWith('This field is not available for this book - enable it for the library in Settings first')
   })
 })

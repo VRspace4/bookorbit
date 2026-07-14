@@ -16,15 +16,15 @@ describe('AchievementFilterBar', () => {
     })
   }
 
-  it('renders aggregate achievement stats', () => {
+  it('renders achievements heading and tier summary', () => {
     const wrapper = mountComponent()
-    expect(wrapper.text()).toContain('2')
-    expect(wrapper.text()).toContain('/ 5 earned')
+    expect(wrapper.text()).toContain('Achievements')
+    expect(wrapper.text()).toContain('2 / 5 tiers')
   })
 
-  it('renders the vertical divider', () => {
+  it('renders a muted trophy icon on desktop', () => {
     const wrapper = mountComponent()
-    expect(wrapper.find('.bg-border.h-4.w-px').exists()).toBe(true)
+    expect(wrapper.find('svg').exists()).toBe(true)
   })
 
   it('emits filter changes when pills are clicked', async () => {

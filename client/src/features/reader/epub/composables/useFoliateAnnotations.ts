@@ -40,6 +40,21 @@ export function useFoliateAnnotations() {
           }
           return g
         }
+      case 'invert':
+        return (rects: DOMRectList, { color = '#FFFFFF' }: { color?: string } = {}) => {
+          const g = createSVG('g')
+          g.setAttribute('fill', color)
+          ;(g as SVGElement).style.mixBlendMode = 'difference'
+          for (const { left, top, height, width } of Array.from(rects)) {
+            const el = createSVG('rect')
+            el.setAttribute('x', String(left))
+            el.setAttribute('y', String(top))
+            el.setAttribute('height', String(height))
+            el.setAttribute('width', String(width))
+            g.append(el)
+          }
+          return g
+        }
       case 'squiggly':
         return (rects: DOMRectList, { color = 'red' }: { color?: string } = {}) => {
           const g = createSVG('g')
@@ -96,6 +111,14 @@ export function useFoliateAnnotations() {
     ;(view as any)?.deleteAnnotation?.({ value: cfi })
   }
 
+  function redrawAnnotation(view: unknown, cfi: string, color: string, style: string) {
+    annotationStyleMap.set(cfi, { color, style })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(view as any)?.deleteAnnotation?.({ value: cfi })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(view as any)?.addAnnotation?.({ value: cfi })
+  }
+
   function reAddAll(view: unknown) {
     setTimeout(() => {
       for (const [cfi] of annotationStyleMap) {
@@ -113,5 +136,14 @@ export function useFoliateAnnotations() {
     draw(getDrawFunction(stored.style), { color: stored.color })
   }
 
-  return { annotationStyleMap, getDrawFunction, addAnnotation, addAnnotations, deleteAnnotation, reAddAll, handleDrawAnnotationEvent }
+  return {
+    annotationStyleMap,
+    getDrawFunction,
+    addAnnotation,
+    addAnnotations,
+    deleteAnnotation,
+    redrawAnnotation,
+    reAddAll,
+    handleDrawAnnotationEvent,
+  }
 }

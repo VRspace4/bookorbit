@@ -7,6 +7,7 @@ export interface ParsedBookData {
   isbn10?: string | null;
   isbn13?: string | null;
   publisher?: string | null;
+  publishedDate?: string | null;
   publishedYear?: number | null;
   language?: string | null;
   seriesName?: string | null;
@@ -19,8 +20,15 @@ export interface ParsedBookData {
   goodreadsId?: string | null;
   amazonId?: string | null;
   hardcoverId?: string | null;
+  hardcoverEditionId?: string | null;
   openLibraryId?: string | null;
+  ranobedbId?: string | null;
+  koboId?: string | null;
+  lubimyczytacId?: string | null;
+  aladinId?: string | null;
   itunesId?: string | null;
+  audibleId?: string | null;
+  librofmId?: string | null;
   cover: Buffer | null;
   // audio-specific
   narrators?: string[];

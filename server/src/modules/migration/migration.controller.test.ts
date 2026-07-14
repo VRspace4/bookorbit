@@ -1,5 +1,6 @@
 import type { RequestUser } from '../../common/types/request-user';
 import { MigrationController } from './migration.controller';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeUser(overrides?: Partial<RequestUser>): RequestUser {
   return {
@@ -16,6 +17,8 @@ function makeUser(overrides?: Partial<RequestUser>): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -40,6 +43,7 @@ function makeController() {
     testSource: vi.fn(),
     createSource: vi.fn(),
     validateSourceById: vi.fn(),
+    resetSource: vi.fn(),
     getSourcePathPrefixes: vi.fn(),
   };
   const profileService = {
@@ -79,6 +83,7 @@ describe('MigrationController', () => {
     profileService.listTargetUsers.mockResolvedValue([{ id: 1 }]);
     sourceService.createSource.mockResolvedValue({ id: 3 });
     sourceService.validateSourceById.mockResolvedValue({ ok: true });
+    sourceService.resetSource.mockResolvedValue(undefined);
     sourceService.getSourcePathPrefixes.mockResolvedValue(['/media/books']);
     profileService.suggestUserMappings.mockResolvedValue([{ sourceUserId: 'u1', targetUserId: 1 }]);
     profileService.validatePathMappings.mockResolvedValue({ valid: true, sample: [] });
@@ -100,6 +105,8 @@ describe('MigrationController', () => {
     expect(sourceService.createSource).toHaveBeenCalledWith({ type: 'booklore' }, 7);
 
     await expect(controller.validateSourceById(3)).resolves.toEqual({ ok: true });
+    await expect(controller.resetSource(3)).resolves.toBeUndefined();
+    expect(sourceService.resetSource).toHaveBeenCalledWith(3);
     await expect(controller.getSourcePathPrefixes(3)).resolves.toEqual(['/media/books']);
     await expect(controller.suggestUserMappings(3)).resolves.toEqual([{ sourceUserId: 'u1', targetUserId: 1 }]);
     await expect(controller.validatePathMappings(3, { pathMappings: [] } as never)).resolves.toEqual({ valid: true, sample: [] });

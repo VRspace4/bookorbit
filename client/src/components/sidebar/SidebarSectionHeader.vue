@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ChevronDown, Plus, GripVertical, Check, MoreVertical } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { ChevronDown, Plus, GripVertical, Check, MoreVertical } from '@lucide/vue'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useThemeStore } from '@/stores/theme'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   label: string
@@ -46,7 +49,7 @@ const hasMenu = () => props.canAdd || props.canReorder
     <DropdownMenu v-if="hasMenu()">
       <DropdownMenuTrigger
         class="ml-1 flex h-6 w-6 shrink-0 items-center justify-center transition-colors hover:bg-sidebar-accent"
-        :class="[isReordering ? 'text-primary' : 'text-sidebar-foreground/45 hover:text-sidebar-foreground/90', iconRadiusClass]"
+        :class="[isReordering ? 'text-primary' : 'text-primary/90 hover:text-primary', iconRadiusClass]"
         @click.stop
       >
         <MoreVertical :size="15" :stroke-width="2.2" />
@@ -54,13 +57,13 @@ const hasMenu = () => props.canAdd || props.canReorder
       <DropdownMenuContent align="end" :side-offset="4">
         <DropdownMenuItem v-if="canAdd" @click="emit('add')">
           <Plus class="size-4" />
-          {{ addTitle ?? 'Add' }}
+          {{ addTitle ?? t('components.sidebar.sectionHeader.add') }}
         </DropdownMenuItem>
         <DropdownMenuSeparator v-if="canAdd && canReorder" />
         <DropdownMenuItem v-if="canReorder" @click="emit('toggleReorder')">
           <Check v-if="isReordering" class="size-4 text-primary" />
           <GripVertical v-else class="size-4" />
-          {{ isReordering ? 'Done reordering' : 'Reorder' }}
+          {{ isReordering ? t('components.sidebar.sectionHeader.doneReordering') : t('components.sidebar.sectionHeader.reorder') }}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

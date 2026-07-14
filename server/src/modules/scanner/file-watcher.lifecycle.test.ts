@@ -1,17 +1,17 @@
-vi.mock('@parcel/watcher', () => ({
-  subscribe: vi.fn(),
+vi.mock('chokidar', () => ({
+  watch: vi.fn(),
 }));
 
 import { Logger } from '@nestjs/common';
 import type { MockedFunction } from 'vitest';
-import { subscribe } from '@parcel/watcher';
+import { watch } from 'chokidar';
 
 import { FileEventProcessorService } from './file-event-processor.service';
 import { FileWatcherService } from './file-watcher.service';
 import { ScanGateway } from './scan.gateway';
 import { ScannerService } from './scanner.service';
 
-const mockSubscribe = subscribe as MockedFunction<typeof subscribe>;
+const mockWatch = watch as MockedFunction<typeof watch>;
 
 function makeService(db: any = {}) {
   const processor = {
@@ -25,6 +25,7 @@ function makeService(db: any = {}) {
     emitBookMissing: vi.fn(),
     emitBookRestored: vi.fn(),
     emitBookMoved: vi.fn(),
+    emitBookTransferred: vi.fn(),
   } as unknown as ScanGateway;
 
   const scannerService = {
@@ -32,6 +33,7 @@ function makeService(db: any = {}) {
     scanBookFolderAsync: vi.fn(),
     scanBookDirectoryAsync: vi.fn(),
     isScanRunning: vi.fn().mockReturnValue(false),
+    bufferBookMissingEvent: vi.fn(),
     bufferBooksUnavailableNotification: vi.fn(),
     bufferBooksRestoredNotification: vi.fn(),
   } as unknown as ScannerService;
@@ -59,6 +61,19 @@ function makeBootstrapDb(watchedLibraries: Array<{ id: number }> = []): any {
   return { select };
 }
 
+function makeReadyWatcher(overrides: { close?: ReturnType<typeof vi.fn> } = {}) {
+  const watcher = {
+    on: vi.fn().mockReturnThis(),
+    once: vi.fn().mockImplementation((eventName: string, handler: () => void) => {
+      if (eventName === 'ready') handler();
+      return watcher;
+    }),
+    off: vi.fn().mockReturnThis(),
+    close: overrides.close ?? vi.fn().mockResolvedValue(undefined),
+  };
+  return watcher;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
@@ -66,7 +81,7 @@ beforeEach(() => {
   vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   vi.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
   vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
-  mockSubscribe.mockReset();
+  mockWatch.mockReset();
 });
 
 afterEach(() => {
@@ -100,44 +115,47 @@ describe('FileWatcherService lifecycle and watcher controls', () => {
     const { service } = makeService();
 
     await expect(service.startWatcher(7, [])).resolves.toBeUndefined();
-    expect(mockSubscribe).not.toHaveBeenCalled();
+    expect(mockWatch).not.toHaveBeenCalled();
   });
 
   it('subscribes to paths and normalizes create/update/delete events', async () => {
-    const unsubscribe = vi.fn().mockResolvedValue(undefined);
-    const callbacks: Array<(error: Error | null, events: Array<{ type: string; path: string }>) => void> = [];
-    mockSubscribe.mockImplementation((_path, cb) => {
-      callbacks.push(cb as any);
-      return Promise.resolve({ unsubscribe } as any);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const allHandlers: Array<(eventName: string, path: string) => void> = [];
+    mockWatch.mockImplementation(() => {
+      const watcher = makeReadyWatcher({ close });
+      watcher.on.mockImplementation((eventName: string, handler: (...args: any[]) => void) => {
+        if (eventName === 'all') allHandlers.push(handler as (eventName: string, path: string) => void);
+        return watcher;
+      });
+      return watcher as any;
     });
 
     const { service } = makeService();
     const scheduleSpy = vi.spyOn(service as any, 'schedule').mockImplementation(() => undefined);
 
     await service.startWatcher(2, ['/books']);
-    callbacks[0](new Error('watch callback failure'), []);
-    callbacks[0](null, [
-      { type: 'create', path: '/books/new.epub' },
-      { type: 'update', path: '/books/edit.epub' },
-      { type: 'delete', path: '/books/gone.epub' },
-      { type: 'bogus', path: '/books/ignored.epub' },
-    ]);
+    allHandlers[0]('add', '/books/new.epub');
+    allHandlers[0]('change', '/books/edit.epub');
+    allHandlers[0]('unlink', '/books/gone.epub');
+    allHandlers[0]('raw', '/books/ignored.epub');
 
     expect(scheduleSpy).toHaveBeenNthCalledWith(1, 'create', '/books/new.epub', 2);
     expect(scheduleSpy).toHaveBeenNthCalledWith(2, 'create', '/books/edit.epub', 2);
     expect(scheduleSpy).toHaveBeenNthCalledWith(3, 'delete', '/books/gone.epub', 2);
     expect(scheduleSpy).toHaveBeenCalledTimes(3);
-    expect(unsubscribe).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('cleans up partially started watchers when one path subscription fails', async () => {
-    const firstUnsubscribe = vi.fn().mockResolvedValue(undefined);
-    mockSubscribe.mockResolvedValueOnce({ unsubscribe: firstUnsubscribe } as any).mockRejectedValueOnce(new Error('permission denied'));
+    const firstClose = vi.fn().mockResolvedValue(undefined);
+    mockWatch.mockReturnValueOnce(makeReadyWatcher({ close: firstClose }) as any).mockImplementationOnce(() => {
+      throw new Error('permission denied');
+    });
 
     const { service } = makeService();
 
     await expect(service.startWatcher(3, ['/books/ok', '/books/fail'])).rejects.toThrow('permission denied');
-    expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(firstClose).toHaveBeenCalledTimes(1);
   });
 
   it('returns immediately when stopping a library without an active watcher', async () => {
@@ -148,8 +166,8 @@ describe('FileWatcherService lifecycle and watcher controls', () => {
 
   it('stops active watchers and clears pending timers scoped to the library', async () => {
     const { service } = makeService();
-    const unsubscribe = vi.fn().mockResolvedValue(undefined);
-    (service as any).subscriptions.set(11, [{ unsubscribe }]);
+    const close = vi.fn().mockResolvedValue(undefined);
+    (service as any).subscriptions.set(11, [{ close }]);
 
     const timerA = setTimeout(() => undefined, 1000);
     const timerB = setTimeout(() => undefined, 1000);
@@ -176,7 +194,7 @@ describe('FileWatcherService lifecycle and watcher controls', () => {
 
     await service.stopWatcher(11);
 
-    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
     expect((service as any).pendingTimers.has('/books/a')).toBe(false);
     expect((service as any).pendingTimers.has('/books/b')).toBe(true);
     expect((service as any).pendingFolderScanTimers.has('/books/a')).toBe(false);
@@ -190,27 +208,27 @@ describe('FileWatcherService lifecycle and watcher controls', () => {
     expect((service as any).suppressedDirScanTimers.has('12:/books/other')).toBe(true);
   });
 
-  it('throws when stopWatcher cannot unsubscribe from an active subscription', async () => {
+  it('throws when stopWatcher cannot close an active subscription', async () => {
     const { service } = makeService();
     (service as any).subscriptions.set(12, [
       {
-        unsubscribe: vi.fn().mockRejectedValue(new Error('unsubscribe failed')),
+        close: vi.fn().mockRejectedValue(new Error('close failed')),
       },
     ]);
 
-    await expect(service.stopWatcher(12)).rejects.toThrow('unsubscribe failed');
+    await expect(service.stopWatcher(12)).rejects.toThrow('close failed');
   });
 
-  it('clears all subscriptions during module destroy and propagates unsubscribe failures', async () => {
+  it('clears all subscriptions during module destroy and propagates close failures', async () => {
     const { service } = makeService();
     const ok = vi.fn().mockResolvedValue(undefined);
     const bad = vi.fn().mockRejectedValue(new Error('destroy failed'));
-    (service as any).subscriptions.set(1, [{ unsubscribe: ok }]);
+    (service as any).subscriptions.set(1, [{ close: ok }]);
 
     await expect(service.onModuleDestroy()).resolves.toBeUndefined();
     expect(ok).toHaveBeenCalledTimes(1);
 
-    (service as any).subscriptions.set(2, [{ unsubscribe: bad }]);
+    (service as any).subscriptions.set(2, [{ close: bad }]);
     await expect(service.onModuleDestroy()).rejects.toThrow('destroy failed');
   });
 
@@ -222,17 +240,17 @@ describe('FileWatcherService lifecycle and watcher controls', () => {
     await expect((service as any).reconcile()).rejects.toThrow('broken reconcile');
   });
 
-  it('debounces cross-library reconciles and skips the source library', () => {
+  it('debounces cross-library reconciles across all watched libraries', () => {
     const { service, processor } = makeService();
     (service as any).subscriptions.set(1, []);
     (service as any).subscriptions.set(2, []);
     (service as any).subscriptions.set(3, []);
 
-    (service as any).scheduleCrossLibraryReconcile(1);
-    (service as any).scheduleCrossLibraryReconcile(1);
+    (service as any).scheduleCrossLibraryReconcile();
+    (service as any).scheduleCrossLibraryReconcile();
 
     vi.advanceTimersByTime(1_500);
-    expect(processor.reconcileMissingBooks).toHaveBeenCalledWith([2, 3]);
+    expect(processor.reconcileMissingBooks).toHaveBeenCalledWith([1, 2, 3]);
     expect(processor.reconcileMissingBooks).toHaveBeenCalledTimes(1);
   });
 

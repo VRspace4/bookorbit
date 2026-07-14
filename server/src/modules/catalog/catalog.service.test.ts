@@ -6,9 +6,14 @@ vi.mock('drizzle-orm', () => ({
   sql: vi.fn((parts: TemplateStringsArray, ...values: unknown[]) => ({ type: 'sql', parts, values })),
 }));
 
-import { and, eq, ilike, isNotNull } from 'drizzle-orm';
+vi.mock('../../common/utils/accent-insensitive-search.utils', () => ({
+  accentInsensitiveIlike: vi.fn((left: unknown, pattern: string) => ({ type: 'accentInsensitiveIlike', left, pattern })),
+}));
 
-import { authors, bookMetadata, collections, narrators } from '../../db/schema';
+import { and, eq, isNotNull } from 'drizzle-orm';
+
+import { accentInsensitiveIlike } from '../../common/utils/accent-insensitive-search.utils';
+import { authors, bookMetadata, bookSeries, collections, narrators } from '../../db/schema';
 import { CatalogService } from './catalog.service';
 
 interface QueryChain<T> {
@@ -90,7 +95,7 @@ describe('CatalogService', () => {
     const result = await service.searchAuthors('  A%_\\B  ');
 
     expect(result).toEqual([{ name: 'A%_\\B' }]);
-    expect(ilike).toHaveBeenCalledWith(authors.name, '%A\\%\\_\\\\B%');
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(authors.name, '%A\\%\\_\\\\B%');
     expect(selectChains[0]?.from).toHaveBeenCalledWith(authors);
     expect(selectChains[0]?.orderBy).toHaveBeenCalledWith(authors.name);
     expect(selectChains[0]?.limit).toHaveBeenCalledWith(15);
@@ -116,19 +121,20 @@ describe('CatalogService', () => {
 
     expect(result).toEqual([{ name: 'Orbit' }, { name: 'Tor' }]);
     expect(isNotNull).toHaveBeenCalledWith(bookMetadata.publisher);
-    expect(ilike).toHaveBeenCalledWith(bookMetadata.publisher, '%or%');
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(bookMetadata.publisher, '%or%');
     expect(selectDistinctChains[0]?.from).toHaveBeenCalledWith(bookMetadata);
     expect(selectDistinctChains[0]?.limit).toHaveBeenCalledWith(15);
   });
 
   it('queries the expected metadata column for series search', async () => {
-    const { service, setSelectDistinctRows } = makeService();
-    setSelectDistinctRows([{ name: 'The Expanse' }]);
+    const { service, setSelectRows, selectChains } = makeService();
+    setSelectRows([{ name: 'The Expanse' }]);
 
     await service.searchSeries('Expanse');
 
-    expect(isNotNull).toHaveBeenCalledWith(bookMetadata.seriesName);
-    expect(ilike).toHaveBeenCalledWith(bookMetadata.seriesName, '%Expanse%');
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(bookSeries.name, '%Expanse%');
+    expect(selectChains[0]?.from).toHaveBeenCalledWith(bookSeries);
+    expect(selectChains[0]?.orderBy).toHaveBeenCalledWith(bookSeries.name);
   });
 
   it('queries the expected metadata column for language search', async () => {
@@ -138,7 +144,7 @@ describe('CatalogService', () => {
     await service.searchLanguages('English');
 
     expect(isNotNull).toHaveBeenCalledWith(bookMetadata.language);
-    expect(ilike).toHaveBeenCalledWith(bookMetadata.language, '%English%');
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(bookMetadata.language, '%English%');
   });
 
   it('returns an empty result for blank collection terms to match other search endpoints', async () => {
@@ -156,7 +162,7 @@ describe('CatalogService', () => {
 
     expect(result).toEqual([{ name: 'Sci-Fi Favorites' }]);
     expect(eq).toHaveBeenCalledWith(collections.userId, 42);
-    expect(ilike).toHaveBeenCalledWith(collections.name, '%sci\\_fi\\%%');
+    expect(accentInsensitiveIlike).toHaveBeenCalledWith(collections.name, '%sci\\_fi\\%%');
     expect(and).toHaveBeenCalledTimes(1);
     expect(selectChains[0]?.from).toHaveBeenCalledWith(collections);
     expect(selectChains[0]?.where).toHaveBeenCalledWith(expect.objectContaining({ type: 'and' }));

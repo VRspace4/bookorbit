@@ -29,6 +29,7 @@ export class KoboDeviceService {
   async createDevice(userId: number, name: string) {
     const token = randomUUID().replace(/-/g, '');
     const [device] = await this.db.insert(schema.koboDevices).values({ userId, name, token }).returning();
+
     return {
       id: device.id,
       name: device.name,

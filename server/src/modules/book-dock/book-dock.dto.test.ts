@@ -38,6 +38,10 @@ describe('BookDock DTO validation', () => {
     expect((await errorsFor(UpdateBookDockFileDto, { targetLibraryId: null, targetFolderId: null })).length).toBe(0);
     expect((await errorsFor(UpdateBookDockFileDto, { targetLibraryId: 'x' })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookDockFileDto, { targetFolderId: 2.5 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookDockFileDto, { selectedMetadata: { publishedYear: 1984 } })).length).toBe(0);
+    expect((await errorsFor(UpdateBookDockFileDto, { selectedMetadata: { publishedYear: 101 } })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookDockFileDto, { selectedMetadata: { publishedYear: 2201 } })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookDockFileDto, { selectedMetadata: { publishedYear: 1984.5 } })).length).toBeGreaterThan(0);
   });
 
   it('BulkSetTargetDto validates ids, filters, and nullable target fields', async () => {
@@ -72,5 +76,11 @@ describe('BookDock DTO validation', () => {
     expect((await errorsFor(BulkEditBookDockDto, { enabledFields: ['title'], mergeArrays: false })).length).toBeGreaterThan(0);
     expect((await errorsFor(BulkEditBookDockDto, { fields: {}, mergeArrays: false })).length).toBeGreaterThan(0);
     expect((await errorsFor(BulkEditBookDockDto, { fields: {}, enabledFields: ['title'] })).length).toBeGreaterThan(0);
+    expect(
+      (await errorsFor(BulkEditBookDockDto, { fields: { publishedYear: 101 }, enabledFields: ['publishedYear'], mergeArrays: false })).length,
+    ).toBeGreaterThan(0);
+    expect(
+      (await errorsFor(BulkEditBookDockDto, { fields: { publishedYear: 1984 }, enabledFields: ['publishedYear'], mergeArrays: false })).length,
+    ).toBe(0);
   });
 });

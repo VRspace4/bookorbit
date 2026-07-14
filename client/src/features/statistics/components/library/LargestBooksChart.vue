@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { shallowRef, watchEffect } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
-import { HardDrive } from 'lucide-vue-next'
+import { HardDrive } from '@lucide/vue'
 
 import { formatBytes } from '@/lib/formatting'
 import { getFormatColor } from '@/features/book/lib/format-colors'
 import { useLargestBooks } from '../../composables/useLargestBooks'
 import ChartCard from '../ChartCard.vue'
+
+const { t } = useI18n()
 
 const { data, loading, error } = useLargestBooks()
 const option = shallowRef({})
@@ -85,7 +88,7 @@ watchEffect(() => {
 </script>
 
 <template>
-  <ChartCard title="Top 50 Largest Books" :icon="HardDrive" :color-index="2" :loading :error :empty="!data.items.length">
+  <ChartCard :title="t('statistics.charts.largestBooks.title')" :icon="HardDrive" :color-index="2" :loading :error :empty="!data.items.length">
     <VChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

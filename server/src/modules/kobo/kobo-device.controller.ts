@@ -1,4 +1,4 @@
-import { All, Controller, Get, Headers, HttpCode, HttpStatus, Logger, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { All, Body, Controller, Get, Headers, HttpCode, HttpStatus, Logger, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
@@ -8,9 +8,13 @@ import type { KoboDeviceContext } from './guards/kobo-token.guard';
 import { KoboTokenGuard } from './guards/kobo-token.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/types/request-user';
+import { KoboAnalyticsService } from './services/kobo-analytics.service';
 import { KoboThumbnailService } from './services/kobo-thumbnail.service';
 import { KoboDownloadService } from './services/kobo-download.service';
 import { KoboProxyService } from './services/kobo-proxy.service';
+import type { KoboAnalyticsBody } from './kobo-analytics.types';
+import { KoboBookIdentityService } from './services/kobo-book-identity.service';
+import { KoboSyncHistoryService } from './services/kobo-sync-history.service';
 
 @Controller('kobo/:deviceToken')
 @Public()
@@ -22,6 +26,9 @@ export class KoboDeviceController {
     private readonly thumbnailService: KoboThumbnailService,
     private readonly downloadService: KoboDownloadService,
     private readonly proxyService: KoboProxyService,
+    private readonly analyticsService: KoboAnalyticsService,
+    private readonly bookIdentityService: KoboBookIdentityService,
+    private readonly historyService: KoboSyncHistoryService,
   ) {}
 
   @Get('v1/books/:bookId/thumbnail/:width/:height/:quality/:isGreyscale/image.jpg')
@@ -68,9 +75,30 @@ export class KoboDeviceController {
     @Req() req: FastifyRequest,
     @Res() reply: FastifyReply,
   ) {
-    const id = parseInt(bookId, 10);
-    if (isNaN(id)) return this.proxyService.forward(req, reply, device.deviceToken);
-    await this.downloadService.streamBook(user.id, id, reply);
+    const id = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, bookId);
+    if (id === null) return this.proxyService.forward(req, reply, device.deviceToken);
+    const startedAt = Date.now();
+    try {
+      await this.downloadService.streamBook(user.id, id, reply);
+      await this.historyService.recordSuccess({
+        userId: user.id,
+        deviceId: device.deviceId,
+        event: 'book_download',
+        durationMs: Date.now() - startedAt,
+        counts: await this.historyService.countsForBook(user.id, id, { downloads: 1 }),
+      });
+    } catch (error: unknown) {
+      await this.historyService.recordFailure(
+        {
+          userId: user.id,
+          deviceId: device.deviceId,
+          event: 'book_download',
+          durationMs: Date.now() - startedAt,
+        },
+        error,
+      );
+      throw error;
+    }
   }
 
   @Get('v1/affiliate')
@@ -99,7 +127,13 @@ export class KoboDeviceController {
 
   @Post('v1/analytics/event')
   @HttpCode(HttpStatus.OK)
-  analyticsEvent() {
+  async analyticsEvent(@Body() body: KoboAnalyticsBody, @CurrentUser() user: RequestUser, @KoboDevice() device: KoboDeviceContext) {
+    try {
+      await this.analyticsService.ingest(body, user, device);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error';
+      this.logger.warn(`[kobo.analytics] ingest failed userId=${user.id}: ${message}`);
+    }
     return {};
   }
 
@@ -117,8 +151,8 @@ export class KoboDeviceController {
     req: FastifyRequest,
     reply: FastifyReply,
   ) {
-    const id = parseInt(bookId, 10);
-    if (isNaN(id)) return this.proxyService.forward(req, reply, device.deviceToken);
+    const id = await this.bookIdentityService.resolveBookIdByCoverImageId(user.id, bookId);
+    if (id === null) return this.proxyService.forward(req, reply, device.deviceToken);
     await this.thumbnailService.serveThumbnail(user.id, id, ifNoneMatch, reply);
   }
 }

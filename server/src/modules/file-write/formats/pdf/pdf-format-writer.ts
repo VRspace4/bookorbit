@@ -1,17 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { readFile, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
-import { randomUUID } from 'crypto';
-import { PDFDocument, PDFName } from 'pdf-lib';
+import { stat } from 'fs/promises';
 
 import type { WriteResult } from '@bookorbit/types';
-import type { BookWritePayload, BookWritePayloadKey } from '../../interfaces/book-write-payload.interface';
+import type { BookWritePayload } from '../../interfaces/book-write-payload.interface';
 import type { FormatWriter } from '../../interfaces/format-writer.interface';
 import type { FormatWriteOptions } from '../../interfaces/format-write-options.interface';
-import { replaceFileAtomically } from '../shared/atomic-file-replace';
-import { BOOKORBIT_NS_PREFIX } from '../shared/bookorbit-ns';
-import { resolveFieldsWritten } from '../shared/resolve-fields-written';
-import { buildXmp } from './pdf-xmp-builder';
+import { resolvePdfFieldsWritten, writePdfMetadataInProcess } from './pdf-write-core';
+import { writePdfMetadataInWorker } from './pdf-worker-runner';
+
+export const PDF_WORKER_WRITE_THRESHOLD_BYTES = 25 * 1024 * 1024;
 
 @Injectable()
 export class PdfFormatWriter implements FormatWriter {
@@ -20,57 +17,22 @@ export class PdfFormatWriter implements FormatWriter {
   async write(filePath: string, payload: BookWritePayload, options: FormatWriteOptions): Promise<WriteResult> {
     const start = Date.now();
     const { fieldMask, dryRun } = options;
-    const fieldsWritten = resolveFieldsWritten(payload, fieldMask);
+    const { fieldsWritten, pdfFieldMask } = resolvePdfFieldsWritten(payload, fieldMask);
 
     if (dryRun) {
       return { status: 'skipped', reason: 'dry-run', fieldsWritten, durationMs: Date.now() - start };
     }
 
-    const originalBytes = await readFile(filePath);
-    const pdfDoc = await PDFDocument.load(originalBytes, { ignoreEncryption: true });
+    const fileStats = await stat(filePath);
+    if (fileStats.size >= PDF_WORKER_WRITE_THRESHOLD_BYTES) {
+      const result = await writePdfMetadataInWorker({
+        filePath,
+        payload,
+        fieldMask: [...pdfFieldMask],
+      });
+      return { ...result, durationMs: Date.now() - start };
+    }
 
-    applyInfoDict(pdfDoc, payload, fieldMask);
-    embedXmp(pdfDoc, buildXmp(payload, fieldMask));
-
-    const savedBytes = await pdfDoc.save();
-
-    const tempPath = join(dirname(filePath), `.tmp-${randomUUID()}.pdf`);
-    await writeFile(tempPath, savedBytes);
-    await replaceFileAtomically(tempPath, filePath);
-
-    return { status: 'success', fieldsWritten, durationMs: Date.now() - start };
+    return writePdfMetadataInProcess(filePath, payload, pdfFieldMask, start);
   }
-}
-
-function applyInfoDict(pdfDoc: PDFDocument, payload: BookWritePayload, fieldMask: Set<BookWritePayloadKey>): void {
-  if (fieldMask.has('title') && payload.title != null) {
-    pdfDoc.setTitle(payload.title);
-  }
-  if (fieldMask.has('authors') && payload.authors?.length) {
-    pdfDoc.setAuthor(payload.authors.map((a) => a.name).join(', '));
-  }
-  if (fieldMask.has('description') && payload.description != null) {
-    pdfDoc.setSubject(payload.description);
-  }
-  if (fieldMask.has('publishedYear') && payload.publishedYear != null) {
-    pdfDoc.setCreationDate(new Date(payload.publishedYear, 0, 1));
-  }
-
-  pdfDoc.setCreator(BOOKORBIT_NS_PREFIX);
-
-  const keywords: string[] = [];
-  if (fieldMask.has('genres') && payload.genres?.length) keywords.push(...payload.genres);
-  if (fieldMask.has('tags') && payload.tags?.length) keywords.push(...payload.tags);
-  if (keywords.length) {
-    pdfDoc.setKeywords(keywords);
-  }
-}
-
-function embedXmp(pdfDoc: PDFDocument, xmpXml: string): void {
-  const xmpBytes = Buffer.from(xmpXml, 'utf-8');
-  const xmpStream = pdfDoc.context.stream(xmpBytes, {
-    Type: 'Metadata',
-    Subtype: 'XML',
-  });
-  pdfDoc.catalog.set(PDFName.of('Metadata'), pdfDoc.context.register(xmpStream));
 }

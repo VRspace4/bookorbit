@@ -61,6 +61,11 @@ describe('useReaderProgress', () => {
       cfi: 'epubcfi(/6/4)',
       fraction: 0.35,
       index: 2,
+      source: 'OEBPS/html/ch3.xhtml',
+      koboLocationType: 'KoboSpan',
+      koboLocationValue: 'kobo.25.1',
+      contentSourceProgressPercent: 25,
+      koreaderProgress: '/body/DocFragment[3]/body/p[4]/text()[1].2',
       total: 10,
       tocItem: { label: 'Chapter 3', href: 'ch3.xhtml' },
       section: { current: 2, total: 10 },
@@ -77,6 +82,11 @@ describe('useReaderProgress', () => {
     expect(progress.cfi.value).toBe('epubcfi(/6/4)')
     expect(progress.fraction.value).toBe(0.35)
     expect(progress.percentage.value).toBe(35)
+    expect(progress.koboLocationSource.value).toBe('OEBPS/html/ch3.xhtml')
+    expect(progress.koboLocationType.value).toBe('KoboSpan')
+    expect(progress.koboLocationValue.value).toBe('kobo.25.1')
+    expect(progress.koboContentSourceProgressPercent.value).toBe(25)
+    expect(progress.koreaderProgress.value).toBe('/body/DocFragment[3]/body/p[4]/text()[1].2')
     expect(progress.chapterTitle.value).toBe('Chapter 3')
     expect(progress.sectionIndex.value).toBe(2)
     expect(progress.totalSections.value).toBe(10)
@@ -191,6 +201,77 @@ describe('useReaderProgress', () => {
       (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
     )
     expect(saveCalls.length).toBe(1)
+    const saveCall = saveCalls[0]
+    if (!saveCall) throw new Error('Expected one progress save call')
+    const saveBody = JSON.parse((saveCall[1] as { body: string }).body)
+    expect(saveBody).toEqual(
+      expect.objectContaining({
+        percentage: 30,
+        koboLocationSource: 'OEBPS/html/ch3.xhtml',
+        koboLocationType: 'KoboSpan',
+        koboLocationValue: 'kobo.25.1',
+        koboContentSourceProgressPercent: 25,
+        koreaderProgress: '/body/DocFragment[3]/body/p[4]/text()[1].2',
+      }),
+    )
+
+    vi.useRealTimers()
+  })
+
+  it('omits non-string kobo location source from saved progress', async () => {
+    vi.useFakeTimers()
+    try {
+      const progress = useReaderProgress(1, 1, elapsedMinutes)
+
+      progress.onRelocate(
+        makeDetail({
+          cfi: 'epubcfi(/6/38!/4,/488/2/1:604,/512/2/1:89)',
+          fraction: 0.69604585363819,
+          source: 18,
+          koboLocationType: null,
+          koboLocationValue: null,
+          contentSourceProgressPercent: 87.5,
+          koreaderProgress: '/body/DocFragment[19]/body/p[222]/font/text().604',
+        } as never),
+      )
+
+      vi.clearAllTimers()
+      await progress.save()
+
+      const saveCall = apiMock.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
+      )
+      if (!saveCall) throw new Error('Expected progress save call')
+      const saveBody = JSON.parse((saveCall[1] as { body: string }).body)
+
+      expect(saveBody).toEqual(
+        expect.objectContaining({
+          cfi: 'epubcfi(/6/38!/4,/488/2/1:604,/512/2/1:89)',
+          percentage: 69.604585363819,
+          koboLocationSource: null,
+          koboLocationType: null,
+          koboLocationValue: null,
+          koboContentSourceProgressPercent: 87.5,
+          koreaderProgress: '/body/DocFragment[19]/body/p[222]/font/text().604',
+        }),
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps relocate state in memory without loading or saving when tracking is disabled', async () => {
+    vi.useFakeTimers()
+    const trackingEnabled = ref(false)
+    const progress = useReaderProgress(1, 1, elapsedMinutes, 0, { trackingEnabled })
+
+    await progress.load()
+    progress.onRelocate(makeDetail({ fraction: 0.42 }))
+    await progress.save()
+    await vi.advanceTimersByTimeAsync(2500)
+
+    expect(progress.percentage.value).toBe(42)
+    expect(apiMock).not.toHaveBeenCalled()
 
     vi.useRealTimers()
   })

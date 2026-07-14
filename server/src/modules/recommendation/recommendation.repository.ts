@@ -2,9 +2,12 @@ import { Inject, Injectable } from '@nestjs/common';
 import { eq, inArray, ne, and, isNotNull, sql, asc, desc } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import type { ContentFilterRules } from '@bookorbit/types';
+import { isAudioFormat, isComicFormat } from '@bookorbit/types';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { authors, bookAuthors, bookGenres, bookMetadata, bookTags, books, genres, tags } from '../../db/schema';
+import { authors, bookAuthors, bookFiles, bookGenres, bookMetadata, bookTags, books, genres, tags } from '../../db/schema';
+import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 
 type Db = NodePgDatabase<typeof schema>;
 const ANN_CANDIDATE_FETCH_LIMIT = 100;
@@ -14,21 +17,28 @@ const AUTHOR_BOOKS_LIMIT = 25;
 export interface SeriesBookRow {
   bookId: number;
   title: string | null;
+  updatedAt: Date | null;
   seriesIndex: number | null;
   coverSource: string | null;
   authorNames: string[];
+  isAudiobook: boolean;
+  isComic: boolean;
 }
 
 export interface AuthorBookRow {
   bookId: number;
   title: string | null;
+  updatedAt: Date | null;
   coverSource: string | null;
   authorNames: string[];
+  isAudiobook: boolean;
+  isComic: boolean;
 }
 
 export interface AnnCandidate {
   bookId: number;
   cosineSim: number;
+  seriesId: number | null;
   seriesName: string | null;
   rating: number | null;
 }
@@ -41,10 +51,16 @@ export interface CandidateMetadata {
 
 export interface TargetBookData {
   embedding: number[] | null;
+  seriesId: number | null;
   seriesName: string | null;
   rating: number | null;
   authorNames: string[];
   genreTagNames: string[];
+}
+
+export interface SeriesIdentity {
+  id: number;
+  name: string | null;
 }
 
 @Injectable()
@@ -55,6 +71,7 @@ export class RecommendationRepository {
     const [meta] = await this.db
       .select({
         embedding: bookMetadata.embedding,
+        seriesId: bookMetadata.seriesId,
         seriesName: bookMetadata.seriesName,
         rating: bookMetadata.rating,
       })
@@ -68,6 +85,7 @@ export class RecommendationRepository {
 
     return {
       embedding: meta.embedding,
+      seriesId: meta.seriesId,
       seriesName: meta.seriesName,
       rating: meta.rating,
       authorNames: candidateMetadata?.authorNames ?? [],
@@ -75,27 +93,39 @@ export class RecommendationRepository {
     };
   }
 
-  async getSeriesName(bookId: number): Promise<string | null> {
-    const [row] = await this.db.select({ seriesName: bookMetadata.seriesName }).from(bookMetadata).where(eq(bookMetadata.bookId, bookId)).limit(1);
+  async getSeriesIdentity(bookId: number): Promise<SeriesIdentity | null> {
+    const [row] = await this.db
+      .select({ seriesId: bookMetadata.seriesId, seriesName: bookMetadata.seriesName })
+      .from(bookMetadata)
+      .where(eq(bookMetadata.bookId, bookId))
+      .limit(1);
 
-    return row?.seriesName?.trim() || null;
+    if (row?.seriesId == null) return null;
+    return { id: row.seriesId, name: row.seriesName?.trim() || null };
   }
 
-  async findAnnCandidates(embedding: number[], targetBookId: number, libraryIds: number[]): Promise<AnnCandidate[]> {
+  async findAnnCandidates(
+    embedding: number[],
+    targetBookId: number,
+    libraryIds: number[],
+    contentFilters?: ContentFilterRules,
+  ): Promise<AnnCandidate[]> {
     if (libraryIds.length === 0 || embedding.length === 0 || embedding.some((v) => !Number.isFinite(v))) return [];
 
     const vecStr = `[${embedding.join(',')}]`;
+    const filterClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
 
     return this.db
       .select({
         bookId: bookMetadata.bookId,
         cosineSim: sql<number>`(1 - (${bookMetadata.embedding} <=> ${vecStr}::vector))::float`,
+        seriesId: bookMetadata.seriesId,
         seriesName: bookMetadata.seriesName,
         rating: bookMetadata.rating,
       })
       .from(bookMetadata)
       .innerJoin(books, eq(books.id, bookMetadata.bookId))
-      .where(and(inArray(books.libraryId, libraryIds), ne(bookMetadata.bookId, targetBookId), isNotNull(bookMetadata.embedding)))
+      .where(and(inArray(books.libraryId, libraryIds), ne(bookMetadata.bookId, targetBookId), isNotNull(bookMetadata.embedding), ...filterClauses))
       .orderBy(sql`${bookMetadata.embedding} <=> ${vecStr}::vector`)
       .limit(ANN_CANDIDATE_FETCH_LIMIT);
   }
@@ -131,21 +161,24 @@ export class RecommendationRepository {
     }));
   }
 
-  async findSeriesBooks(seriesName: string, libraryIds: number[]): Promise<SeriesBookRow[]> {
-    if (libraryIds.length === 0 || !seriesName.trim()) return [];
+  async findSeriesBooks(seriesId: number, libraryIds: number[], contentFilters?: ContentFilterRules): Promise<SeriesBookRow[]> {
+    if (libraryIds.length === 0) return [];
 
-    const normalized = seriesName.trim().toLowerCase();
+    const filterClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
 
     const rows = await this.db
       .select({
         bookId: books.id,
         title: bookMetadata.title,
+        updatedAt: books.updatedAt,
         seriesIndex: bookMetadata.seriesIndex,
         coverSource: bookMetadata.coverSource,
+        primaryFormat: bookFiles.format,
       })
       .from(books)
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
-      .where(and(inArray(books.libraryId, libraryIds), sql`lower(trim(${bookMetadata.seriesName})) = ${normalized}`))
+      .leftJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
+      .where(and(inArray(books.libraryId, libraryIds), eq(bookMetadata.seriesId, seriesId), ...filterClauses))
       .orderBy(sql`${bookMetadata.seriesIndex} ASC NULLS LAST`, asc(bookMetadata.title), asc(books.id))
       .limit(SERIES_BOOKS_LIMIT);
 
@@ -161,26 +194,39 @@ export class RecommendationRepository {
 
     const authorsByBook = this.groupNamesByBook(authorRows);
 
-    return rows.map((r) => ({ ...r, authorNames: authorsByBook.get(r.bookId) ?? [] }));
+    return rows.map((r) => ({
+      bookId: r.bookId,
+      title: r.title,
+      updatedAt: r.updatedAt ?? null,
+      seriesIndex: r.seriesIndex,
+      coverSource: r.coverSource,
+      authorNames: authorsByBook.get(r.bookId) ?? [],
+      isAudiobook: r.primaryFormat != null ? isAudioFormat(r.primaryFormat) : false,
+      isComic: r.primaryFormat != null ? isComicFormat(r.primaryFormat) : false,
+    }));
   }
 
-  async findAuthorBooks(bookId: number, libraryIds: number[]): Promise<AuthorBookRow[]> {
+  async findAuthorBooks(bookId: number, libraryIds: number[], contentFilters?: ContentFilterRules): Promise<AuthorBookRow[]> {
     if (libraryIds.length === 0) return [];
 
     const authorIds = this.db.select({ authorId: bookAuthors.authorId }).from(bookAuthors).where(eq(bookAuthors.bookId, bookId));
+    const filterClauses = contentFilters ? buildContentFilterClauses(contentFilters, this.db) : [];
 
     const rows = await this.db
       .select({
         bookId: books.id,
         title: bookMetadata.title,
+        updatedAt: books.updatedAt,
         coverSource: bookMetadata.coverSource,
         sharedAuthors: sql<number>`count(*)::int`.as('shared_authors'),
+        primaryFormat: bookFiles.format,
       })
       .from(bookAuthors)
       .innerJoin(books, eq(books.id, bookAuthors.bookId))
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))
-      .where(and(inArray(bookAuthors.authorId, authorIds), inArray(books.libraryId, libraryIds), ne(books.id, bookId)))
-      .groupBy(books.id, bookMetadata.title, bookMetadata.coverSource)
+      .leftJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
+      .where(and(inArray(bookAuthors.authorId, authorIds), inArray(books.libraryId, libraryIds), ne(books.id, bookId), ...filterClauses))
+      .groupBy(books.id, books.updatedAt, bookMetadata.title, bookMetadata.coverSource, bookFiles.format)
       .orderBy(desc(sql`shared_authors`), asc(bookMetadata.title), asc(books.id))
       .limit(AUTHOR_BOOKS_LIMIT);
 
@@ -196,7 +242,15 @@ export class RecommendationRepository {
 
     const authorsByBook = this.groupNamesByBook(authorRows);
 
-    return rows.map((r) => ({ bookId: r.bookId, title: r.title, coverSource: r.coverSource, authorNames: authorsByBook.get(r.bookId) ?? [] }));
+    return rows.map((r) => ({
+      bookId: r.bookId,
+      title: r.title,
+      updatedAt: r.updatedAt ?? null,
+      coverSource: r.coverSource,
+      authorNames: authorsByBook.get(r.bookId) ?? [],
+      isAudiobook: r.primaryFormat != null ? isAudioFormat(r.primaryFormat) : false,
+      isComic: r.primaryFormat != null ? isComicFormat(r.primaryFormat) : false,
+    }));
   }
 
   private groupNamesByBook(rows: Array<{ bookId: number; name: string }>): Map<number, string[]> {

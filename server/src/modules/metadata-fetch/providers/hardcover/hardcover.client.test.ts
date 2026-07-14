@@ -16,7 +16,7 @@ describe('HardcoverClient', () => {
     vi.clearAllMocks();
   });
 
-  it('passes the apiKey directly to the Authorization header', async () => {
+  it('sends a Bearer Authorization header', async () => {
     const mockFetch = vi.mocked(fetchWithThrottleModule.fetchWithThrottle);
     mockFetch.mockResolvedValue({
       ok: true,
@@ -29,7 +29,45 @@ describe('HardcoverClient', () => {
       expect.any(String),
       expect.objectContaining({
         headers: expect.objectContaining({
-          Authorization: apiKey,
+          Authorization: `Bearer ${apiKey}`,
+        }),
+      }),
+    );
+  });
+
+  it('does not duplicate Bearer prefix when already provided', async () => {
+    const mockFetch = vi.mocked(fetchWithThrottleModule.fetchWithThrottle);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: { books: [] } }),
+    } as Response);
+
+    await client.searchByIsbn('1234567890', 'Bearer test-api-key');
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-api-key',
+        }),
+      }),
+    );
+  });
+
+  it('accepts quoted bearer token input', async () => {
+    const mockFetch = vi.mocked(fetchWithThrottleModule.fetchWithThrottle);
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: { books: [] } }),
+    } as Response);
+
+    await client.searchByIsbn('1234567890', '"Bearer test-api-key"');
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-api-key',
         }),
       }),
     );

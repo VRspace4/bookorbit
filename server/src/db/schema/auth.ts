@@ -15,9 +15,11 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 
+import { genres, tags } from './metadata';
 import { libraries } from './libraries';
 
 export const userAvatarSourceEnum = pgEnum('user_avatar_source', ['none', 'external', 'uploaded']);
+export const readingInsightsSharingLevelEnum = pgEnum('reading_insights_sharing_level', ['private', 'summary', 'detailed']);
 
 export const users = pgTable(
   'users',
@@ -40,6 +42,10 @@ export const users = pgTable(
     avatarSource: userAvatarSourceEnum('avatar_source').notNull().default('none'),
     avatarVersion: integer('avatar_version').notNull().default(0),
     provisioningMethod: varchar('provisioning_method', { length: 20 }).notNull().default('local'),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+    lastAuthenticatedAt: timestamp('last_authenticated_at', { withTimezone: true }),
+    readingInsightsSharingLevel: readingInsightsSharingLevelEnum('reading_insights_sharing_level').notNull().default('private'),
+    readingInsightsConsentedAt: timestamp('reading_insights_consented_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true })
       .notNull()
@@ -58,6 +64,11 @@ export const users = pgTable(
     check('users_token_version_nonnegative_chk', sql`${t.tokenVersion} >= 0`),
     check('users_failed_login_attempts_nonnegative_chk', sql`${t.failedLoginAttempts} >= 0`),
     check('users_avatar_version_nonnegative_chk', sql`${t.avatarVersion} >= 0`),
+    check(
+      'users_reading_insights_consent_chk',
+      sql`(${t.readingInsightsSharingLevel} = 'private' and ${t.readingInsightsConsentedAt} is null) or (${t.readingInsightsSharingLevel} <> 'private' and ${t.readingInsightsConsentedAt} is not null)`,
+    ),
+    index('users_last_authenticated_at_idx').on(t.lastAuthenticatedAt),
   ],
 );
 
@@ -99,6 +110,8 @@ export const refreshTokens = pgTable(
     successorTokenHash: varchar('successor_token_hash', { length: 255 }),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    rotatedAt: timestamp('rotated_at', { withTimezone: true }),
+    replacedByTokenHash: varchar('replaced_by_token_hash', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -166,3 +179,33 @@ export const magicAccessTokens = pgTable(
 );
 
 export type MagicAccessToken = typeof magicAccessTokens.$inferSelect;
+
+export const contentFilterTypeEnum = pgEnum('content_filter_type', ['include', 'exclude']);
+
+export const userContentFilterTags = pgTable(
+  'user_content_filter_tags',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    filterType: contentFilterTypeEnum('filter_type').notNull(),
+    tagId: integer('tag_id')
+      .notNull()
+      .references(() => tags.id, { onDelete: 'cascade' }),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.filterType, t.tagId] }), index('user_content_filter_tags_tag_id_idx').on(t.tagId)],
+);
+
+export const userContentFilterGenres = pgTable(
+  'user_content_filter_genres',
+  {
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    filterType: contentFilterTypeEnum('filter_type').notNull(),
+    genreId: integer('genre_id')
+      .notNull()
+      .references(() => genres.id, { onDelete: 'cascade' }),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.filterType, t.genreId] }), index('user_content_filter_genres_genre_id_idx').on(t.genreId)],
+);

@@ -1,20 +1,31 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { formatNumber } from '@/i18n/formatters'
 import type { SeriesSummary } from '@bookorbit/types'
-import { BookCopy } from 'lucide-vue-next'
+import { BookCopy } from '@lucide/vue'
 import { bookCoverStyle } from '@/features/book/lib/book-cover'
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
+import BookCoverArtwork from '@/features/book/components/BookCoverArtwork.vue'
+import {
+  PORTRAIT_STACK_FRAME_ASPECT_RATIO,
+  resolveCoverStackAspectRatio,
+  resolveCoverStackDisplayMode,
+  resolveCoverStackFrameAspectRatio,
+  resolveSquareCoverScale,
+  shouldPersistCoverRatio,
+} from '../lib/cover-scale'
 import { useCoverStack } from '../composables/useCoverStack'
 import SeriesCompletionBar from './SeriesCompletionBar.vue'
 
 const HOVERED_COVER_Z_INDEX = 120
+const SQUARE_COVER_SCALE = 1.25
 
 const props = defineProps<{
   series: SeriesSummary
 }>()
 
 const emit = defineEmits<{
-  open: [seriesName: string]
+  open: [seriesId: number]
 }>()
 
 const { coverUrl } = useCoverVersions()
@@ -22,6 +33,7 @@ const fallbackStyle = computed(() => bookCoverStyle(props.series.name))
 const initial = computed(() => props.series.name.trim().charAt(0).toUpperCase() || '?')
 
 const failedCovers = ref(new Set<number>())
+const coverRatios = ref(new Map<number, number>())
 const hoveredCoverId = ref<number | null>(null)
 const activeCoverIds = computed(() => props.series.coverBookIds.filter((id) => !failedCovers.value.has(id)))
 const { visibleCovers, baseStyles } = useCoverStack(activeCoverIds)
@@ -35,10 +47,21 @@ const authorsLine = computed(() => {
 
 function handleCoverError(bookId: number) {
   failedCovers.value = new Set([...failedCovers.value, bookId])
+  if (coverRatios.value.has(bookId)) {
+    const nextRatios = new Map(coverRatios.value)
+    nextRatios.delete(bookId)
+    coverRatios.value = nextRatios
+  }
+}
+
+function handleCoverLoad(bookId: number, ratio: number | null) {
+  const prev = coverRatios.value.get(bookId)
+  if (!shouldPersistCoverRatio(prev, ratio)) return
+  coverRatios.value = new Map(coverRatios.value).set(bookId, ratio)
 }
 
 function handleClick() {
-  emit('open', props.series.name)
+  emit('open', props.series.id)
 }
 
 function handleCoverHover(bookId: number) {
@@ -49,6 +72,14 @@ function clearHoveredCover() {
   hoveredCoverId.value = null
 }
 
+function coverRatioAt(index: number): number | null {
+  const bookId = visibleCovers.value[index]
+  return bookId == null ? null : (coverRatios.value.get(bookId) ?? null)
+}
+
+const coverFrameAspectRatios = computed(() => visibleCovers.value.map((_, index) => resolveCoverStackFrameAspectRatio(coverRatioAt(index))))
+const coverDisplayModes = computed(() => visibleCovers.value.map((_, index) => resolveCoverStackDisplayMode(coverRatioAt(index))))
+
 const coverStyles = computed(() => {
   const total = visibleCovers.value.length
   if (total === 0) return []
@@ -58,6 +89,8 @@ const coverStyles = computed(() => {
   const hasActiveHover = hoveredIndex >= 0
 
   return baseStyles.value.map((base, index) => {
+    const ratio = coverRatioAt(index)
+    const squareScale = resolveSquareCoverScale(ratio, SQUARE_COVER_SCALE)
     const isHovered = hasActiveHover && hoveredId === visibleCovers.value[index]
     const distanceFromHovered = hasActiveHover ? Math.abs(index - hoveredIndex) : 0
     const loweredScale = Math.max(0.95, 1 - distanceFromHovered * 0.03)
@@ -65,12 +98,14 @@ const coverStyles = computed(() => {
 
     return {
       ...base,
+      aspectRatio: resolveCoverStackAspectRatio(ratio),
       zIndex: hasActiveHover ? (isHovered ? HOVERED_COVER_Z_INDEX : base.zIndex) : base.zIndex,
+      transformOrigin: squareScale > 1 ? 'center bottom' : 'center',
       transform: hasActiveHover
         ? isHovered
-          ? 'translateY(-8px) scale(1.05)'
-          : `translateY(${loweredOffset}px) scale(${loweredScale})`
-        : 'translateY(0) scale(1)',
+          ? `translateY(-8px) scale(${1.05 * squareScale})`
+          : `translateY(${loweredOffset}px) scale(${loweredScale * squareScale})`
+        : `translateY(0) scale(${squareScale})`,
       opacity: hasActiveHover ? (isHovered ? 1 : 0.58) : 1,
       filter: hasActiveHover ? (isHovered ? 'brightness(1.08) saturate(1.14)' : 'brightness(0.78) saturate(0.74)') : 'none',
       boxShadow: hasActiveHover
@@ -102,7 +137,7 @@ const coverStyles = computed(() => {
             class="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/88 px-2 py-1 text-[11px] font-medium text-foreground shadow-sm backdrop-blur"
           >
             <BookCopy :size="12" class="text-muted-foreground" />
-            {{ series.bookCount.toLocaleString() }}
+            {{ formatNumber(series.bookCount) }}
           </span>
         </div>
 
@@ -113,7 +148,20 @@ const coverStyles = computed(() => {
           :style="coverStyles[i] ?? {}"
           @mouseenter="handleCoverHover(bookId)"
         >
-          <img :src="coverUrl(bookId)" alt="" class="h-full w-full object-cover" loading="lazy" decoding="async" @error="handleCoverError(bookId)" />
+          <BookCoverArtwork
+            :src="coverUrl(bookId)"
+            :has-cover="true"
+            :title="series.name"
+            :seed="`${series.name}-${bookId}`"
+            alt=""
+            :mode="coverDisplayModes[i]"
+            :frame-aspect-ratio="coverFrameAspectRatios[i] ?? PORTRAIT_STACK_FRAME_ASPECT_RATIO"
+            loading="lazy"
+            decoding="async"
+            :spine="true"
+            @load="handleCoverLoad(bookId, $event)"
+            @error="handleCoverError(bookId)"
+          />
         </div>
 
         <div

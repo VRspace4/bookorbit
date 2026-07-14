@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CoverSearchResult } from '@bookorbit/types';
+import { eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises';
 import { join } from 'path';
@@ -11,7 +12,7 @@ import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { ensureSafeRemoteHost } from '../../common/utils/ssrf.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookMetadata } from '../../db/schema';
+import { bookMetadata, books } from '../../db/schema';
 import { BookReadService } from '../book/book-read.service';
 import { BookMetadataLockService } from '../book-metadata-lock/book-metadata-lock.service';
 import { FileWriteService } from '../file-write/file-write.service';
@@ -64,7 +65,11 @@ export class CoverService {
     for (const coverProvider of providers) {
       let results: CoverSearchResult[] = [];
       try {
-        results = await coverProvider.search(searchParams);
+        const providerSearchParams =
+          provider === ITUNES_PROVIDER_KEY && coverProvider.key === ITUNES_PROVIDER_KEY
+            ? { ...searchParams, ignoreProviderEnabled: true }
+            : searchParams;
+        results = await coverProvider.search(providerSearchParams);
       } catch (error) {
         this.logger.warn(
           `[cover.search_provider] [fail] provider=${coverProvider.key} errorClass=${errorClass(error)} error="${sanitizeErrorMessage(error)}" - cover provider search failed`,
@@ -264,6 +269,7 @@ export class CoverService {
       .insert(bookMetadata)
       .values({ bookId, coverSource: source, updatedAt: now })
       .onConflictDoUpdate({ target: bookMetadata.bookId, set: { coverSource: source, updatedAt: now } });
+    await this.db.update(books).set({ updatedAt: now }).where(eq(books.id, bookId));
   }
 
   private async fetchRemoteImage(rawUrl: string): Promise<{ buffer: Buffer; contentType: string }> {

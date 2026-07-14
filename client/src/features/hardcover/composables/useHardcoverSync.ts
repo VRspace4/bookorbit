@@ -69,6 +69,11 @@ export function useHardcoverSync() {
     error.value = null
     try {
       const { runId } = await startHardcoverSync()
+      if (runId <= 0) {
+        error.value = 'Hardcover sync is not available right now'
+        await Promise.all([fetchPendingSummary(), useHardcoverSettings().fetchSettings()])
+        return
+      }
       activeSyncStatus.value = {
         runId,
         status: 'running',

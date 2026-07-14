@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { ValidationPipe } from '@nestjs/common';
 
 import { UpdateProviderConfigDto } from './update-provider-config.dto';
 
@@ -17,6 +18,8 @@ describe('UpdateProviderConfigDto', () => {
       amazon: { cookie: 'session-cookie' },
       hardcover: { apiKey: 'hardcover-key' },
       itunes: { coverResolution: 'standard' },
+      librofm: { enabled: true },
+      aladin: { ttbKey: 'ttb-test-key' },
     });
 
     expect(errors).toHaveLength(0);
@@ -28,6 +31,14 @@ describe('UpdateProviderConfigDto', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('accepts Libro.fm through the production whitelist validation path', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
+
+    await expect(
+      pipe.transform({ librofm: { enabled: true } }, { type: 'body', metatype: UpdateProviderConfigDto, data: undefined }),
+    ).resolves.toMatchObject({ librofm: { enabled: true } });
+  });
+
   it('rejects invalid nested property types', async () => {
     const { errors } = await validateInput({
       google: { enabled: 'yes' },
@@ -35,6 +46,7 @@ describe('UpdateProviderConfigDto', () => {
       hardcover: { apiKey: false },
       openLibrary: { enabled: 'true' },
       itunes: { coverResolution: 'ultra' },
+      aladin: { ttbKey: 123 },
     });
 
     expect(errors).toEqual(
@@ -44,6 +56,7 @@ describe('UpdateProviderConfigDto', () => {
         expect.objectContaining({ property: 'hardcover' }),
         expect.objectContaining({ property: 'openLibrary' }),
         expect.objectContaining({ property: 'itunes' }),
+        expect.objectContaining({ property: 'aladin' }),
       ]),
     );
   });

@@ -21,6 +21,10 @@ import {
 } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
+type MoveBookToLibraryResult = Pick<typeof books.$inferSelect, 'id' | 'libraryId' | 'libraryFolderId' | 'folderPath' | 'status'> & {
+  previousLibraryId: number;
+  libraryChanged: boolean;
+};
 
 @Injectable()
 export class ScannerRepository {
@@ -59,6 +63,7 @@ export class ScannerRepository {
       .select({
         allowedFormats: libraries.allowedFormats,
         formatPriority: libraries.formatPriority,
+        metadataPrecedence: libraries.metadataPrecedence,
         excludePatterns: libraries.excludePatterns,
         organizationMode: libraries.organizationMode,
       })
@@ -97,6 +102,7 @@ export class ScannerRepository {
         id: books.id,
         status: books.status,
         folderPath: books.folderPath,
+        primaryFileId: books.primaryFileId,
       })
       .from(books)
       .where(eq(books.libraryFolderId, libraryFolderId));
@@ -281,18 +287,45 @@ export class ScannerRepository {
   }
 
   async moveBookToLibrary(bookId: number, libraryId: number, libraryFolderId: number, folderPath: string) {
-    const [book] = await this.db
-      .update(books)
-      .set({
-        libraryId,
-        libraryFolderId,
-        folderPath,
-        status: 'present',
-        updatedAt: new Date(),
-      })
-      .where(eq(books.id, bookId))
-      .returning();
-    return book ?? null;
+    return this.db.transaction(async (tx): Promise<MoveBookToLibraryResult | null> => {
+      const [current] = await tx
+        .select({
+          id: books.id,
+          libraryId: books.libraryId,
+          libraryFolderId: books.libraryFolderId,
+          folderPath: books.folderPath,
+          status: books.status,
+        })
+        .from(books)
+        .where(eq(books.id, bookId))
+        .for('update')
+        .limit(1);
+      if (!current) return null;
+
+      const libraryChanged = current.libraryId !== libraryId;
+      if (!libraryChanged && current.libraryFolderId === libraryFolderId && current.folderPath === folderPath && current.status === 'present') {
+        return { ...current, previousLibraryId: current.libraryId, libraryChanged: false };
+      }
+
+      const [book] = await tx
+        .update(books)
+        .set({
+          libraryId,
+          libraryFolderId,
+          folderPath,
+          status: 'present',
+          updatedAt: new Date(),
+        })
+        .where(eq(books.id, bookId))
+        .returning({
+          id: books.id,
+          libraryId: books.libraryId,
+          libraryFolderId: books.libraryFolderId,
+          folderPath: books.folderPath,
+          status: books.status,
+        });
+      return book ? { ...book, previousLibraryId: current.libraryId, libraryChanged } : null;
+    });
   }
 
   async findBookFilesByBookId(bookId: number) {
@@ -315,7 +348,7 @@ export class ScannerRepository {
     await this.db.delete(bookFiles).where(eq(bookFiles.id, id));
   }
 
-  async findBookFileWithContextByIno(ino: number, libraryId?: number) {
+  async findBookFileWithContextByIno(ino: bigint, libraryId?: number) {
     const whereClause = libraryId == null ? eq(bookFiles.ino, ino) : and(eq(bookFiles.ino, ino), eq(books.libraryId, libraryId));
     const [row] = await this.db
       .select({
@@ -333,7 +366,7 @@ export class ScannerRepository {
     return row ?? null;
   }
 
-  async findMissingBookFileWithContextByIno(ino: number) {
+  async findMissingBookFileWithContextByIno(ino: bigint) {
     const [row] = await this.db
       .select({
         file: bookFiles,
@@ -367,6 +400,93 @@ export class ScannerRepository {
     return row ?? null;
   }
 
+  async findPresentDuplicateBookFilesByHash(fileHash: string, sourceBookId: number) {
+    return this.db
+      .select({
+        file: bookFiles,
+        bookId: books.id,
+        libraryId: books.libraryId,
+        libraryFolderId: books.libraryFolderId,
+        folderPath: books.folderPath,
+        bookAddedAt: books.addedAt,
+      })
+      .from(bookFiles)
+      .innerJoin(books, eq(books.id, bookFiles.bookId))
+      .where(and(eq(bookFiles.fileHash, fileHash), eq(bookFiles.role, 'content'), eq(books.status, 'present'), ne(books.id, sourceBookId)));
+  }
+
+  async replaceDuplicateBookWithMovedBook(input: {
+    sourceBookId: number;
+    sourceFileId: number;
+    duplicateBookId: number;
+    duplicateFileId: number;
+  }): Promise<{ bookId: number; libraryId: number; duplicateBookId: number } | null> {
+    return this.db.transaction(async (tx) => {
+      const [source] = await tx
+        .select({
+          bookId: books.id,
+          fileId: bookFiles.id,
+        })
+        .from(bookFiles)
+        .innerJoin(books, eq(books.id, bookFiles.bookId))
+        .where(and(eq(books.id, input.sourceBookId), eq(bookFiles.id, input.sourceFileId), eq(books.status, 'missing')))
+        .limit(1);
+      if (!source) return null;
+
+      const [duplicate] = await tx
+        .select({
+          file: bookFiles,
+          bookId: books.id,
+          libraryId: books.libraryId,
+          libraryFolderId: books.libraryFolderId,
+          folderPath: books.folderPath,
+        })
+        .from(bookFiles)
+        .innerJoin(books, eq(books.id, bookFiles.bookId))
+        .where(and(eq(books.id, input.duplicateBookId), eq(bookFiles.id, input.duplicateFileId), eq(books.status, 'present')))
+        .limit(1);
+      if (!duplicate || duplicate.bookId === input.sourceBookId) return null;
+
+      await tx.delete(books).where(eq(books.id, input.duplicateBookId));
+      await tx
+        .update(books)
+        .set({
+          libraryId: duplicate.libraryId,
+          libraryFolderId: duplicate.libraryFolderId,
+          folderPath: duplicate.folderPath,
+          status: 'present',
+          updatedAt: new Date(),
+        })
+        .where(eq(books.id, input.sourceBookId));
+      await tx
+        .update(bookFiles)
+        .set({
+          libraryFolderId: duplicate.libraryFolderId,
+          absolutePath: duplicate.file.absolutePath,
+          relPath: duplicate.file.relPath,
+          ino: duplicate.file.ino,
+          sizeBytes: duplicate.file.sizeBytes,
+          mtime: duplicate.file.mtime,
+          fileHash: duplicate.file.fileHash,
+          format: duplicate.file.format,
+          role: duplicate.file.role,
+          sortOrder: duplicate.file.sortOrder,
+          durationSeconds: duplicate.file.durationSeconds,
+          updatedAt: new Date(),
+        })
+        .where(eq(bookFiles.id, input.sourceFileId));
+      await tx
+        .update(books)
+        .set({
+          primaryFileId: input.sourceFileId,
+          updatedAt: new Date(),
+        })
+        .where(eq(books.id, input.sourceBookId));
+
+      return { bookId: input.sourceBookId, libraryId: duplicate.libraryId, duplicateBookId: input.duplicateBookId };
+    });
+  }
+
   async findMissingBookFileWithContextByHash(fileHash: string) {
     const [row] = await this.db
       .select({
@@ -393,6 +513,18 @@ export class ScannerRepository {
     return row ?? null;
   }
 
+  async findBooksByIds(bookIds: number[]) {
+    if (bookIds.length === 0) return [];
+    return this.db
+      .select({
+        id: books.id,
+        libraryId: books.libraryId,
+        status: books.status,
+      })
+      .from(books)
+      .where(inArray(books.id, bookIds));
+  }
+
   async findBookCardData(bookIds: number[]) {
     if (bookIds.length === 0) return { rows: [], authorRows: [], fileRows: [], genreRows: [] };
 
@@ -407,6 +539,7 @@ export class ScannerRepository {
           title: bookMetadata.title,
           seriesName: bookMetadata.seriesName,
           seriesIndex: bookMetadata.seriesIndex,
+          publishedDate: bookMetadata.publishedDate,
           publishedYear: bookMetadata.publishedYear,
           language: bookMetadata.language,
           rating: bookMetadata.rating,
@@ -416,6 +549,8 @@ export class ScannerRepository {
           publisher: bookMetadata.publisher,
           pageCount: bookMetadata.pageCount,
           isbn13: bookMetadata.isbn13,
+          hardcoverId: bookMetadata.hardcoverId,
+          hardcoverEditionId: bookMetadata.hardcoverEditionId,
         })
         .from(books)
         .leftJoin(bookMetadata, eq(bookMetadata.bookId, books.id))

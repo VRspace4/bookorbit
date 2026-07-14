@@ -1,10 +1,16 @@
 import { registerAs } from '@nestjs/config';
-import { resolve } from 'path';
+import { join, resolve } from 'path';
 
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV ?? 'development',
   appUrl: process.env.APP_URL ?? 'http://localhost:5173',
   version: process.env.APP_VERSION ?? 'Local build',
+  githubReleasesRepo: process.env.GITHUB_RELEASES_REPO?.trim() || 'bookorbit/bookorbit',
+  githubReleasesToken: process.env.GITHUB_RELEASES_TOKEN?.trim() || undefined,
+  oidcAllowLocalIssuers: parseBooleanFlag(process.env.OIDC_ALLOW_LOCAL_ISSUERS, false),
+  swaggerEnabled: parseBooleanFlag(process.env.SWAGGER_ENABLED, false),
+  koboCloudscraperPython: process.env.KOBO_CLOUDSCRAPER_PYTHON?.trim() || undefined,
+  koreaderPluginSourcePath: process.env.KOREADER_PLUGIN_PATH?.trim() || undefined,
 }));
 
 export const dbConfig = registerAs('db', () => ({
@@ -18,11 +24,20 @@ export const authConfig = registerAs('auth', () => ({
   refreshReuseWindow: process.env.JWT_REFRESH_REUSE_WINDOW ?? '5m',
   refreshRotationGraceWindow: process.env.JWT_REFRESH_ROTATION_GRACE_WINDOW ?? '60s',
   setupBootstrapToken: process.env.SETUP_BOOTSTRAP_TOKEN ?? '',
+  refreshRotationGraceMs: parsePositiveInteger(process.env.AUTH_REFRESH_ROTATION_GRACE_MS, 30_000),
 }));
 
-export const storageConfig = registerAs('storage', () => ({
-  appDataPath: resolve(process.env.APP_DATA_PATH ?? '/data'),
-}));
+export const storageConfig = registerAs('storage', () => {
+  const appDataPath = resolve(process.env.APP_DATA_PATH ?? '/data');
+  const bookDockPath = process.env.BOOK_DOCK_PATH?.trim();
+  const libraryBrowseRoot = process.env.LIBRARY_BROWSE_ROOT?.trim();
+
+  return {
+    appDataPath,
+    bookDockPath: resolve(bookDockPath || join(appDataPath, 'book-dock')),
+    libraryBrowseRoot: resolve(libraryBrowseRoot || '/'),
+  };
+});
 
 export const fileWriteConfig = registerAs('fileWrite', () => ({
   debounceMs: parsePositiveInteger(process.env.FILE_WRITE_DEBOUNCE_MS, 3_000),
@@ -63,4 +78,12 @@ function parseList(value: string): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseBooleanFlag(value: string | undefined, fallback: boolean): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
 }

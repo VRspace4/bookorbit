@@ -1,12 +1,28 @@
+import type { AudiobookChapter } from "./audiobook";
+
 export type BookDockFileStatus = "pending" | "extracting" | "fetching" | "ready" | "error";
 export type BookDockAutoFinalizeMetadataMode = "safe_merge" | "fetched_only" | "embedded_only";
+
+export function resolveBookDockSearchTitle(fileName: string, metadataTitle?: string | null): string | undefined {
+  const normalizedMetadataTitle = metadataTitle?.trim();
+  if (normalizedMetadataTitle) return normalizedMetadataTitle;
+
+  const normalizedFileName = fileName.trim();
+  if (!normalizedFileName) return undefined;
+
+  const extensionIndex = normalizedFileName.lastIndexOf(".");
+  const stem = extensionIndex > 0 ? normalizedFileName.slice(0, extensionIndex) : normalizedFileName;
+  return stem.trim() || undefined;
+}
 
 export interface BookDockMetadata {
   title?: string;
   subtitle?: string;
   authors?: string[];
+  narrators?: string[];
   description?: string;
   publisher?: string;
+  publishedDate?: string;
   publishedYear?: number;
   language?: string;
   pageCount?: number;
@@ -16,6 +32,8 @@ export interface BookDockMetadata {
   seriesIndex?: number;
   genres?: string[];
   coverUrl?: string;
+  durationSeconds?: number;
+  chapters?: AudiobookChapter[];
 }
 
 export interface BookDockFile {
@@ -49,12 +67,15 @@ export interface BookDockSummary {
   ready: number;
   error: number;
   total: number;
+  paused: boolean;
 }
 
 export interface BookDockFinalizeOverride {
   fileId: number;
   libraryId?: number;
   folderId?: number;
+  skipDuplicateCheck?: boolean;
+  targetFileName?: string;
 }
 
 export interface BookDockFinalizeRequest {
@@ -84,6 +105,37 @@ export interface BookDockFinalizeResult {
   succeeded: number;
   failed: number;
   results: BookDockFinalizeFileResult[];
+}
+
+export type BookDockFinalizePreviewStatus =
+  "ready" | "duplicate" | "destination_conflict" | "missing_destination" | "invalid_target" | "access_denied" | "invalid_format" | "error";
+
+export interface BookDockFinalizePreviewItem {
+  fileId: number;
+  fileName: string;
+  newName?: string;
+  status: BookDockFinalizePreviewStatus;
+  existingBookId?: number;
+  message?: string;
+}
+
+export interface BookDockFinalizePreviewResult {
+  total: number;
+  ready: number;
+  duplicates: number;
+  destinationConflicts: number;
+  missingDestination: number;
+  blocked: number;
+  truncated: boolean;
+  itemLimit: number;
+  items: BookDockFinalizePreviewItem[];
+}
+
+export interface BookDockDiscardDuplicatesResult {
+  total: number;
+  discarded: number;
+  skipped: number;
+  discardedFileIds: number[];
 }
 
 export interface BookDockBulkEditRequest {

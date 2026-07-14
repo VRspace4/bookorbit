@@ -9,6 +9,7 @@ import { MetadataFetchService } from './metadata-fetch.service';
 import { ProviderRegistry } from './provider-registry';
 import { ProviderThrottleTracker } from './provider-throttle.tracker';
 import { IdentifiableProvider, MetadataProvider } from './providers/metadata-provider';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function candidate(provider: MetadataProviderKey, providerId: string, title = `${provider}-${providerId}`): MetadataCandidate {
   return { provider, providerId, title };
@@ -29,7 +30,17 @@ function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 describe('MetadataFetchService', () => {
@@ -98,6 +109,52 @@ describe('MetadataFetchService', () => {
     expect(openLibrary.search).toHaveBeenCalledWith(expect.objectContaining({ title: 'Dune' }));
   });
 
+  it('starts selected providers concurrently within one search', async () => {
+    let active = 0;
+    let maxActive = 0;
+
+    function makeBlockedProvider(key: MetadataProviderKey): MetadataProvider & { started: Promise<void>; release: () => void } {
+      const started = deferred();
+      const release = deferred();
+      return {
+        key,
+        label: key,
+        identifiable: false,
+        started: started.promise,
+        release: release.resolve,
+        search: vi.fn().mockImplementation(async (params) => {
+          active++;
+          maxActive = Math.max(maxActive, active);
+          started.resolve();
+          try {
+            await release.promise;
+            return [candidate(key, `${key}-1`, params.title ?? key)];
+          } finally {
+            active--;
+          }
+        }),
+      };
+    }
+
+    const google = makeBlockedProvider(MetadataProviderKey.GOOGLE);
+    const openLibrary = makeBlockedProvider(MetadataProviderKey.OPEN_LIBRARY);
+    registry.select.mockReturnValue([google, openLibrary]);
+
+    const search = firstValueFrom(service.search({ title: 'Dune' }).pipe(toArray()));
+
+    await Promise.all([google.started, openLibrary.started]);
+
+    expect(maxActive).toBe(2);
+
+    google.release();
+    openLibrary.release();
+
+    await expect(search).resolves.toEqual([
+      candidate(MetadataProviderKey.GOOGLE, 'google-1', 'Dune'),
+      candidate(MetadataProviderKey.OPEN_LIBRARY, 'openLibrary-1', 'Dune'),
+    ]);
+  });
+
   it('falls back to non-isbn search when isbn search returns no results', async () => {
     const google: MetadataProvider = {
       key: MetadataProviderKey.GOOGLE,
@@ -164,6 +221,58 @@ describe('MetadataFetchService', () => {
     expect(google.search).toHaveBeenCalledWith(expect.objectContaining({ isbn: '9780441013593' }));
   });
 
+  it('falls back to title-only search for manual searches when title-author search returns no results', async () => {
+    const audible: MetadataProvider = {
+      key: MetadataProviderKey.AUDIBLE,
+      label: 'Audible',
+      identifiable: false,
+      search: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([candidate(MetadataProviderKey.AUDIBLE, 'B002V1NSN2', 'Confessor')]),
+    };
+    registry.select.mockReturnValue([audible]);
+
+    const results = await firstValueFrom(
+      service.search({ title: 'Confessor', author: 'Terry Goodkin', isbn: '9781662539374', isAudiobook: true }).pipe(toArray()),
+    );
+
+    expect(results).toEqual([candidate(MetadataProviderKey.AUDIBLE, 'B002V1NSN2', 'Confessor')]);
+    expect(audible.search).toHaveBeenCalledTimes(3);
+    expect(audible.search).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ title: 'Confessor', author: 'Terry Goodkin', isbn: '9781662539374' }),
+    );
+    expect(audible.search).toHaveBeenNthCalledWith(2, expect.objectContaining({ title: 'Confessor', author: 'Terry Goodkin', isbn: undefined }));
+    expect(audible.search).toHaveBeenNthCalledWith(3, expect.objectContaining({ title: 'Confessor', author: undefined, isbn: undefined }));
+  });
+
+  it('does not use title-only fallback for capped automated searches', async () => {
+    const audible: MetadataProvider = {
+      key: MetadataProviderKey.AUDIBLE,
+      label: 'Audible',
+      identifiable: false,
+      search: vi.fn().mockResolvedValue([]),
+    };
+    registry.select.mockReturnValue([audible]);
+
+    const results = await firstValueFrom(
+      service
+        .search({
+          title: 'Confessor',
+          author: 'Terry Goodkin',
+          isbn: '9781662539374',
+          isAudiobook: true,
+          maxCandidatesPerProvider: 1,
+        })
+        .pipe(toArray()),
+    );
+
+    expect(results).toEqual([]);
+    expect(audible.search).toHaveBeenCalledTimes(2);
+  });
+
   it('uses lookupById for identifiable providers when existing provider ids are present', async () => {
     const google: IdentifiableProvider = {
       key: MetadataProviderKey.GOOGLE,
@@ -179,11 +288,18 @@ describe('MetadataFetchService', () => {
     );
 
     expect(results).toEqual([candidate(MetadataProviderKey.GOOGLE, 'stored-id', 'Dune')]);
-    expect(google.lookupById).toHaveBeenCalledWith('stored-id', expect.anything());
+    expect(google.lookupById).toHaveBeenCalledWith(
+      'stored-id',
+      expect.anything(),
+      expect.objectContaining({
+        title: 'Dune',
+        existingProviderIds: { [MetadataProviderKey.GOOGLE]: 'stored-id' },
+      }),
+    );
     expect(google.search).not.toHaveBeenCalled();
   });
 
-  it('returns no result when lookupById returns null for an existing provider id', async () => {
+  it('falls back to provider search when lookupById returns null for an existing provider id', async () => {
     const google: IdentifiableProvider = {
       key: MetadataProviderKey.GOOGLE,
       label: 'Google',
@@ -197,9 +313,92 @@ describe('MetadataFetchService', () => {
       service.search({ title: 'Dune', existingProviderIds: { [MetadataProviderKey.GOOGLE]: 'missing' } }).pipe(toArray()),
     );
 
-    expect(results).toEqual([]);
-    expect(google.lookupById).toHaveBeenCalledWith('missing', expect.anything());
-    expect(google.search).not.toHaveBeenCalled();
+    expect(results).toEqual([candidate(MetadataProviderKey.GOOGLE, 'search-id', 'Dune')]);
+    expect(google.lookupById).toHaveBeenCalledWith(
+      'missing',
+      expect.anything(),
+      expect.objectContaining({
+        title: 'Dune',
+        existingProviderIds: { [MetadataProviderKey.GOOGLE]: 'missing' },
+      }),
+    );
+    expect(google.search).toHaveBeenCalledTimes(1);
+    expect(google.search).toHaveBeenCalledWith(expect.objectContaining({ title: 'Dune' }));
+  });
+
+  it('passes ISBN context into stored provider lookups and falls back when lookup rejects the edition', async () => {
+    const hardcover: IdentifiableProvider = {
+      key: MetadataProviderKey.HARDCOVER,
+      label: 'Hardcover',
+      identifiable: true,
+      search: vi.fn().mockResolvedValue([candidate(MetadataProviderKey.HARDCOVER, 'comet-in-moominland', 'Kometen kommer')]),
+      lookupById: vi.fn().mockResolvedValue(null),
+    };
+    registry.select.mockReturnValue([hardcover]);
+
+    const results = await firstValueFrom(
+      service
+        .search({
+          title: 'Kometen kommer',
+          author: 'Tove Jansson',
+          isbn: '9789523331587',
+          existingProviderIds: { [MetadataProviderKey.HARDCOVER]: 'comet-in-moominland' },
+        })
+        .pipe(toArray()),
+    );
+
+    expect(results).toEqual([candidate(MetadataProviderKey.HARDCOVER, 'comet-in-moominland', 'Kometen kommer')]);
+    expect(hardcover.lookupById).toHaveBeenCalledWith(
+      'comet-in-moominland',
+      expect.anything(),
+      expect.objectContaining({
+        title: 'Kometen kommer',
+        author: 'Tove Jansson',
+        isbn: '9789523331587',
+      }),
+    );
+    expect(hardcover.search).toHaveBeenCalledTimes(1);
+    expect(hardcover.search).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Kometen kommer',
+        author: 'Tove Jansson',
+        isbn: '9789523331587',
+      }),
+    );
+  });
+
+  it('falls back to provider search when lookupById returns an irrelevant candidate', async () => {
+    const google: IdentifiableProvider = {
+      key: MetadataProviderKey.GOOGLE,
+      label: 'Google',
+      identifiable: true,
+      search: vi.fn().mockResolvedValue([candidate(MetadataProviderKey.GOOGLE, 'search-id', 'Dune')]),
+      lookupById: vi.fn().mockResolvedValue(candidate(MetadataProviderKey.GOOGLE, 'stored-id', 'Completely Unrelated')),
+    };
+    registry.select.mockReturnValue([google]);
+
+    const results = await firstValueFrom(
+      service
+        .search({
+          title: 'Dune',
+          author: 'Frank Herbert',
+          existingProviderIds: { [MetadataProviderKey.GOOGLE]: 'stored-id' },
+        })
+        .pipe(toArray()),
+    );
+
+    expect(results).toEqual([candidate(MetadataProviderKey.GOOGLE, 'search-id', 'Dune')]);
+    expect(google.lookupById).toHaveBeenCalledWith(
+      'stored-id',
+      expect.anything(),
+      expect.objectContaining({
+        title: 'Dune',
+        author: 'Frank Herbert',
+        existingProviderIds: { [MetadataProviderKey.GOOGLE]: 'stored-id' },
+      }),
+    );
+    expect(google.search).toHaveBeenCalledTimes(1);
+    expect(google.search).toHaveBeenCalledWith(expect.objectContaining({ title: 'Dune', author: 'Frank Herbert' }));
   });
 
   it('isolates provider failures so one provider error does not fail the full stream', async () => {
@@ -280,7 +479,12 @@ describe('MetadataFetchService', () => {
       openLibraryId: 'ol-1',
       itunesId: null,
       audibleId: 'B0ABC12345',
+      librofmId: '9781234567890',
+      koboId: 'beautiful-ugly-3',
       comicvineId: 'cv-1',
+      ranobedbId: null,
+      lubimyczytacId: 'lc-1',
+      aladinId: null,
     });
     metadataFetchRepository.hasLibraryAccess.mockResolvedValue(true);
 
@@ -294,7 +498,12 @@ describe('MetadataFetchService', () => {
       [MetadataProviderKey.OPEN_LIBRARY]: 'ol-1',
       [MetadataProviderKey.ITUNES]: undefined,
       [MetadataProviderKey.AUDIBLE]: 'B0ABC12345',
+      [MetadataProviderKey.LIBROFM]: '9781234567890',
+      [MetadataProviderKey.KOBO]: 'beautiful-ugly-3',
       [MetadataProviderKey.COMICVINE]: 'cv-1',
+      [MetadataProviderKey.RANOBEDB]: undefined,
+      [MetadataProviderKey.LUBIMYCZYTAC]: 'lc-1',
+      [MetadataProviderKey.ALADIN]: undefined,
     });
     expect(metadataFetchRepository.hasLibraryAccess).toHaveBeenCalledWith(5, 7);
   });
@@ -309,7 +518,12 @@ describe('MetadataFetchService', () => {
       openLibraryId: null,
       itunesId: null,
       audibleId: null,
+      librofmId: null,
+      koboId: null,
       comicvineId: null,
+      ranobedbId: null,
+      lubimyczytacId: null,
+      aladinId: null,
     });
 
     await expect(service.getStoredProviderIds(99, makeUser({ isSuperuser: true }))).resolves.toEqual({
@@ -320,7 +534,12 @@ describe('MetadataFetchService', () => {
       [MetadataProviderKey.OPEN_LIBRARY]: undefined,
       [MetadataProviderKey.ITUNES]: undefined,
       [MetadataProviderKey.AUDIBLE]: undefined,
+      [MetadataProviderKey.LIBROFM]: undefined,
+      [MetadataProviderKey.KOBO]: undefined,
       [MetadataProviderKey.COMICVINE]: undefined,
+      [MetadataProviderKey.RANOBEDB]: undefined,
+      [MetadataProviderKey.LUBIMYCZYTAC]: undefined,
+      [MetadataProviderKey.ALADIN]: undefined,
     });
     expect(metadataFetchRepository.hasLibraryAccess).not.toHaveBeenCalled();
   });
@@ -341,7 +560,12 @@ describe('MetadataFetchService', () => {
       openLibraryId: null,
       itunesId: null,
       audibleId: null,
+      librofmId: null,
+      koboId: null,
       comicvineId: null,
+      ranobedbId: null,
+      lubimyczytacId: null,
+      aladinId: null,
     });
     metadataFetchRepository.hasLibraryAccess.mockResolvedValue(false);
 

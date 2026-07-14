@@ -9,7 +9,12 @@ const PROVIDER_HEX: Record<string, string> = {
   itunes: '#ff4f5d',
   audible: '#FF8A00',
   audnexus: '#FF5ADD',
+  librofm: '#62B9B6',
   comicvine: '#ffdb0f',
+  ranobedb: '#a78cff',
+  kobo: '#e23434',
+  lubimyczytac: '#f47373',
+  aladin: '#3E7FFF',
   auto: '#8B5CF6',
 }
 
@@ -24,7 +29,12 @@ export const PROVIDER_SHORT_LABELS: Record<string, string> = {
   itunes: 'iTunes',
   audible: 'Audible',
   audnexus: 'AudNexus',
+  librofm: 'Libro.fm',
   comicvine: 'ComicVine',
+  ranobedb: 'RanobeDB',
+  kobo: 'Kobo',
+  lubimyczytac: 'LubimyCzytac',
+  aladin: 'Aladin',
   auto: 'Fetched',
 }
 

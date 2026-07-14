@@ -132,8 +132,6 @@ describe('BookMetadataFetchConfigService', () => {
     });
     db.query.libraries.findFirst.mockResolvedValueOnce({
       bookMetadataFetchConfig: null,
-    });
-    db.query.libraries.findFirst.mockResolvedValueOnce({
       bookMetadataFetchLastRunAt: new Date('2026-01-01T00:00:00.000Z'),
       bookMetadataFetchLastQueuedCount: 17,
     });
@@ -147,6 +145,7 @@ describe('BookMetadataFetchConfigService', () => {
 
     await expect(service.getLibraryConfigWithLastRun(9)).resolves.toEqual({
       ...DEFAULT_BOOK_METADATA_FETCH_CONFIG,
+      override: null,
       lastRunAt: '2026-01-01T00:00:00.000Z',
       lastQueuedCount: 17,
     });
@@ -158,5 +157,44 @@ describe('BookMetadataFetchConfigService', () => {
         bookMetadataFetchLastQueuedCount: 20,
       }),
     );
+  });
+
+  it('getLibraryConfigWithLastRun includes stored override and effective config', async () => {
+    const { db, service } = makeService();
+    db.query.appSettings.findFirst.mockResolvedValueOnce({
+      value: JSON.stringify({
+        enabled: true,
+        triggerOnImport: true,
+        conditions: {
+          neverFetched: { enabled: true },
+          scoreThreshold: { enabled: true, threshold: 70 },
+          missingFields: { enabled: true, fields: ['cover'] },
+        },
+      }),
+    });
+    const override = {
+      enabled: false,
+      conditions: {
+        scoreThreshold: { threshold: 45 },
+      },
+    };
+    db.query.libraries.findFirst.mockResolvedValueOnce({
+      bookMetadataFetchConfig: override,
+      bookMetadataFetchLastRunAt: null,
+      bookMetadataFetchLastQueuedCount: null,
+    });
+
+    await expect(service.getLibraryConfigWithLastRun(5)).resolves.toEqual({
+      enabled: false,
+      triggerOnImport: true,
+      conditions: {
+        neverFetched: { enabled: true },
+        scoreThreshold: { enabled: true, threshold: 45 },
+        missingFields: { enabled: true, fields: ['cover'] },
+      },
+      override,
+      lastRunAt: null,
+      lastQueuedCount: null,
+    });
   });
 });

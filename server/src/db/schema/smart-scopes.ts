@@ -11,10 +11,11 @@ export const smartScopes = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     name: varchar('name', { length: 255 }).notNull(),
-    icon: varchar('icon', { length: 64 }),
+    icon: varchar('icon', { length: 100 }),
     filter: jsonb('filter').$type<GroupRule | null>(),
     defaultSort: jsonb('default_sort').$type<SortSpec[]>().notNull().default([]),
     isPublic: boolean('is_public').notNull().default(false),
+    syncToKobo: boolean('sync_to_kobo').notNull().default(false),
     displayOrder: integer('display_order').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true })

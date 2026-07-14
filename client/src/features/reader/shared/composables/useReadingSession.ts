@@ -1,4 +1,4 @@
-import { onUnmounted, ref } from 'vue'
+import { onUnmounted, ref, unref, type MaybeRef } from 'vue'
 import { api } from '@/lib/api'
 
 export interface ProgressSnapshot {
@@ -11,13 +11,17 @@ const IDLE_TIMEOUT_MS = 5 * 60 * 1000
 const MIN_SESSION_MS = 10 * 1000
 const ELAPSED_UPDATE_INTERVAL_MS = 30 * 1000
 
+export interface ReadingSessionOptions {
+  trackingEnabled?: MaybeRef<boolean>
+}
+
 function generateSessionId(): string {
   return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` // codeql[js/insecure-randomness] - session IDs are non-security deduplication keys
 }
 
-export function useReadingSession(bookFileId: number, getProgress: () => ProgressSnapshot) {
+export function useReadingSession(bookFileId: number, getProgress: () => ProgressSnapshot, options: ReadingSessionOptions = {}) {
   let sessionId = generateSessionId()
   let startedAt: Date | null = null
   let activeMs = 0
@@ -28,6 +32,11 @@ export function useReadingSession(bookFileId: number, getProgress: () => Progres
 
   const elapsedMinutes = ref(0)
   let elapsedInterval: ReturnType<typeof setInterval> | null = null
+  const trackingEnabled = options.trackingEnabled ?? true
+
+  function canTrack(): boolean {
+    return unref(trackingEnabled)
+  }
 
   function getActiveMs(): number {
     if (activeStart === null) return activeMs
@@ -92,6 +101,7 @@ export function useReadingSession(bookFileId: number, getProgress: () => Progres
   }
 
   function onActivity() {
+    if (!canTrack()) return
     // No active session or previous session ended (e.g. after idle timeout) - start fresh.
     if (!startedAt || ended) {
       sessionId = generateSessionId()
@@ -103,6 +113,16 @@ export function useReadingSession(bookFileId: number, getProgress: () => Progres
   }
 
   function endSession(useBeacon = false) {
+    if (!canTrack()) {
+      clearIdleTimer()
+      stopElapsedInterval()
+      startedAt = null
+      activeStart = null
+      activeMs = 0
+      ended = true
+      elapsedMinutes.value = 0
+      return
+    }
     if (ended || !startedAt) return
     ended = true
     clearIdleTimer()

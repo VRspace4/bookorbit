@@ -1,11 +1,10 @@
 import { ref } from 'vue'
-import type { ColumnId } from './useTableColumns'
 
 export type BookRefreshFeedbackState = 'refreshing' | 'success' | 'failed'
 
 export type BookRefreshFeedbackEntry = {
   state: BookRefreshFeedbackState
-  changedColumns: Set<ColumnId>
+  changedColumns: Set<string>
   message: string | null
   updatedAt: number
 }
@@ -48,7 +47,7 @@ function scheduleFlashClear(bookId: number, expectedUpdatedAt: number, delayMs =
       const current = feedbackByBookId.value.get(bookId)
       if (!current) return
       if (current.updatedAt !== expectedUpdatedAt || current.state !== 'success') return
-      setEntry(bookId, { ...current, changedColumns: new Set<ColumnId>() })
+      setEntry(bookId, { ...current, changedColumns: new Set<string>() })
       flashTimers.delete(bookId)
     }, delayMs),
   )
@@ -75,7 +74,7 @@ export function useBookRefreshFeedback() {
     clearFlashTimer(bookId)
     setEntry(bookId, {
       state: 'refreshing',
-      changedColumns: new Set<ColumnId>(),
+      changedColumns: new Set<string>(),
       message: null,
       updatedAt: Date.now(),
     })
@@ -87,7 +86,7 @@ export function useBookRefreshFeedback() {
     }
   }
 
-  function markSuccess(bookId: number, changedColumns: ColumnId[] = []) {
+  function markSuccess(bookId: number, changedColumns: string[] = []) {
     clearTimer(bookId)
     clearFlashTimer(bookId)
     const updatedAt = Date.now()
@@ -107,7 +106,7 @@ export function useBookRefreshFeedback() {
     const updatedAt = Date.now()
     setEntry(bookId, {
       state: 'failed',
-      changedColumns: new Set<ColumnId>(),
+      changedColumns: new Set<string>(),
       message,
       updatedAt,
     })
@@ -124,7 +123,7 @@ export function useBookRefreshFeedback() {
     return feedbackByBookId.value.get(bookId) ?? null
   }
 
-  function isCellChanged(bookId: number, columnId: ColumnId): boolean {
+  function isCellChanged(bookId: number, columnId: string): boolean {
     return feedbackByBookId.value.get(bookId)?.changedColumns.has(columnId) ?? false
   }
 

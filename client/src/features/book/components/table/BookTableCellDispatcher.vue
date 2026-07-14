@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Lock, LockOpen } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { Lock, LockOpen } from '@lucide/vue'
+import { FORMAT_TO_GROUP, type BookCard } from '@bookorbit/types'
 import BookTableCoverCell from './BookTableCoverCell.vue'
 import BookTableTextCell from './BookTableTextCell.vue'
 import BookTableNumberCell from './BookTableNumberCell.vue'
@@ -14,15 +16,15 @@ import BookTableActionsCell from './BookTableActionsCell.vue'
 import BookTableProgressCell from './BookTableProgressCell.vue'
 import BookTableMetadataScoreCell from './BookTableMetadataScoreCell.vue'
 import BookTableLockableCell from './BookTableLockableCell.vue'
-import type { BookCard } from '@bookorbit/types'
-import type { CellType, ColumnId } from '@/features/book/composables/tableColumnSchema'
+import BookTableBooleanCell from './BookTableBooleanCell.vue'
+import type { CellType } from '@/features/book/composables/tableColumnSchema'
 
 type NavigationDirection = 'next' | 'prev' | 'rowUp' | 'rowDown'
 type BookActionType = 'quick-view' | 'add-to-collection' | 'delete'
 
 const props = defineProps<{
   book: BookCard
-  colId: ColumnId
+  colId: string
   cellType: CellType
   hasLockField: boolean
   isLocked: boolean
@@ -54,12 +56,18 @@ const emit = defineEmits<{
   'update:book': [updated: BookCard]
 }>()
 
+const { t } = useI18n()
+
 function asString(v: unknown): string | null {
   return v as string | null
 }
 
 function asNumber(v: unknown): number | null {
   return v as number | null
+}
+
+function asBoolean(v: unknown): boolean | null {
+  return v as boolean | null
 }
 
 function asStringArray(v: unknown): string[] {
@@ -71,6 +79,10 @@ const lockStateClass = computed(() => {
   if (props.lockedFieldCount > 0) return 'text-amber-600/90 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300'
   return 'text-muted-foreground/70 hover:text-foreground'
 })
+
+const primaryFile = computed(() => props.book.files.find((file) => file.role === 'primary') ?? props.book.files[0] ?? null)
+const isAudiobook = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'audio')
+const isComic = computed(() => primaryFile.value?.format != null && FORMAT_TO_GROUP[primaryFile.value.format] === 'cbx')
 </script>
 
 <template>
@@ -78,7 +90,7 @@ const lockStateClass = computed(() => {
     <button
       class="flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-muted"
       :class="lockStateClass"
-      :aria-label="isFullyLocked ? 'Unlock all fields' : 'Lock all fields'"
+      :aria-label="isFullyLocked ? t('book.table.locks.unlockAll') : t('book.table.locks.lockAll')"
       @click.stop="isFullyLocked ? emit('unlockAll') : emit('lockAll')"
     >
       <Lock v-if="lockedFieldCount > 0" :size="13" />
@@ -90,7 +102,10 @@ const lockStateClass = computed(() => {
     v-else-if="cellType === 'cover'"
     :book-id="book.id"
     :title="book.title"
+    :version="book.updatedAt ?? book.addedAt"
     :has-cover="book.hasCover"
+    :is-audio="isAudiobook"
+    :is-comic="isComic"
     @cover-click="emit('coverClick')"
   />
 
@@ -160,6 +175,8 @@ const lockStateClass = computed(() => {
   <BookTableFormatCell v-else-if="cellType === 'format'" :files="book.files" />
   <BookTableReadButtonCell v-else-if="cellType === 'read'" :book="book" />
   <BookTableDateCell v-else-if="cellType === 'date'" :value="asString(value)" />
+
+  <BookTableBooleanCell v-else-if="cellType === 'customBoolean'" :value="asBoolean(value)" :is-read-only="isReadOnly" @save="emit('save', $event)" />
 
   <BookTableActionsCell
     v-else-if="cellType === 'actions' && !selectionMode"

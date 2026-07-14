@@ -1,12 +1,15 @@
 import { toast } from 'vue-sonner'
-import type { BookMissingEvent, BookMovedEvent, BookRestoredEvent } from '@bookorbit/types'
+import { getCurrentInstance, onUnmounted } from 'vue'
+import type { BookMissingEvent, BookMovedEvent, BookRestoredEvent, BookTransferredEvent } from '@bookorbit/types'
 import { getSocket } from '@/features/scanner/composables/useScanProgress'
 
 type BookIdsCallback = (bookIds: number[]) => void
+type BookTransferredCallback = (event: BookTransferredEvent) => void
 
 const missingCallbacks = new Set<BookIdsCallback>()
 const restoredCallbacks = new Set<BookIdsCallback>()
 const movedCallbacks = new Set<BookIdsCallback>()
+const transferredCallbacks = new Set<BookTransferredCallback>()
 
 let pendingMissingCount = 0
 let pendingRestoredCount = 0
@@ -67,25 +70,37 @@ function ensureInitialized() {
     clearTimeout(movedToastTimer ?? undefined)
     movedToastTimer = setTimeout(flushMovedToast, 1000)
   })
+
+  socket.on('book:transferred', (event: BookTransferredEvent) => {
+    for (const cb of transferredCallbacks) cb(event)
+  })
+}
+
+function registerCallback<T extends (...args: never[]) => void>(callbacks: Set<T>, cb: T): () => void {
+  callbacks.add(cb)
+  const cleanup = () => callbacks.delete(cb)
+  if (getCurrentInstance()) onUnmounted(cleanup)
+  return cleanup
 }
 
 export function useBookEvents() {
   ensureInitialized()
 
   function onBookMissing(cb: BookIdsCallback): () => void {
-    missingCallbacks.add(cb)
-    return () => missingCallbacks.delete(cb)
+    return registerCallback(missingCallbacks, cb)
   }
 
   function onBookRestored(cb: BookIdsCallback): () => void {
-    restoredCallbacks.add(cb)
-    return () => restoredCallbacks.delete(cb)
+    return registerCallback(restoredCallbacks, cb)
   }
 
   function onBookMoved(cb: BookIdsCallback): () => void {
-    movedCallbacks.add(cb)
-    return () => movedCallbacks.delete(cb)
+    return registerCallback(movedCallbacks, cb)
   }
 
-  return { onBookMissing, onBookRestored, onBookMoved }
+  function onBookTransferred(cb: BookTransferredCallback): () => void {
+    return registerCallback(transferredCallbacks, cb)
+  }
+
+  return { onBookMissing, onBookRestored, onBookMoved, onBookTransferred }
 }

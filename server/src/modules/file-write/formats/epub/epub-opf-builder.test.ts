@@ -77,6 +77,8 @@ describe('epub-opf-builder', () => {
       goodreadsId: '42129393',
       openLibraryId: 'OL20652610W',
       hardcoverId: 'new-orleans-rush',
+      hardcoverEditionId: '8941973',
+      ranobedbId: 'ranobe-1',
       itunesId: '123456789',
     });
 
@@ -87,6 +89,10 @@ describe('epub-opf-builder', () => {
     expect(result.newOpfXml).toContain('opf:scheme="GOODREADS"');
     expect(result.newOpfXml).toContain('opf:scheme="OPENLIBRARY"');
     expect(result.newOpfXml).toContain('opf:scheme="HARDCOVER"');
+    expect(result.newOpfXml).toContain('opf:scheme="HARDCOVER_EDITION"');
+    expect(result.newOpfXml).toContain('>8941973<');
+    expect(result.newOpfXml).toContain('opf:scheme="RANOBEDB"');
+    expect(result.newOpfXml).toContain('>ranobe-1<');
     expect(result.newOpfXml).toContain('opf:scheme="ITUNES"');
     // Must not use old urn: prefix style
     expect(result.newOpfXml).not.toContain('urn:google:');
@@ -161,5 +167,77 @@ describe('epub-opf-builder', () => {
 
     const parsed = parser.parse(result.newOpfXml) as Record<string, unknown>[];
     expect(parsed.length).toBeGreaterThan(0);
+  });
+
+  it('writes EPUB2-only BookOrbit metadata fields and preserves omitted values', () => {
+    const opf = `
+      <package version="2.0" unique-identifier="uid">
+        <metadata>
+          <dc:identifier id="uid">urn:uuid:abc</dc:identifier>
+        </metadata>
+      </package>
+    `;
+
+    const result = build(opf, {
+      subtitle: 'Book One',
+      isbn10: '0441172717',
+      isbn13: '9780441172719',
+      pageCount: 412,
+      rating: 5,
+      tags: ['classic', 'space'],
+      publishedYear: 1965,
+      language: 'en',
+      publisher: 'Ace',
+      description: 'Arrakis',
+    });
+
+    expect(result.newOpfXml).toContain('meta name="bookorbit:subtitle" content="Book One"');
+    expect(result.newOpfXml).toContain('meta name="bookorbit:isbn10" content="0441172717"');
+    expect(result.newOpfXml).toContain('meta name="bookorbit:page_count" content="412"');
+    expect(result.newOpfXml).toContain('meta name="bookorbit:rating" content="5"');
+    expect(result.newOpfXml).toContain('classic');
+    expect(result.newOpfXml).toContain('urn:isbn:9780441172719');
+    expect(result.fieldsWritten).toEqual(
+      expect.arrayContaining([
+        'subtitle',
+        'description',
+        'publisher',
+        'publishedYear',
+        'language',
+        'pageCount',
+        'isbn10',
+        'isbn13',
+        'rating',
+        'tags',
+      ]),
+    );
+    expect(result.fieldsWritten).toHaveLength(10);
+  });
+
+  it('writes stable custom metadata tags and reports written custom fields', () => {
+    const opf = `
+      <package version="3.0" unique-identifier="uid">
+        <metadata>
+          <dc:identifier id="uid">urn:uuid:abc</dc:identifier>
+          <meta property="bookorbit:custom:old_field">Old</meta>
+        </metadata>
+      </package>
+    `;
+
+    const result = build(opf, {
+      customMetadata: [
+        { fieldId: 1, key: 'original_title', label: 'Original Title', type: 'text', displayOrder: 0, value: 'Le Comte de Monte-Cristo' },
+        { fieldId: 2, key: 'translated', label: 'Translated', type: 'boolean', displayOrder: 1, value: false },
+        { fieldId: 3, key: 'empty_field', label: 'Empty Field', type: 'text', displayOrder: 2, value: null },
+      ],
+    });
+
+    expect(result.newOpfXml).toContain('property="bookorbit:custom:original_title"');
+    expect(result.newOpfXml).toContain('Le Comte de Monte-Cristo');
+    expect(result.newOpfXml).toContain('property="bookorbit:custom:translated"');
+    expect(result.newOpfXml).toContain('>false<');
+    expect(result.newOpfXml).not.toContain('old_field');
+    expect(result.newOpfXml).not.toContain('empty_field');
+    expect(result.fieldsWritten).toEqual(['customMetadata:original_title', 'customMetadata:translated']);
   });
 });

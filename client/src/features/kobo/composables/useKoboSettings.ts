@@ -8,6 +8,8 @@ const settings = ref<KoboSyncSettings>({
   convertToKepub: true,
   forceEnableHyphenation: false,
   kepubConversionLimitMb: 100,
+  twoWayProgressSync: false,
+  syncBookOrbitAnnotationsToKobo: false,
 })
 let fetchPromise: Promise<void> | null = null
 

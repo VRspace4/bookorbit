@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { type Component, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { onBeforeRouteLeave, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import {
   AlignJustify,
   ArrowDownUp,
@@ -18,11 +19,12 @@ import {
   Layers,
   LayoutGrid,
   Maximize,
+  Minimize,
   Moon,
   ScanLine,
   Settings,
   Sun,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { useVisibility } from '../shared/composables/useVisibility'
 import { useReaderProgress } from '../shared/composables/useReaderProgress'
 import { useReadingSession } from '../shared/composables/useReadingSession'
@@ -31,6 +33,7 @@ import { useCbzSettings } from './composables/useCbzSettings'
 import type { BgColor, Direction, FitMode, ScrollMode, SpreadAlignment, ViewMode, WidePageSingletonMode } from './composables/useCbzSettings'
 import { useReaderSettings } from '../shared/composables/useReaderSettings'
 import { leaveReader } from '../shared/lib/reader-navigation'
+import { useFullscreen } from '../shared/composables/useFullscreen'
 import type { CbxReaderSettings } from '@bookorbit/types'
 import { DEFAULT_WIDE_PAGE_RATIO_THRESHOLD, createCbzSpreadLayout } from './lib/spread-layout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -38,20 +41,29 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/compon
 
 const TWO_PAGE_BREAKPOINT = 900
 
-const props = defineProps<{ bookId: number; fileId: number }>()
+const { t } = useI18n()
+
+const props = defineProps<{ bookId: number; fileId: number; peekMode?: boolean }>()
+const route = useRoute()
 const router = useRouter()
+const trackingEnabled = computed(() => !props.peekMode)
 
 async function handleBack() {
   await leaveReader(router)
 }
 
 const { headerVisible, footerVisible, handleMiddleTap, showHeader, showFooter, setVisibilityLock } = useVisibility()
+const { isFullscreen, toggleFullscreen } = useFullscreen()
 
-const { onActivity, elapsedMinutes } = useReadingSession(props.fileId, () => ({
-  percentage: progress.percentage.value,
-  pageNumber: progress.pageNumber.value,
-}))
-const progress = useReaderProgress(props.bookId, props.fileId, elapsedMinutes)
+const { onActivity, elapsedMinutes } = useReadingSession(
+  props.fileId,
+  () => ({
+    percentage: progress.percentage.value,
+    pageNumber: progress.pageNumber.value,
+  }),
+  { trackingEnabled },
+)
+const progress = useReaderProgress(props.bookId, props.fileId, elapsedMinutes, 0, { trackingEnabled })
 const { pageCount, bookTitle, loading, error, pageUrl, load } = useCbz(props.fileId, props.bookId)
 const { fitMode, viewMode, scrollMode, direction, spreadAlignment, forceTwoPage, widePageSingletonMode, bgColor, bgValue, imgFitClass } =
   useCbzSettings()
@@ -90,38 +102,38 @@ watch(showSettings, (open) => {
 })
 
 // ── Settings options ───────────────────────────────────────────────────────────
-const FIT_OPTIONS: { value: FitMode; label: string; icon: Component }[] = [
-  { value: 'fit-page', label: 'Page Fit', icon: Maximize },
-  { value: 'fit-width', label: 'Page Width', icon: ArrowLeftRight },
-  { value: 'fit-height', label: 'Page Height', icon: ArrowDownUp },
-  { value: 'actual', label: 'Actual Size', icon: ImageIcon },
-]
-const VIEW_OPTIONS: { value: ViewMode; label: string; icon: Component }[] = [
-  { value: 'single', label: 'Single', icon: BookOpen },
-  { value: 'two-page', label: 'Two-page', icon: LayoutGrid },
-]
-const SCROLL_OPTIONS: { value: ScrollMode; label: string; icon: Component }[] = [
-  { value: 'paginated', label: 'Paged', icon: ScanLine },
-  { value: 'infinite', label: 'Infinite', icon: Layers },
-  { value: 'long-strip', label: 'Strip', icon: AlignJustify },
-]
-const DIRECTION_OPTIONS: { value: Direction; label: string; icon: Component }[] = [
-  { value: 'ltr', label: 'L to R', icon: ArrowRight },
-  { value: 'rtl', label: 'R to L', icon: ArrowLeft },
-]
-const SPREAD_ALIGNMENT_OPTIONS: { value: SpreadAlignment; label: string; icon: Component }[] = [
-  { value: 'normal', label: 'Normal', icon: LayoutGrid },
-  { value: 'shifted', label: 'Shifted', icon: BookOpen },
-]
-const WIDE_PAGE_OPTIONS: { value: WidePageSingletonMode; label: string; icon: Component }[] = [
-  { value: 'auto', label: 'Auto', icon: ImageIcon },
-  { value: 'disable', label: 'In spreads', icon: LayoutGrid },
-]
-const BG_OPTIONS: { value: BgColor; label: string; icon: Component }[] = [
-  { value: 'black', label: 'Black', icon: Moon },
-  { value: 'gray', label: 'Gray', icon: Circle },
-  { value: 'white', label: 'White', icon: Sun },
-]
+const FIT_OPTIONS = computed<{ value: FitMode; label: string; icon: Component }[]>(() => [
+  { value: 'fit-page', label: t('reader.cbz.fit.page'), icon: Maximize },
+  { value: 'fit-width', label: t('reader.cbz.fit.width'), icon: ArrowLeftRight },
+  { value: 'fit-height', label: t('reader.cbz.fit.height'), icon: ArrowDownUp },
+  { value: 'actual', label: t('reader.cbz.fit.actual'), icon: ImageIcon },
+])
+const VIEW_OPTIONS = computed<{ value: ViewMode; label: string; icon: Component }[]>(() => [
+  { value: 'single', label: t('reader.cbz.view.single'), icon: BookOpen },
+  { value: 'two-page', label: t('reader.cbz.view.twoPage'), icon: LayoutGrid },
+])
+const SCROLL_OPTIONS = computed<{ value: ScrollMode; label: string; icon: Component }[]>(() => [
+  { value: 'paginated', label: t('reader.cbz.scroll.paged'), icon: ScanLine },
+  { value: 'infinite', label: t('reader.cbz.scroll.infinite'), icon: Layers },
+  { value: 'long-strip', label: t('reader.cbz.scroll.noGaps'), icon: AlignJustify },
+])
+const DIRECTION_OPTIONS = computed<{ value: Direction; label: string; icon: Component }[]>(() => [
+  { value: 'ltr', label: t('reader.cbz.direction.ltr'), icon: ArrowRight },
+  { value: 'rtl', label: t('reader.cbz.direction.rtl'), icon: ArrowLeft },
+])
+const SPREAD_ALIGNMENT_OPTIONS = computed<{ value: SpreadAlignment; label: string; icon: Component }[]>(() => [
+  { value: 'normal', label: t('reader.cbz.spreadAlignment.normal'), icon: LayoutGrid },
+  { value: 'shifted', label: t('reader.cbz.spreadAlignment.shifted'), icon: BookOpen },
+])
+const WIDE_PAGE_OPTIONS = computed<{ value: WidePageSingletonMode; label: string; icon: Component }[]>(() => [
+  { value: 'auto', label: t('reader.cbz.widePage.auto'), icon: ImageIcon },
+  { value: 'disable', label: t('reader.cbz.widePage.inSpreads'), icon: LayoutGrid },
+])
+const BG_OPTIONS = computed<{ value: BgColor; label: string; icon: Component }[]>(() => [
+  { value: 'black', label: t('reader.cbz.bg.black'), icon: Moon },
+  { value: 'gray', label: t('reader.cbz.bg.gray'), icon: Circle },
+  { value: 'white', label: t('reader.cbz.bg.white'), icon: Sun },
+])
 
 function onSettingsContentScroll() {
   if (!settingsContentRef.value) return
@@ -187,7 +199,7 @@ function resetBookViewSettings() {
 }
 
 function confirmResetBookViewSettings() {
-  if (!confirm('Reset view settings for this book to your global defaults?')) return
+  if (!confirm(t('reader.cbz.resetConfirm'))) return
   resetBookViewSettings()
 }
 
@@ -246,6 +258,8 @@ const pageLabel = computed(() => {
   return `${start + 1} / ${pageCount.value}`
 })
 
+const fullscreenLabel = computed(() => (isFullscreen.value ? 'Exit fullscreen' : 'Enter fullscreen'))
+
 const progressPageIndex = computed(() => {
   const spread = currentSpread.value
   if (!spread || spread.pages.length === 0) return currentPage.value
@@ -261,6 +275,26 @@ const sliderFillPercent = computed(() => {
   const max = Math.max(0, pageCount.value - 1)
   if (max === 0) return 0
   return (Math.max(0, Math.min(currentPage.value, max)) / max) * 100
+})
+
+const stripFrameClass = computed(() => {
+  if (fitMode.value === 'fit-height' || fitMode.value === 'fit-page') {
+    return 'w-full h-[100dvh] flex items-center justify-center overflow-hidden'
+  }
+  return 'w-full flex justify-center'
+})
+
+const stripImageClass = computed(() => {
+  switch (fitMode.value) {
+    case 'fit-width':
+      return 'w-full h-auto max-w-full block'
+    case 'fit-height':
+      return 'h-full w-auto max-h-full block'
+    case 'actual':
+      return 'max-w-none max-h-none block'
+    default: // fit-page
+      return 'max-w-full max-h-full object-contain block'
+  }
 })
 
 const canGoPrev = computed(() => {
@@ -413,7 +447,8 @@ function onWheel(e: WheelEvent) {
 
 // ── Keyboard ───────────────────────────────────────────────────────────────────
 function onKeyDown(e: KeyboardEvent) {
-  if ((e.target as HTMLElement).tagName === 'INPUT') return
+  const target = (e.composedPath?.()[0] || e.target) as HTMLElement | null
+  if (target?.tagName === 'INPUT') return
   const isRtl = direction.value === 'rtl'
 
   switch (e.key) {
@@ -517,6 +552,17 @@ function onResize() {
   viewportWidth.value = window.innerWidth
 }
 
+async function startTrackedReading() {
+  const query = { ...route.query }
+  delete query.mode
+  await router.replace({ name: 'reader', params: route.params, query })
+  await nextTick()
+  progress.pageNumber.value = progressPageIndex.value + 1
+  progress.percentage.value = progressPercent.value
+  await progress.save()
+  onActivity()
+}
+
 // ── Mount / unmount ────────────────────────────────────────────────────────────
 onMounted(async () => {
   viewportWidth.value = window.innerWidth
@@ -579,6 +625,24 @@ onUnmounted(() => {
           <span v-if="bookTitle" class="text-sm font-serif text-foreground truncate leading-tight">{{ bookTitle }}</span>
           <span class="text-xs text-muted-foreground tabular-nums">{{ pageLabel }}</span>
         </div>
+        <div v-if="props.peekMode" class="flex h-7 items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-1.5 text-primary">
+          <span class="hidden text-[11px] font-medium sm:inline">{{ t('reader.peek.badge') }}</span>
+          <button
+            class="h-5 rounded-sm bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/90"
+            @click="startTrackedReading"
+          >
+            {{ t('reader.peek.startReading') }}
+          </button>
+        </div>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button class="viewer-btn" :aria-label="fullscreenLabel" @click="toggleFullscreen">
+              <Minimize v-if="isFullscreen" :size="15" />
+              <Maximize v-else :size="15" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{{ fullscreenLabel }}</TooltipContent>
+        </Tooltip>
         <DropdownMenu v-model:open="showSettings">
           <DropdownMenuTrigger as-child>
             <button class="viewer-btn" :class="showSettings ? '!bg-muted !text-foreground' : ''">
@@ -609,7 +673,7 @@ onUnmounted(() => {
                     @click.stop="setSettingsTab('view')"
                   >
                     <ImageIcon :size="13" />
-                    <span class="truncate whitespace-nowrap">View</span>
+                    <span class="truncate whitespace-nowrap">{{ t('reader.cbz.tabs.view') }}</span>
                   </button>
                   <button
                     class="flex h-8.5 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] font-medium leading-none transition-colors"
@@ -621,7 +685,7 @@ onUnmounted(() => {
                     @click.stop="setSettingsTab('reading')"
                   >
                     <ScanLine :size="13" />
-                    <span class="truncate whitespace-nowrap">Reading</span>
+                    <span class="truncate whitespace-nowrap">{{ t('reader.cbz.tabs.reading') }}</span>
                   </button>
                   <button
                     class="flex h-8.5 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] font-medium leading-none transition-colors"
@@ -633,7 +697,7 @@ onUnmounted(() => {
                     @click.stop="setSettingsTab('layout')"
                   >
                     <LayoutGrid :size="13" />
-                    <span class="truncate whitespace-nowrap">Layout</span>
+                    <span class="truncate whitespace-nowrap">{{ t('reader.cbz.tabs.layout') }}</span>
                   </button>
                 </div>
               </div>
@@ -642,7 +706,7 @@ onUnmounted(() => {
                 <template v-if="settingsTab === 'view'">
                   <div class="space-y-6">
                     <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Fit mode</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.fitMode') }}</p>
                       <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           v-for="opt in FIT_OPTIONS"
@@ -664,7 +728,7 @@ onUnmounted(() => {
                     <div class="h-px bg-border/70" />
 
                     <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Background</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.background') }}</p>
                       <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           v-for="opt in BG_OPTIONS"
@@ -688,7 +752,7 @@ onUnmounted(() => {
                 <template v-else-if="settingsTab === 'reading'">
                   <div class="space-y-6">
                     <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Scroll mode</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.scrollMode') }}</p>
                       <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           v-for="opt in SCROLL_OPTIONS"
@@ -705,12 +769,13 @@ onUnmounted(() => {
                           <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
                         </button>
                       </div>
+                      <p class="mt-1.5 text-[11px] leading-tight text-muted-foreground">{{ t('reader.cbz.scrollModeHint') }}</p>
                     </div>
 
                     <div class="h-px bg-border/70" />
 
                     <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Reading direction</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.readingDirection') }}</p>
                       <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           v-for="opt in DIRECTION_OPTIONS"
@@ -735,13 +800,13 @@ onUnmounted(() => {
                   <div class="space-y-6">
                     <div>
                       <div class="mb-2 flex items-center justify-between">
-                        <p class="text-[13px] font-medium text-foreground/90">Page view</p>
+                        <p class="text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.pageView') }}</p>
                         <span
                           v-if="showAutoFallbackBadge"
                           class="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
                         >
                           <Info :size="11" />
-                          Auto-fallback
+                          {{ t('reader.cbz.autoFallback') }}
                         </span>
                       </div>
                       <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
@@ -765,7 +830,7 @@ onUnmounted(() => {
                     <div class="h-px bg-border/70" />
 
                     <div v-if="showSpreadAlignmentControl">
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Spread alignment</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.spreadAlignmentLabel') }}</p>
                       <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           v-for="opt in SPREAD_ALIGNMENT_OPTIONS"
@@ -785,12 +850,14 @@ onUnmounted(() => {
                     </div>
 
                     <div v-else-if="showSpreadAlignmentHint" class="rounded-lg border border-border/70 bg-muted/35 px-3 py-2">
-                      <p class="text-xs leading-tight text-muted-foreground">Spread alignment is unavailable in auto-fallback mode.</p>
-                      <button class="mt-1 text-xs text-primary hover:underline" @click.stop="focusForceTwoPageFromHint">Focus two-page toggle</button>
+                      <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.cbz.spreadAlignmentHint') }}</p>
+                      <button class="mt-1 text-xs text-primary hover:underline" @click.stop="focusForceTwoPageFromHint">
+                        {{ t('reader.cbz.focusTwoPageToggle') }}
+                      </button>
                     </div>
 
                     <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Force two-page</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.forceTwoPage') }}</p>
                       <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           ref="forceTwoPageToggleButton"
@@ -803,7 +870,7 @@ onUnmounted(() => {
                           ]"
                           @click.stop="setForceTwoPage(false)"
                         >
-                          Off
+                          {{ t('reader.cbz.off') }}
                         </button>
                         <button
                           class="flex h-[2.125rem] min-w-0 items-center justify-center rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
@@ -814,13 +881,13 @@ onUnmounted(() => {
                           "
                           @click.stop="setForceTwoPage(true)"
                         >
-                          On
+                          {{ t('reader.cbz.on') }}
                         </button>
                       </div>
                     </div>
 
                     <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">Wide pages</p>
+                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.widePages') }}</p>
                       <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
                         <button
                           v-for="opt in WIDE_PAGE_OPTIONS"
@@ -845,7 +912,7 @@ onUnmounted(() => {
                       class="w-full rounded-lg border border-destructive/40 px-3 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10"
                       @click.stop="confirmResetBookViewSettings"
                     >
-                      Reset book view settings
+                      {{ t('reader.cbz.resetBookViewSettings') }}
                     </button>
                   </div>
                 </template>
@@ -913,16 +980,9 @@ onUnmounted(() => {
       :class="scrollMode === 'long-strip' ? '' : 'flex flex-col items-center'"
     >
       <div :class="scrollMode === 'long-strip' ? '' : 'flex flex-col items-center w-full gap-2 py-4 px-2'">
-        <img
-          v-for="i in pageCount"
-          :key="i - 1"
-          :data-page="i - 1"
-          :src="pageUrl(i - 1)"
-          :class="scrollMode === 'long-strip' ? 'w-full block' : 'max-w-full'"
-          loading="lazy"
-          draggable="false"
-          @load="onStripImageLoad(i - 1, $event)"
-        />
+        <div v-for="i in pageCount" :key="i - 1" :data-page="i - 1" :class="stripFrameClass">
+          <img :src="pageUrl(i - 1)" :class="stripImageClass" loading="lazy" draggable="false" @load="onStripImageLoad(i - 1, $event)" />
+        </div>
       </div>
     </div>
 
@@ -937,7 +997,7 @@ onUnmounted(() => {
             <TooltipTrigger as-child>
               <button class="viewer-btn" @click="goToPage(0)"><ChevronsLeft :size="16" /></button>
             </TooltipTrigger>
-            <TooltipContent>First page</TooltipContent>
+            <TooltipContent>{{ t('reader.cbz.firstPage') }}</TooltipContent>
           </Tooltip>
         </div>
         <button class="viewer-btn" :disabled="!canGoPrev" @click="prevPage"><ChevronLeft :size="16" /></button>
@@ -967,7 +1027,7 @@ onUnmounted(() => {
             <TooltipTrigger as-child>
               <button class="viewer-btn" @click="goToPage(pageCount - 1)"><ChevronsRight :size="16" /></button>
             </TooltipTrigger>
-            <TooltipContent>Last page</TooltipContent>
+            <TooltipContent>{{ t('reader.cbz.lastPage') }}</TooltipContent>
           </Tooltip>
         </div>
       </div>
@@ -981,7 +1041,7 @@ onUnmounted(() => {
     <div v-if="loading" class="absolute inset-0 flex items-center justify-center z-50 bg-background">
       <div class="flex flex-col items-center gap-3">
         <div class="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-        <p class="text-sm text-muted-foreground">Loading…</p>
+        <p class="text-sm text-muted-foreground">{{ t('common.loading') }}</p>
       </div>
     </div>
 

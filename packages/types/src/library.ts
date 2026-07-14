@@ -70,6 +70,8 @@ export interface Library {
   fileWritePdfMaxFileSizeMb: number;
   fileWriteCbxEnabled: boolean;
   fileWriteCbxMaxFileSizeMb: number;
+  fileWriteAudioEnabled: boolean;
+  fileWriteAudioMaxFileSizeMb: number;
   fileRenameEnabled: boolean;
   folders: LibraryFolder[];
   bookCount?: number;
@@ -101,4 +103,8 @@ export interface LibraryAccessEntry {
   username: string;
   name: string;
   accessLevel: AccessLevel;
+}
+
+export interface DefaultLibraryAccessConfig {
+  libraryIds: number[];
 }

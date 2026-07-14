@@ -27,6 +27,8 @@ export interface HardcoverSearchDocument {
   release_date?: string;
   release_year?: number;
   genres?: string[];
+  rating?: number;
+  ratings_count?: number;
   featured_series?: {
     series?: {
       name?: string;
@@ -78,6 +80,8 @@ export interface HardcoverEdition {
   isbn_10?: string;
   isbn_13?: string;
   language?: { code2: string };
+  reading_format_id?: number;
+  audio_seconds?: number;
 }
 
 export interface HardcoverCachedContributor {

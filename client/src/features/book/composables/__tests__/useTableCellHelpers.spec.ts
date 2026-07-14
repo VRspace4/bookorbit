@@ -25,6 +25,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     seriesName: null,
     seriesIndex: null,
     files: [],
+    publishedDate: null,
     publishedYear: null,
     language: null,
     genres: [],
@@ -42,6 +43,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     pageCount: null,
     isbn13: null,
     narrators: [],
+    customMetadata: [],
     tags: [],
     ...overrides,
   }
@@ -140,6 +142,30 @@ describe('useTableCellHelpers', () => {
       const book = makeBook({ files: [] })
       expect(helpers.isCellReadOnly(book, { id: 'title', isEditable: true })).toBe(false)
     })
+
+    it('returns true for a custom column when book has no customMetadata entry (field not enabled)', () => {
+      const book = makeBook({ customMetadata: [] })
+      expect(helpers.isCellReadOnly(book, { id: 'custom:42', isEditable: true })).toBe(true)
+    })
+
+    it('returns false for a custom column when book has a matching entry (field is enabled)', () => {
+      const book = makeBook({
+        customMetadata: [{ fieldId: 42, key: 'award', label: 'Award', type: 'text', displayOrder: 0, value: null }],
+      })
+      expect(helpers.isCellReadOnly(book, { id: 'custom:42', isEditable: true })).toBe(false)
+    })
+
+    it('returns false for a custom column when the book has a non-null value for the field', () => {
+      const book = makeBook({
+        customMetadata: [{ fieldId: 42, key: 'award', label: 'Award', type: 'text', displayOrder: 0, value: 'Winner' }],
+      })
+      expect(helpers.isCellReadOnly(book, { id: 'custom:42', isEditable: true })).toBe(false)
+    })
+
+    it('returns true for a custom column with an invalid field ID format', () => {
+      const book = makeBook({ customMetadata: [] })
+      expect(helpers.isCellReadOnly(book, { id: 'custom:notanumber', isEditable: true })).toBe(true)
+    })
   })
 
   describe('isMandatoryFieldEmpty', () => {
@@ -204,5 +230,62 @@ describe('useTableCellHelpers', () => {
       expect(bg).toContain('var(--primary)')
       expect(bg).toContain('oklch')
     })
+  })
+})
+
+describe('useTableCellHelpers with custom columnMapGetter', () => {
+  it('getCellValue uses the custom map when provided', () => {
+    const customAccessor = vi.fn<(book: BookCard) => unknown>(() => 'custom-value')
+    const customMap = new Map([
+      [
+        'custom:42',
+        {
+          id: 'custom:42',
+          header: 'My Field',
+          cellType: 'text' as const,
+          isEditable: true,
+          sortField: null,
+          defaultWidth: 160,
+          minWidth: 80,
+          defaultVisible: false,
+          pinned: null,
+          accessor: customAccessor,
+        },
+      ],
+    ])
+
+    const helpers = useTableCellHelpers(
+      makeMockLocks(),
+      () => false,
+      () => customMap as never,
+    )
+    const book = makeBook()
+    expect(helpers.getCellValue(book, 'custom:42')).toBe('custom-value')
+    expect(customAccessor).toHaveBeenCalledWith(book)
+  })
+
+  it('getCellValue falls back to static map when no getter provided', () => {
+    const helpers = useTableCellHelpers(makeMockLocks(), () => false)
+    const book = makeBook({ title: 'Dune' })
+    expect(helpers.getCellValue(book, 'title')).toBe('Dune')
+  })
+
+  it('getCellValue returns null for a custom column not in the custom map', () => {
+    const customMap = new Map()
+    const helpers = useTableCellHelpers(
+      makeMockLocks(),
+      () => false,
+      () => customMap as never,
+    )
+    const book = makeBook()
+    expect(helpers.getCellValue(book, 'custom:99')).toBeNull()
+  })
+
+  it('isCellLocked always returns false for custom columns (no lockField)', () => {
+    const helpers = useTableCellHelpers(
+      makeMockLocks({ isLocked: vi.fn<(bookId: number, field: BookMetadataLockField) => boolean>(() => true) }),
+      () => false,
+    )
+    expect(helpers.isCellLocked(makeBook(), 'custom:42')).toBe(false)
   })
 })

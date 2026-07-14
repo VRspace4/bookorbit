@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref, type Ref } from 'vue'
 import type { BookCard } from '@bookorbit/types'
 import { useTableKeyboard } from '../useTableKeyboard'
-import type { ColumnDef, ColumnId } from '../useTableColumns'
+import type { ColumnDef } from '../useTableColumns'
 
 function makeBook(overrides: Partial<BookCard> = {}): BookCard {
   return {
@@ -31,7 +31,7 @@ describe('useTableKeyboard', () => {
   let books: BookCard[]
   let displayColumns: Ref<ColumnDef[]>
   let activeCellKey: Ref<string | null>
-  let onActivate: (book: BookCard, colId: ColumnId) => void
+  let onActivate: (book: BookCard, colId: string) => void
   let onSelect: (id: number, event: MouseEvent) => void
   let scrollToIndexSpy: ReturnType<typeof vi.fn>
 
@@ -57,7 +57,7 @@ describe('useTableKeyboard', () => {
     books = [makeBook({ id: 1, title: 'Book A' }), makeBook({ id: 2, title: 'Book B' }), makeBook({ id: 3, title: 'Book C' })]
     displayColumns = ref(makeColumns())
     activeCellKey = ref(null)
-    onActivate = vi.fn<(book: BookCard, colId: ColumnId) => void>()
+    onActivate = vi.fn<(book: BookCard, colId: string) => void>()
     onSelect = vi.fn<(id: number, event: MouseEvent) => void>()
     scrollToIndexSpy = vi.fn<() => void>()
   })

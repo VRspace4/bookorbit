@@ -1,5 +1,6 @@
 import { api } from '@/lib/api'
 import type {
+  BrowseEntitiesParams,
   BrowseEntitiesResponse,
   BulkDeleteResult,
   DeleteResult,
@@ -21,11 +22,15 @@ function toQuery(params: Record<string, string | number | undefined>): string {
 
 const BASE = '/api/v1/entity-manager'
 
-export async function browseEntities(
-  entityType: EntityType,
-  params: { search?: string; page?: number; pageSize?: number; sortBy?: string; sortOrder?: string },
-): Promise<BrowseEntitiesResponse> {
-  const query = toQuery({ search: params.search, page: params.page, pageSize: params.pageSize, sortBy: params.sortBy, sortOrder: params.sortOrder })
+export async function browseEntities(entityType: EntityType, params: BrowseEntitiesParams): Promise<BrowseEntitiesResponse> {
+  const query = toQuery({
+    search: params.search,
+    page: params.page,
+    pageSize: params.pageSize,
+    sortBy: params.sortBy,
+    sortOrder: params.sortOrder,
+    bookCount: params.bookCount,
+  })
   const res = await api(`${BASE}/${entityType}/browse${query}`)
   if (!res.ok) throw new Error(`Failed to browse ${entityType}`)
   return res.json()

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { EpubReaderSettings } from '@bookorbit/types'
 import { fontCssFamilyGroupName } from '@bookorbit/types'
 import { useReaderDefaultSettings } from '@/features/reader/shared/composables/useReaderSettings'
@@ -7,7 +8,7 @@ import { useCustomFonts } from '@/features/reader/epub/composables/useCustomFont
 import { themes } from '@/features/reader/epub/constants/themes'
 import { BUILTIN_READER_FONT_OPTIONS } from '@/features/reader/shared/constants/font-options'
 import { formatFontFamilyLabel } from '@/features/reader/shared/lib/font-display'
-import { Check } from 'lucide-vue-next'
+import { Check } from '@lucide/vue'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
 import SettingsPageHeader from './SettingsPageHeader.vue'
 
@@ -19,6 +20,8 @@ const props = withDefaults(
     embedded: false,
   },
 )
+
+const { t } = useI18n()
 
 const { effective, load, update, reset } = useReaderDefaultSettings<EpubReaderSettings>('epub')
 
@@ -70,15 +73,23 @@ onUnmounted(() => {
   previewStyleEl.value?.remove()
   previewStyleEl.value = null
 })
+
+function setFixedLayoutSpreadAuto() {
+  update({ fixedLayoutSpread: 'auto' })
+}
+
+function setFixedLayoutSpreadNone() {
+  update({ fixedLayoutSpread: 'none' })
+}
 </script>
 
 <template>
   <div
     class="[&_.settings-hint]:overflow-hidden [&_.settings-hint]:text-ellipsis [&_.settings-hint]:whitespace-nowrap md:[&_.settings-hint]:overflow-visible md:[&_.settings-hint]:whitespace-normal"
   >
-    <SettingsPageHeader v-if="!props.embedded" title="eBook Reader" subtitle="Default settings applied when opening EPUB, MOBI, FB2, and TXT files.">
+    <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.ebook.title')" :subtitle="t('settings.reader.ebook.subtitle')">
       <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="reset()">
-        Reset to defaults
+        {{ t('settings.reader.resetToDefaults') }}
       </button>
     </SettingsPageHeader>
     <template v-else>
@@ -86,25 +97,25 @@ onUnmounted(() => {
         class="md:hidden sticky top-11 z-10 -mx-4 mb-4 px-4 py-2 border-y border-border/70 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/75"
       >
         <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="reset()">
-          Reset to defaults
+          {{ t('settings.reader.resetToDefaults') }}
         </button>
       </div>
       <div class="hidden md:flex justify-end mb-4">
         <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="reset()">
-          Reset to defaults
+          {{ t('settings.reader.resetToDefaults') }}
         </button>
       </div>
     </template>
 
     <!-- Formatting source -->
     <div class="mb-6">
-      <p class="settings-group-label">New Books</p>
+      <p class="settings-group-label">{{ t('settings.reader.ebook.newBooks') }}</p>
       <div class="border border-border rounded-lg overflow-hidden bg-card">
         <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between px-4 py-3.5 md:px-5 md:py-4">
           <div>
-            <p class="settings-label">Apply my settings to new books</p>
+            <p class="settings-label">{{ t('settings.reader.ebook.applySettings') }}</p>
             <p class="settings-hint">
-              When off, new books open with the publisher's own fonts and layout. Your settings only apply once you change something in-reader.
+              {{ t('settings.reader.ebook.applySettingsHint') }}
             </p>
           </div>
           <ToggleSwitch
@@ -118,13 +129,13 @@ onUnmounted(() => {
 
     <!-- Layout -->
     <div class="mb-6">
-      <p class="settings-group-label">Layout</p>
+      <p class="settings-group-label">{{ t('settings.reader.ebook.layout') }}</p>
       <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
         <!-- Flow -->
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div>
-            <p class="settings-label">Reading flow</p>
-            <p class="settings-hint">Paginated flips pages; scrolled flows continuously</p>
+            <p class="settings-label">{{ t('settings.reader.ebook.readingFlow') }}</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.readingFlowHint') }}</p>
           </div>
           <div class="flex flex-wrap items-center gap-1.5 p-1 rounded-lg border border-border bg-muted/50 self-start">
             <button
@@ -132,14 +143,42 @@ onUnmounted(() => {
               :class="effective.flow === 'paginated' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'"
               @click="update({ flow: 'paginated' })"
             >
-              Paginated
+              {{ t('settings.reader.ebook.paginated') }}
             </button>
             <button
               class="h-8 px-3 rounded-md text-xs font-medium transition-colors"
               :class="effective.flow === 'scrolled' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'"
               @click="update({ flow: 'scrolled' })"
             >
-              Scrolled
+              {{ t('settings.reader.ebook.scrolled') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Fixed-layout spread -->
+        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+          <div>
+            <p class="settings-label">{{ t('settings.reader.ebook.fixedLayoutSpread') }}</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.fixedLayoutSpreadHint') }}</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5 p-1 rounded-lg border border-border bg-muted/50 self-start">
+            <button
+              class="h-8 px-3 rounded-md text-xs font-medium transition-colors"
+              :class="
+                effective.fixedLayoutSpread === 'auto' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'
+              "
+              @click="setFixedLayoutSpreadAuto"
+            >
+              {{ t('settings.reader.ebook.bookDefault') }}
+            </button>
+            <button
+              class="h-8 px-3 rounded-md text-xs font-medium transition-colors"
+              :class="
+                effective.fixedLayoutSpread === 'none' ? 'bg-background shadow-xs text-foreground' : 'text-muted-foreground hover:text-foreground'
+              "
+              @click="setFixedLayoutSpreadNone"
+            >
+              {{ t('settings.reader.ebook.singlePage') }}
             </button>
           </div>
         </div>
@@ -148,10 +187,10 @@ onUnmounted(() => {
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">Columns</p>
+              <p class="settings-label">{{ t('settings.reader.ebook.columns') }}</p>
               <span class="settings-value">{{ effective.maxColumnCount }}</span>
             </div>
-            <p class="settings-hint">Number of text columns per page</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.columnsHint') }}</p>
           </div>
           <input
             type="range"
@@ -168,13 +207,13 @@ onUnmounted(() => {
 
     <!-- Theme -->
     <div class="mb-6">
-      <p class="settings-group-label">Theme</p>
+      <p class="settings-group-label">{{ t('settings.reader.ebook.theme') }}</p>
       <div class="border border-border rounded-lg overflow-hidden bg-card px-4 py-3.5 md:px-5 md:py-4">
         <!-- Dark mode toggle -->
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
           <div>
-            <p class="settings-label">Dark mode</p>
-            <p class="settings-hint">Use the dark variant of the selected theme</p>
+            <p class="settings-label">{{ t('settings.reader.ebook.darkMode') }}</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.darkModeHint') }}</p>
           </div>
           <ToggleSwitch class="self-start" :model-value="effective.isDark" @update:model-value="update({ isDark: $event })" />
         </div>
@@ -239,23 +278,23 @@ onUnmounted(() => {
 
     <!-- Typography -->
     <div class="mb-6">
-      <p class="settings-group-label">Typography</p>
+      <p class="settings-group-label">{{ t('settings.reader.ebook.typography') }}</p>
       <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
         <!-- Font family -->
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div>
-            <p class="settings-label">Font</p>
-            <p class="settings-hint">Typeface used for body text</p>
+            <p class="settings-label">{{ t('settings.reader.ebook.font') }}</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.fontHint') }}</p>
           </div>
           <select
             class="text-xs border border-border rounded-md px-2 py-2 md:py-1.5 bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-primary self-start min-w-40"
             :value="effective.fontFamily ?? ''"
             @change="update({ fontFamily: ($event.target as HTMLSelectElement).value || null })"
           >
-            <optgroup label="Built-in fonts">
+            <optgroup :label="t('settings.reader.ebook.builtInFonts')">
               <option v-for="f in BUILTIN_READER_FONT_OPTIONS" :key="String(f.value)" :value="f.value ?? ''">{{ f.label }}</option>
             </optgroup>
-            <optgroup v-if="customFontOptions.length > 0" label="Your Fonts">
+            <optgroup v-if="customFontOptions.length > 0" :label="t('settings.reader.ebook.yourFonts')">
               <option v-for="f in customFontOptions" :key="f.id" :value="f.id">{{ f.label }}</option>
             </optgroup>
           </select>
@@ -265,10 +304,10 @@ onUnmounted(() => {
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">Font size</p>
+              <p class="settings-label">{{ t('settings.reader.ebook.fontSize') }}</p>
               <span class="settings-value">{{ effective.fontSize }}px</span>
             </div>
-            <p class="settings-hint">Base text size in pixels</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.fontSizeHint') }}</p>
           </div>
           <input
             type="range"
@@ -285,10 +324,10 @@ onUnmounted(() => {
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">Line height</p>
+              <p class="settings-label">{{ t('settings.reader.ebook.lineHeight') }}</p>
               <span class="settings-value">{{ effective.lineHeight.toFixed(1) }}</span>
             </div>
-            <p class="settings-hint">Vertical spacing between lines</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.lineHeightHint') }}</p>
           </div>
           <input
             type="range"
@@ -304,8 +343,8 @@ onUnmounted(() => {
         <!-- Justify -->
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div>
-            <p class="settings-label">Justify text</p>
-            <p class="settings-hint">Align text to both margins</p>
+            <p class="settings-label">{{ t('settings.reader.ebook.justify') }}</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.justifyHint') }}</p>
           </div>
           <ToggleSwitch class="self-start" :model-value="effective.justify" @update:model-value="update({ justify: $event })" />
         </div>
@@ -313,8 +352,8 @@ onUnmounted(() => {
         <!-- Hyphenation -->
         <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div>
-            <p class="settings-label">Hyphenation</p>
-            <p class="settings-hint">Automatically break long words with hyphens</p>
+            <p class="settings-label">{{ t('settings.reader.ebook.hyphenation') }}</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.hyphenationHint') }}</p>
           </div>
           <ToggleSwitch class="self-start" :model-value="effective.hyphenate" @update:model-value="update({ hyphenate: $event })" />
         </div>
@@ -323,16 +362,16 @@ onUnmounted(() => {
 
     <!-- Advanced -->
     <div class="mb-6">
-      <p class="settings-group-label">Advanced</p>
+      <p class="settings-group-label">{{ t('settings.reader.ebook.advanced') }}</p>
       <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
         <!-- Max inline size -->
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">Max content width</p>
+              <p class="settings-label">{{ t('settings.reader.ebook.maxContentWidth') }}</p>
               <span class="settings-value">{{ effective.maxInlineSize }}px</span>
             </div>
-            <p class="settings-hint">Maximum width of the text area in pixels</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.maxContentWidthHint') }}</p>
           </div>
           <input
             type="range"
@@ -349,10 +388,10 @@ onUnmounted(() => {
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">Column gap</p>
+              <p class="settings-label">{{ t('settings.reader.ebook.columnGap') }}</p>
               <span class="settings-value">{{ Math.round(effective.gap * 100) }}%</span>
             </div>
-            <p class="settings-hint">Horizontal padding on each side of the text area</p>
+            <p class="settings-hint">{{ t('settings.reader.ebook.columnGapHint') }}</p>
           </div>
           <input
             type="range"

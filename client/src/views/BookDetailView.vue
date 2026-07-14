@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, provide, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import type { BookDetail, BookMetadataLockField } from '@bookorbit/types'
 import BookDetailLayout from '@/features/book/components/detail/BookDetailLayout.vue'
 import DetailsTab from '@/features/book/components/detail/tabs/DetailsTab.vue'
@@ -19,6 +20,7 @@ import EntityNotFound from '@/components/EntityNotFound.vue'
 const ReadingLogTab = defineAsyncComponent(() => import('@/features/book/components/detail/tabs/ReadingLogTab.vue'))
 const HighlightsTab = defineAsyncComponent(() => import('@/features/book/components/detail/tabs/HighlightsTab.vue'))
 
+const { t } = useI18n()
 const route = useRoute()
 const { hasPermission } = usePermissions()
 const { libraries } = useLibraries()
@@ -38,12 +40,12 @@ const tab = computed(() => normalizeBookDetailTab(route.query.tab))
 const { detail, loading, notFound, fetch } = useBookDetail()
 const pageTitle = computed(() => {
   const title = detail.value?.title?.trim()
-  const base = title || (Number.isFinite(bookId.value) ? `Book #${bookId.value}` : 'Book')
-  if (tab.value === 'edit') return `Edit Metadata · ${base}`
-  if (tab.value === 'files') return `Files · ${base}`
-  if (tab.value === 'reading-log') return `Reading Log · ${base}`
-  if (tab.value === 'highlights') return `Highlights · ${base}`
-  return `Book · ${base}`
+  const base = title || (Number.isFinite(bookId.value) ? t('views.bookDetail.titleWithId', { id: bookId.value }) : t('views.bookDetail.title'))
+  if (tab.value === 'edit') return t('views.bookDetail.pageTitle.editMetadata', { base })
+  if (tab.value === 'files') return t('views.bookDetail.pageTitle.files', { base })
+  if (tab.value === 'reading-log') return t('views.bookDetail.pageTitle.readingLog', { base })
+  if (tab.value === 'highlights') return t('views.bookDetail.pageTitle.highlights', { base })
+  return t('views.bookDetail.pageTitle.book', { base })
 })
 usePageTitle(pageTitle)
 
@@ -55,7 +57,7 @@ watch(
   },
 )
 
-const { onBookMissing, onBookRestored, onBookMoved } = useBookEvents()
+const { onBookMissing, onBookRestored, onBookMoved, onBookTransferred } = useBookEvents()
 onBookMissing((bookIds) => {
   if (detail.value && bookIds.includes(detail.value.id)) {
     detail.value = { ...detail.value, status: 'missing' }
@@ -66,6 +68,9 @@ onBookRestored((bookIds) => {
 })
 onBookMoved((bookIds) => {
   if (detail.value && bookIds.includes(detail.value.id)) fetch(detail.value.id)
+})
+onBookTransferred((event) => {
+  if (detail.value && event.bookIds.includes(detail.value.id)) fetch(detail.value.id)
 })
 
 watch(bookId, (id) => fetch(id), { immediate: true })
@@ -95,8 +100,8 @@ function onCoverChanged(source: 'extracted' | 'custom' | null) {
           @locks-changed="onLocksChanged"
           @cover-changed="onCoverChanged"
         />
-        <FilesTab v-else-if="tab === 'files'" :book="detail" />
-        <ReadingLogTab v-else-if="tab === 'reading-log'" :book="detail" />
+        <FilesTab v-else-if="tab === 'files'" :book="detail" @refetch="fetch(detail.id)" />
+        <ReadingLogTab v-else-if="tab === 'reading-log'" :book="detail" @saved="onMetadataSaved" />
         <HighlightsTab v-else-if="tab === 'highlights'" :book="detail" />
       </div>
 
@@ -130,13 +135,14 @@ function onCoverChanged(source: 'extracted' | 'custom' | null) {
           <div v-for="i in 3" :key="i" class="h-16 rounded-md bg-muted animate-shimmer" />
         </div>
         <div v-else-if="tab === 'reading-log'" class="space-y-4">
+          <div class="h-32 rounded-lg bg-muted animate-shimmer" />
           <div class="flex gap-2">
             <div v-for="i in 4" :key="i" class="h-8 w-24 rounded-md bg-muted animate-shimmer" />
           </div>
-          <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <div v-for="i in 5" :key="i" class="h-16 rounded-lg bg-muted animate-shimmer" />
+          <div class="grid grid-cols-1 gap-4 lg:grid-cols-5">
+            <div class="h-64 rounded-lg bg-muted animate-shimmer lg:col-span-3" />
+            <div class="h-64 rounded-lg bg-muted animate-shimmer lg:col-span-2" />
           </div>
-          <div class="h-16 rounded-md bg-muted animate-shimmer" />
           <div class="space-y-2">
             <div v-for="i in 5" :key="i" class="h-12 rounded-md bg-muted animate-shimmer" />
           </div>
@@ -153,7 +159,7 @@ function onCoverChanged(source: 'extracted' | 'custom' | null) {
       </div>
 
       <div v-else-if="notFound" key="not-found">
-        <EntityNotFound entity="Book" />
+        <EntityNotFound :entity="t('views.entity.book')" />
       </div>
     </Transition>
   </BookDetailLayout>

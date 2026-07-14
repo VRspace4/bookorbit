@@ -55,6 +55,8 @@ export const libraries = pgTable(
     fileWritePdfMaxFileSizeMb: integer('file_write_pdf_max_file_size_mb').notNull().default(100),
     fileWriteCbxEnabled: boolean('file_write_cbx_enabled').notNull().default(false),
     fileWriteCbxMaxFileSizeMb: integer('file_write_cbx_max_file_size_mb').notNull().default(500),
+    fileWriteAudioEnabled: boolean('file_write_audio_enabled').notNull().default(false),
+    fileWriteAudioMaxFileSizeMb: integer('file_write_audio_max_file_size_mb').notNull().default(500),
     fileRenameEnabled: boolean('file_rename_enabled').notNull().default(false),
 
     // File naming pattern for uploads (null = use global default)
@@ -84,13 +86,14 @@ export const libraries = pgTable(
     uniqueIndex('libraries_name_lower_uidx').on(sql`lower(${t.name})`),
     check('libraries_display_order_nonnegative_chk', sql`${t.displayOrder} >= 0`),
     check('libraries_organization_mode_chk', sql`${t.organizationMode} in ('book_per_folder', 'book_per_file')`),
-    check('libraries_reading_threshold_range_chk', sql`${t.readingThreshold} >= 0 and ${t.readingThreshold} <= 1`),
+    check('libraries_reading_threshold_range_chk', sql`${t.readingThreshold} >= 0 and ${t.readingThreshold} <= 100`),
     check('libraries_mark_finished_percent_range_chk', sql`${t.markAsFinishedPercentComplete} >= 0 and ${t.markAsFinishedPercentComplete} <= 100`),
     check('libraries_scan_mode_chk', sql`${t.scanMode} in ('auto', 'manual')`),
     check('libraries_poll_interval_nonnegative_chk', sql`${t.pollInterval} is null or ${t.pollInterval} >= 0`),
     check('libraries_file_write_epub_max_size_chk', sql`${t.fileWriteEpubMaxFileSizeMb} >= 1`),
     check('libraries_file_write_pdf_max_size_chk', sql`${t.fileWritePdfMaxFileSizeMb} >= 1`),
     check('libraries_file_write_cbx_max_size_chk', sql`${t.fileWriteCbxMaxFileSizeMb} >= 1`),
+    check('libraries_file_write_audio_max_size_chk', sql`${t.fileWriteAudioMaxFileSizeMb} >= 1`),
   ],
 );
 

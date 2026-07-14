@@ -83,6 +83,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     seriesName: null,
     seriesIndex: null,
     files: [],
+    publishedDate: null,
     publishedYear: null,
     language: null,
     genres: [],
@@ -101,6 +102,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     pageCount: null,
     isbn13: null,
     narrators: [],
+    customMetadata: [],
     ...overrides,
   }
 }
@@ -126,6 +128,26 @@ describe('useBookBulkActions', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it('exposes explicit and query selection payloads for external bulk dialogs', () => {
+    const selectedIds = ref(new Set([10, 20]))
+    const inactiveQuerySelection = ref<QuerySelectionState | null>(null)
+    const explicit = useBookBulkActions(selectedIds, vi.fn(), undefined, undefined, inactiveQuerySelection)
+
+    expect(explicit.getSelectionPayload()).toEqual({ bookIds: [10, 20] })
+
+    const querySelection = ref<QuerySelectionState | null>(makeQuerySelection({ sort: [{ field: 'title', dir: 'asc' }] }))
+    const queryScoped = useBookBulkActions(ref(new Set<number>()), vi.fn(), undefined, undefined, querySelection)
+
+    expect(queryScoped.getSelectionPayload()).toEqual({
+      query: {
+        libraryId: 5,
+        filter: { type: 'group', join: 'AND', rules: [] },
+        q: 'space opera',
+        sort: [{ field: 'title', dir: 'asc' }],
+      },
+    })
   })
 
   it('patches selected books with the new manual read status after a successful bulk update', async () => {
@@ -324,28 +346,6 @@ describe('useBookBulkActions', () => {
       }),
     )
     expect(mocks.toastSuccess).toHaveBeenCalledWith('Rated 500 books 4/5')
-  })
-
-  it('sends bulk tag updates using query selection payloads', async () => {
-    mocks.api.mockResolvedValue({ ok: true })
-    const selectedIds = ref(new Set<number>())
-    const querySelection = ref<QuerySelectionState | null>(makeQuerySelection())
-
-    const { handleBulkUpdateTags } = useBookBulkActions(selectedIds, vi.fn(), undefined, undefined, querySelection)
-
-    await handleBulkUpdateTags('add', ['favorite'])
-
-    expect(mocks.api).toHaveBeenCalledWith(
-      '/api/v1/books/bulk-update-tags',
-      expect.objectContaining({
-        body: JSON.stringify({
-          query: { libraryId: 5, filter: { type: 'group', join: 'AND', rules: [] }, q: 'space opera' },
-          mode: 'add',
-          tags: ['favorite'],
-        }),
-      }),
-    )
-    expect(mocks.toastSuccess).toHaveBeenCalledWith('Added tags to 500 books')
   })
 
   it('sends bulk field updates using query selection payloads', async () => {

@@ -1,4 +1,11 @@
+import { UnsupportedMediaTypeException } from '@nestjs/common';
+import type { FastifyInstance } from 'fastify';
+import type { IncomingHttpHeaders } from 'http';
+import { Readable } from 'stream';
+
 const DEFAULT_TRUST_PROXY = 'loopback,linklocal,uniquelocal';
+const EMPTY_JSON_BODY = '{}';
+const BODY_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
 
 export function parseTrustProxy(value: string | undefined): string | boolean | number {
   const raw = value?.trim();
@@ -30,6 +37,7 @@ export interface CspOptions {
 
 const CLOUDFLARE_INSIGHTS_SCRIPT_SRC = 'https://static.cloudflareinsights.com';
 const CLOUDFLARE_INSIGHTS_CONNECT_SRC = 'https://cloudflareinsights.com';
+const DICTIONARY_CONNECT_SRC = ['https://api.dictionaryapi.dev', 'https://*.wiktionary.org'];
 
 export function buildCspDirectives(options: CspOptions = {}) {
   const { allowCloudflareInsights = false } = options;
@@ -44,6 +52,7 @@ export function buildCspDirectives(options: CspOptions = {}) {
     'https://*.tts.speech.microsoft.com',
     'https://*.voice.speech.microsoft.com',
     'https://*.cognitiveservices.azure.com',
+    ...DICTIONARY_CONNECT_SRC,
     ...(allowCloudflareInsights ? [CLOUDFLARE_INSIGHTS_CONNECT_SRC] : []),
   ];
 
@@ -61,4 +70,34 @@ export function buildCspDirectives(options: CspOptions = {}) {
     workerSrc: ["'self'", 'blob:'],
     upgradeInsecureRequests: null,
   };
+}
+
+export function shouldInjectEmptyJsonBody(method: string, headers: IncomingHttpHeaders): boolean {
+  const contentType = getHeaderValue(headers['content-type'])?.toLowerCase();
+  if (!BODY_METHODS.has(method.toUpperCase()) || !contentType?.startsWith('application/json')) {
+    return false;
+  }
+
+  const contentLength = getHeaderValue(headers['content-length'])?.trim();
+  return contentLength === undefined || contentLength === '0';
+}
+
+export function buildEmptyJsonBodyStream(headers: IncomingHttpHeaders): Readable {
+  headers['content-length'] = String(Buffer.byteLength(EMPTY_JSON_BODY));
+  return Readable.from([Buffer.from(EMPTY_JSON_BODY)]);
+}
+
+export function registerEmptyBodyContentTypeParser(fastify: FastifyInstance): void {
+  fastify.addContentTypeParser<string>('*', { parseAs: 'string' }, (request, body, done) => {
+    if (BODY_METHODS.has(request.method.toUpperCase()) && body.length === 0) {
+      done(null, {});
+      return;
+    }
+
+    done(new UnsupportedMediaTypeException('Unsupported Media Type'));
+  });
+}
+
+function getHeaderValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }

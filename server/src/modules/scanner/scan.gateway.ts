@@ -9,6 +9,7 @@ import type {
   BookMissingEvent,
   BookMovedEvent,
   BookRestoredEvent,
+  BookTransferredEvent,
   CoverRefreshedEvent,
   CoverRefreshProgressEvent,
   ScanBooksAddedEvent,
@@ -109,6 +110,13 @@ export class ScanGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   emitBookMoved(event: BookMovedEvent): void {
     this.logger.debug(`[scanner.ws_emit] [book:moved] libraryId=${event.libraryId} bookCount=${event.bookIds.length}`);
     this.server?.to(`library:${event.libraryId}`).emit('book:moved', event);
+  }
+
+  emitBookTransferred(event: BookTransferredEvent): void {
+    this.logger.debug(
+      `[scanner.ws_emit] [book:transferred] fromLibraryId=${event.fromLibraryId} toLibraryId=${event.toLibraryId} bookCount=${event.bookIds.length}`,
+    );
+    this.server?.to([`library:${event.fromLibraryId}`, `library:${event.toLibraryId}`]).emit('book:transferred', event);
   }
 
   emitBooksAdded(event: ScanBooksAddedEvent): void {

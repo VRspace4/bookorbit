@@ -1,6 +1,9 @@
 import { EventEmitter } from 'events'
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
+import { defineComponent } from 'vue'
+import { mount } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
+import type { BookTransferredEvent } from '@bookorbit/types'
 
 // ── Hoisted mocks ─────────────────────────────────────────────────────────────
 // vi.mock factories are hoisted before any const/let, so all references inside
@@ -143,5 +146,84 @@ describe('onBookRestored', () => {
     expect(toastSuccess).toHaveBeenCalledTimes(1)
     expect(toastSuccess).toHaveBeenCalledWith('3 books were restored on disk.')
     cleanup()
+  })
+})
+
+// ── onBookMoved ───────────────────────────────────────────────────────────────
+
+describe('onBookMoved', () => {
+  it('fires the callback with the bookIds array on book:moved event', () => {
+    const { onBookMoved } = useBookEvents()
+    const cb = vi.fn<(bookIds: number[]) => void>()
+    const cleanup = onBookMoved(cb)
+
+    mockSocket.emit('book:moved', { libraryId: 1, bookIds: [44, 45] })
+
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(cb).toHaveBeenCalledWith([44, 45])
+    cleanup()
+  })
+
+  it('shows info toast for moved books after 1s debounce', () => {
+    const { onBookMoved } = useBookEvents()
+    const cleanup = onBookMoved(() => {})
+
+    mockSocket.emit('book:moved', { libraryId: 1, bookIds: [1] })
+    mockSocket.emit('book:moved', { libraryId: 1, bookIds: [2, 3] })
+
+    vi.advanceTimersByTime(1000)
+
+    expect(toastInfo).toHaveBeenCalledTimes(1)
+    expect(toastInfo).toHaveBeenCalledWith('3 books were moved to new locations.')
+    cleanup()
+  })
+})
+
+// ── onBookTransferred ─────────────────────────────────────────────────────────
+
+describe('onBookTransferred', () => {
+  it('fires the callback with the full transfer event without showing a toast', () => {
+    const { onBookTransferred } = useBookEvents()
+    const cb = vi.fn<(event: BookTransferredEvent) => void>()
+    const cleanup = onBookTransferred(cb)
+    const event: BookTransferredEvent = { fromLibraryId: 1, toLibraryId: 2, bookIds: [77] }
+
+    mockSocket.emit('book:transferred', event)
+    vi.advanceTimersByTime(1000)
+
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(cb).toHaveBeenCalledWith(event)
+    expect(toastWarning).not.toHaveBeenCalled()
+    expect(toastSuccess).not.toHaveBeenCalled()
+    expect(toastInfo).not.toHaveBeenCalled()
+    cleanup()
+  })
+
+  it('cleanup function deregisters the transferred callback', () => {
+    const { onBookTransferred } = useBookEvents()
+    const cb = vi.fn<(event: BookTransferredEvent) => void>()
+    const cleanup = onBookTransferred(cb)
+    cleanup()
+
+    mockSocket.emit('book:transferred', { fromLibraryId: 1, toLibraryId: 2, bookIds: [77] })
+
+    expect(cb).not.toHaveBeenCalled()
+  })
+
+  it('automatically deregisters callbacks registered during component setup on unmount', () => {
+    const cb = vi.fn<(event: BookTransferredEvent) => void>()
+    const Component = defineComponent({
+      setup() {
+        useBookEvents().onBookTransferred(cb)
+        return () => null
+      },
+    })
+
+    const wrapper = mount(Component)
+    wrapper.unmount()
+
+    mockSocket.emit('book:transferred', { fromLibraryId: 1, toLibraryId: 2, bookIds: [77] })
+
+    expect(cb).not.toHaveBeenCalled()
   })
 })

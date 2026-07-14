@@ -8,7 +8,8 @@ vi.mock('../scanner/lib/classify', () => ({
   isPrimaryFormat: vi.fn(),
 }));
 
-import { BadRequestException, ConflictException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 import { readdir, rm, stat } from 'fs/promises';
 
 import { ACHIEVEMENT_EVENT_LIBRARY_CATALOG_CHANGED } from '../achievement/achievement-events.service';
@@ -65,6 +66,10 @@ describe('LibraryService', () => {
   const achievementEvents = {
     emit: vi.fn(),
   };
+  const pathPolicy = {
+    assertWithinBrowseRoot: vi.fn((path: string) => Promise.resolve(path)),
+    resolveBrowsePath: vi.fn((path: string) => Promise.resolve(path)),
+  };
 
   let service: LibraryService;
 
@@ -78,33 +83,53 @@ describe('LibraryService', () => {
       fileWatcherService as any,
       fileWriteService as any,
       achievementEvents as any,
+      pathPolicy as any,
     );
 
     mockStat.mockResolvedValue({ isDirectory: () => true } as Awaited<ReturnType<typeof stat>>);
     mockReaddir.mockResolvedValue([] as unknown as Awaited<ReturnType<typeof readdir>>);
     mockRm.mockResolvedValue(undefined);
     mockIsPrimaryFormat.mockReturnValue(false);
+    pathPolicy.assertWithinBrowseRoot.mockImplementation((path: string) => Promise.resolve(path));
+    pathPolicy.resolveBrowsePath.mockImplementation((path: string) => Promise.resolve(path));
   });
 
   it('findAll uses scoped folder query for non-superusers', async () => {
     libraryRepo.findAllForUser.mockResolvedValue([{ id: 10, name: 'A', coverAspectRatio: '1/1' }]);
     libraryRepo.findFoldersByLibraryIds.mockResolvedValue([{ id: 1, libraryId: 10, path: '/a', createdAt: new Date() }]);
 
-    const result = await service.findAll({ id: 7, isSuperuser: false } as any);
+    const result = await service.findAll({ id: 7, isSuperuser: false, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any);
 
-    expect(libraryRepo.findAllForUser).toHaveBeenCalledWith(7);
+    expect(libraryRepo.findAllForUser).toHaveBeenCalledWith(7, EMPTY_CONTENT_FILTER_RULES);
     expect(libraryRepo.findFoldersByLibraryIds).toHaveBeenCalledWith([10]);
     expect(libraryRepo.findAllFolders).not.toHaveBeenCalled();
     expect(result[0].folders).toEqual([{ id: 1, path: '/a', createdAt: expect.any(Date) }]);
     expect(result[0].coverAspectRatio).toBe('1/1');
   });
 
+  it('passes contentFilters to findAllForUser for non-superuser and skips for superuser', async () => {
+    libraryRepo.findAllForUser.mockResolvedValue([]);
+    libraryRepo.findFoldersByLibraryIds.mockResolvedValue([]);
+    libraryRepo.findAll.mockResolvedValue([]);
+    libraryRepo.findAllFolders.mockResolvedValue([]);
+
+    await service.findAll({ id: 7, isSuperuser: false, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any);
+    await service.findAll({ id: 1, isSuperuser: true, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any);
+
+    expect(libraryRepo.findAllForUser).toHaveBeenCalledWith(7, EMPTY_CONTENT_FILTER_RULES);
+    expect(libraryRepo.findAll).toHaveBeenCalled();
+  });
+
   it('findAccessibleLibraryIds reads all IDs for superusers and scoped IDs for normal users', async () => {
     libraryRepo.findAllIds.mockResolvedValue([{ id: 1 }, { id: 2 }]);
     libraryRepo.findAccessibleIdsForUser.mockResolvedValue([{ id: 3 }, { id: 4 }]);
 
-    await expect(service.findAccessibleLibraryIds({ id: 99, isSuperuser: true } as any)).resolves.toEqual([1, 2]);
-    await expect(service.findAccessibleLibraryIds({ id: 42, isSuperuser: false } as any)).resolves.toEqual([3, 4]);
+    await expect(service.findAccessibleLibraryIds({ id: 99, isSuperuser: true, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any)).resolves.toEqual(
+      [1, 2],
+    );
+    await expect(
+      service.findAccessibleLibraryIds({ id: 42, isSuperuser: false, contentFilters: EMPTY_CONTENT_FILTER_RULES } as any),
+    ).resolves.toEqual([3, 4]);
   });
 
   it('findOne returns library details and normalizes organization mode', async () => {
@@ -178,6 +203,8 @@ describe('LibraryService', () => {
         fileWritePdfMaxFileSizeMb: 100,
         fileWriteCbxEnabled: false,
         fileWriteCbxMaxFileSizeMb: 500,
+        fileWriteAudioEnabled: true,
+        fileWriteAudioMaxFileSizeMb: 500,
         fileRenameEnabled: false,
       }),
     );
@@ -198,6 +225,16 @@ describe('LibraryService', () => {
     libraryRepo.findByName.mockResolvedValue([{ id: 9 }]);
 
     await expect(service.create({ name: 'Dup', icon: 'BookOpen', folders: ['/x'] } as any)).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('create rejects folders outside the configured browse root before inserting the library', async () => {
+    libraryRepo.findByName.mockResolvedValue([]);
+    pathPolicy.assertWithinBrowseRoot.mockRejectedValue(new ForbiddenException('outside root'));
+
+    await expect(service.create({ name: 'Sci-Fi', icon: 'BookOpen', folders: ['/outside'] } as any)).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(libraryRepo.insert).not.toHaveBeenCalled();
+    expect(libraryRepo.insertFolder).not.toHaveBeenCalled();
   });
 
   it('create rejects missing icons', async () => {
@@ -226,6 +263,17 @@ describe('LibraryService', () => {
     expect(libraryRepo.insertFolder).toHaveBeenCalledWith({ libraryId: 3, path: '/add' });
     expect(fileWatcherService.startWatcher).not.toHaveBeenCalled();
     expect(fileWatcherService.stopWatcher).not.toHaveBeenCalled();
+  });
+
+  it('update rejects folders outside the configured browse root before changing the library', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 3, name: 'Current', icon: 'BookOpen', watch: false }]);
+    pathPolicy.assertWithinBrowseRoot.mockRejectedValue(new ForbiddenException('outside root'));
+
+    await expect(service.update(3, { folders: ['/outside'] } as any)).rejects.toBeInstanceOf(ForbiddenException);
+
+    expect(libraryRepo.update).not.toHaveBeenCalled();
+    expect(libraryRepo.insertFolder).not.toHaveBeenCalled();
+    expect(libraryRepo.deleteFolder).not.toHaveBeenCalled();
   });
 
   it('update starts watcher when watch toggles on', async () => {
@@ -276,6 +324,39 @@ describe('LibraryService', () => {
     await service.update(10, { formatPriority: ['epub', 'pdf'], allowedFormats: ['epub'] } as any);
 
     expect(scannerService.startScanAsync).toHaveBeenCalledWith(10);
+  });
+
+  it('update rejects organization mode changes after creation', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, organizationMode: 'book_per_folder' }]);
+
+    await expect(service.update(10, { organizationMode: 'book_per_file' } as any)).rejects.toThrow(BadRequestException);
+
+    expect(libraryRepo.update).not.toHaveBeenCalled();
+    expect(scannerService.startScanAsync).not.toHaveBeenCalled();
+  });
+
+  it('update accepts the same organization mode without triggering a scan', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, organizationMode: 'book_per_file' }]);
+    libraryRepo.update.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, organizationMode: 'book_per_file' }]);
+    libraryRepo.findFoldersByLibrary.mockResolvedValue([{ id: 1, path: '/books' }]);
+
+    const result = await service.update(10, { organizationMode: 'book_per_file' } as any);
+
+    expect(libraryRepo.update).toHaveBeenCalledWith(10, { organizationMode: 'book_per_file' });
+    expect(scannerService.startScanAsync).not.toHaveBeenCalled();
+    expect(result.organizationMode).toBe('book_per_file');
+  });
+
+  it('update accepts the default organization mode for legacy rows without triggering a scan', async () => {
+    libraryRepo.findById.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, organizationMode: null }]);
+    libraryRepo.update.mockResolvedValue([{ id: 10, name: 'Current', icon: 'BookOpen', watch: false, organizationMode: null }]);
+    libraryRepo.findFoldersByLibrary.mockResolvedValue([{ id: 1, path: '/books' }]);
+
+    const result = await service.update(10, { organizationMode: 'book_per_folder' } as any);
+
+    expect(libraryRepo.update).toHaveBeenCalledWith(10, { organizationMode: 'book_per_folder' });
+    expect(scannerService.startScanAsync).not.toHaveBeenCalled();
+    expect(result.organizationMode).toBe('book_per_folder');
   });
 
   it('update rejects changes that would leave a library without an icon', async () => {
@@ -365,6 +446,19 @@ describe('LibraryService', () => {
     expect(result.totalFiles).toBe(2);
     expect(result.paths[0]).toEqual(expect.objectContaining({ path: '/books/new', accessible: true, fileCount: 2 }));
     expect(result.paths[1]).toEqual(expect.objectContaining({ overlapLibrary: 'Existing Library' }));
+  });
+
+  it('prescan reports paths outside the configured browse root without touching the filesystem', async () => {
+    libraryRepo.findAllFolderPaths.mockResolvedValue([]);
+    pathPolicy.resolveBrowsePath.mockRejectedValue(new ForbiddenException('outside root'));
+
+    const result = await service.prescan({ paths: ['/outside'] } as any);
+
+    expect(result).toEqual({
+      paths: [{ path: '/outside', accessible: false, fileCount: 0, error: 'Path is outside the configured library browse root' }],
+      totalFiles: 0,
+    });
+    expect(mockStat).not.toHaveBeenCalled();
   });
 
   it('prescan reports non-directory paths with explicit error', async () => {

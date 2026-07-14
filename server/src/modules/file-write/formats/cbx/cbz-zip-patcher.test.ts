@@ -1,10 +1,11 @@
 import { EventEmitter } from 'events';
+import { PassThrough, Readable } from 'stream';
 import type { MockedFunction } from 'vitest';
 import { createWriteStream } from 'fs';
 import * as fs from 'fs/promises';
 import { randomUUID } from 'crypto';
 import * as unzipper from 'unzipper';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 
 import { readComicInfoFromZip, writeComicInfoToZip } from './cbz-zip-patcher';
 
@@ -46,7 +47,7 @@ let lastArchive: EventEmitter & {
 };
 
 vi.mock('archiver', () => ({
-  default: vi.fn(() => {
+  ZipArchive: vi.fn(function () {
     let output: EventEmitter | null = null;
     const emitter = new EventEmitter() as EventEmitter & {
       append: vi.Mock;
@@ -70,6 +71,7 @@ const mockRename = fs.rename as MockedFunction<typeof fs.rename>;
 const mockUnlink = fs.unlink as MockedFunction<typeof fs.unlink>;
 const mockRandomUuid = randomUUID as MockedFunction<typeof randomUUID>;
 const mockOpenFile = unzipper.Open.file as MockedFunction<typeof unzipper.Open.file>;
+const streamFrom = (value: string) => Readable.from([Buffer.from(value)]);
 
 describe('cbz-zip-patcher', () => {
   beforeEach(() => {
@@ -97,23 +99,42 @@ describe('cbz-zip-patcher', () => {
   it('writeComicInfoToZip preserves other entries and writes xml to existing comic info path', async () => {
     const existingEntry = {
       path: 'metadata/ComicInfo.xml',
-      stream: vi.fn(() => Buffer.from('oldxml')),
+      stream: vi.fn(() => streamFrom('oldxml')),
     };
     const imageEntry = {
       path: 'pages/001.jpg',
-      stream: vi.fn(() => Buffer.from('img')),
+      stream: vi.fn(() => streamFrom('img')),
     };
 
     mockOpenFile.mockResolvedValue({ files: [existingEntry, imageEntry] } as never);
 
     await writeComicInfoToZip('/books/a.cbz', '<ComicInfo><Title>New</Title></ComicInfo>');
 
-    expect(archiver).toHaveBeenCalledWith('zip', { zlib: { level: 6 } });
-    expect(lastArchive.append).toHaveBeenCalledWith(imageEntry.stream(), { name: 'pages/001.jpg' });
+    expect(ZipArchive).toHaveBeenCalledWith({ zlib: { level: 6 } });
+    expect(imageEntry.stream).toHaveBeenCalledTimes(1);
+    expect(lastArchive.append).toHaveBeenCalledWith(expect.objectContaining({ pipe: expect.any(Function) }), { name: 'pages/001.jpg' });
     expect(lastArchive.append).toHaveBeenCalledWith(Buffer.from('<ComicInfo><Title>New</Title></ComicInfo>', 'utf-8'), {
       name: 'metadata/ComicInfo.xml',
     });
     expect(mockRename).toHaveBeenCalledWith('/books/.cbx-write-uuid-1234', '/books/a.cbz');
+  });
+
+  it('rejects when a source entry stream errors while patching', async () => {
+    const sourceError = Object.assign(new Error('ENOENT: no such file or directory, open /books/a.cbz'), { code: 'ENOENT' });
+    const imageEntry = {
+      path: 'pages/001.jpg',
+      stream: vi.fn(() => {
+        const source = new PassThrough();
+        process.nextTick(() => source.emit('error', sourceError));
+        return source;
+      }),
+    };
+    mockOpenFile.mockResolvedValue({ files: [imageEntry] } as never);
+
+    await expect(writeComicInfoToZip('/books/a.cbz', '<ComicInfo/>')).rejects.toThrow('ENOENT');
+
+    expect(imageEntry.stream).toHaveBeenCalledTimes(1);
+    expect(mockRename).not.toHaveBeenCalled();
   });
 
   it('deletes temp archive when rename fails', async () => {

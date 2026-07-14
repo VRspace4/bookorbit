@@ -4,7 +4,7 @@ import { useSafeHtml } from './useSafeHtml'
 
 vi.mock('dompurify', () => ({
   default: {
-    sanitize: vi.fn<(input: string, config: { ALLOWED_TAGS: string[] }) => string>((input: string, config: { ALLOWED_TAGS: string[] }) => {
+    sanitize: vi.fn<(input: string, config: { ALLOWED_ATTR: string[]; ALLOWED_TAGS: string[] }) => string>((input: string, config) => {
       if (!config?.ALLOWED_TAGS) return ''
       // Simulate DOMPurify by stripping disallowed tags and dangerous attributes
       return input
@@ -42,7 +42,8 @@ describe('useSafeHtml', () => {
     const html = useSafeHtml(() => '<b>Hello</b>')
     const _ = html.value
     expect(sanitizeMock).toHaveBeenCalledWith('<b>Hello</b>', {
-      ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li', 'a'],
+      ALLOWED_ATTR: ['href'],
+      ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 's', 'u', 'p', 'br', 'ul', 'ol', 'li', 'a', 'blockquote'],
     })
   })
 

@@ -2,6 +2,7 @@ import 'reflect-metadata';
 
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
+import { MetadataProviderKey } from '@bookorbit/types';
 
 import { BulkBookIdsDto } from './bulk-book-ids.dto';
 import { BulkQuerySelectionDto } from './bulk-query-selection.dto';
@@ -18,6 +19,7 @@ import { GetBooksDto } from './get-books.dto';
 import { SaveProgressDto } from './save-progress.dto';
 import { SearchBooksDto } from './search-books.dto';
 import { UpdateBookMetadataDto } from './update-book-metadata.dto';
+import { UpdatePersonalNoteDto } from './update-personal-note.dto';
 import { UpdateRatingDto } from './update-rating.dto';
 import { UpsertAudioProgressDto } from './upsert-audio-progress.dto';
 
@@ -42,7 +44,9 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(BulkSelectionDto, { query: {} })).length).toBe(0);
     expect((await errorsFor(BulkSelectionDto, {})).length).toBeGreaterThan(0);
     expect((await errorsFor(BulkSelectionDto, { bookIds: [] })).length).toBeGreaterThan(0);
+    expect((await errorsFor(BulkSelectionDto, { bookIds: [0] })).length).toBeGreaterThan(0);
     expect((await errorsFor(BulkSelectionDto, { bookIds: ['x'] })).length).toBeGreaterThan(0);
+    expect((await errorsFor(BulkQuerySelectionDto, { libraryId: 0 })).length).toBeGreaterThan(0);
   });
 
   it('validates bulk book id DTOs in explicit and query modes', async () => {
@@ -121,13 +125,23 @@ describe('Book DTO validation', () => {
 
   it('validates SaveProgressDto percentage bounds and conditional field types', async () => {
     expect((await errorsFor(SaveProgressDto, { percentage: 0 })).length).toBe(0);
-    expect((await errorsFor(SaveProgressDto, { percentage: 100, cfi: 'epubcfi(/6/2)', pageNumber: 5 })).length).toBe(0);
+    expect(
+      (
+        await errorsFor(SaveProgressDto, {
+          percentage: 100,
+          cfi: 'epubcfi(/6/2)',
+          pageNumber: 5,
+          koreaderProgress: '/body/DocFragment[2]/body/p[1]/text()[1].0',
+        })
+      ).length,
+    ).toBe(0);
 
     expect((await errorsFor(SaveProgressDto, { percentage: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, cfi: 123 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 'five' })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 10, ttsSectionIndex: 2, ttsWordIndex: 15 })).length).toBe(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 10, ttsWordIndex: -1 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, koreaderProgress: 123 })).length).toBeGreaterThan(0);
   });
 
   it('requires non-empty search text and bounds search limit', async () => {
@@ -147,23 +161,77 @@ describe('Book DTO validation', () => {
       (
         await errorsFor(UpdateBookMetadataDto, {
           title: 'Dune',
+          publishedDate: '1965-08-01',
           publishedYear: 1965,
           rating: 5,
           authors: ['Frank Herbert'],
           genres: ['Sci-Fi'],
           tags: ['classic'],
           amazonId: 'B00TEST',
+          communityRatings: [{ provider: MetadataProviderKey.HARDCOVER, rating: 4.25, ratingCount: 12345 }],
         })
       ).length,
     ).toBe(0);
 
     expect((await errorsFor(UpdateBookMetadataDto, { rating: 6 })).length).toBeGreaterThan(0);
+    expect(
+      (await errorsFor(UpdateBookMetadataDto, { communityRatings: [{ provider: MetadataProviderKey.HARDCOVER, rating: -1 }] })).length,
+    ).toBeGreaterThan(0);
+    expect(
+      (await errorsFor(UpdateBookMetadataDto, { communityRatings: [{ provider: MetadataProviderKey.HARDCOVER, rating: 5.1 }] })).length,
+    ).toBeGreaterThan(0);
+    expect(
+      (await errorsFor(UpdateBookMetadataDto, { communityRatings: [{ provider: MetadataProviderKey.HARDCOVER, rating: 4, ratingCount: -1 }] }))
+        .length,
+    ).toBeGreaterThan(0);
+    expect(
+      (await errorsFor(UpdateBookMetadataDto, { communityRatings: [{ provider: MetadataProviderKey.HARDCOVER, rating: 4, ratingCount: 1.5 }] }))
+        .length,
+    ).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { communityRatings: [{ provider: 'unknown', rating: 4 }] })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { publishedYear: 0 })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { publishedYear: 999 })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { publishedYear: 2201 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { publishedDate: null })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { publishedDate: '1965-08-01' })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { publishedDate: '1965' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { publishedDate: '1965-8-1' })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { authors: ['ok', 1] })).length).toBeGreaterThan(0);
-    expect((await errorsFor(UpdateBookMetadataDto, { language: 'english-too-long' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { language: 'a'.repeat(101) })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { isbn10: '12345678901' })).length).toBeGreaterThan(0);
+  });
+
+  it('accepts aladinId and enforces its length bound', async () => {
+    expect((await errorsFor(UpdateBookMetadataDto, { aladinId: '12345' })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { aladinId: null })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { aladinId: 'a'.repeat(21) })).length).toBeGreaterThan(0);
+  });
+
+  it('accepts librofmId and enforces its length bound', async () => {
+    expect((await errorsFor(UpdateBookMetadataDto, { librofmId: '9781234567890' })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { librofmId: null })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { librofmId: 'a'.repeat(51) })).length).toBeGreaterThan(0);
+  });
+
+  it('normalizes a zero page count to null and validates other page count values', async () => {
+    // A provider can return a page count of 0 (issue #329); it must normalize to null instead of failing validation.
+    const zeroed = plainToInstance(UpdateBookMetadataDto, { pageCount: 0 });
+    expect((await validate(zeroed)).length).toBe(0);
+    expect(zeroed.pageCount).toBeNull();
+
+    const valid = plainToInstance(UpdateBookMetadataDto, { pageCount: 320 });
+    expect((await validate(valid)).length).toBe(0);
+    expect(valid.pageCount).toBe(320);
+
+    expect((await errorsFor(UpdateBookMetadataDto, { pageCount: null })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { pageCount: -5 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { pageCount: 12.5 })).length).toBeGreaterThan(0);
+  });
+
+  it('validates nested comicMetadata fields', async () => {
+    expect((await errorsFor(UpdateBookMetadataDto, { comicMetadata: { issueNumber: '1', characters: ['Batman'] } })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { comicMetadata: { issueNumber: 1 } })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { comicMetadata: { characters: [1] } })).length).toBeGreaterThan(0);
   });
 
   it('validates inline-edit single-field patches for table view use cases', async () => {
@@ -175,6 +243,8 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(UpdateBookMetadataDto, { seriesName: null, seriesIndex: null })).length).toBe(0);
     // Language valid 2-letter code
     expect((await errorsFor(UpdateBookMetadataDto, { language: 'en' })).length).toBe(0);
+    // Language full name (e.g. from epub/provider)
+    expect((await errorsFor(UpdateBookMetadataDto, { language: 'Spanish; Castilian' })).length).toBe(0);
     // Language cleared to null
     expect((await errorsFor(UpdateBookMetadataDto, { language: null })).length).toBe(0);
     // Rating null (clear rating)
@@ -221,6 +291,12 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(UpdateRatingDto, { rating: 3 })).length).toBe(0);
     expect((await errorsFor(UpdateRatingDto, { rating: 0 })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateRatingDto, { rating: 6 })).length).toBeGreaterThan(0);
+  });
+
+  it('validates personal note updates', async () => {
+    expect((await errorsFor(UpdatePersonalNoteDto, { note: 'My private review' })).length).toBe(0);
+    expect((await errorsFor(UpdatePersonalNoteDto, { note: null })).length).toBe(0);
+    expect((await errorsFor(UpdatePersonalNoteDto, { note: 'a'.repeat(10001) })).length).toBeGreaterThan(0);
   });
 
   it('validates audiobook progress bounds for percentage and position', async () => {

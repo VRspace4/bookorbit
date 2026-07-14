@@ -226,6 +226,7 @@ describe('BookTableReadButtonCell', () => {
       seriesName: null,
       seriesIndex: null,
       files,
+      publishedDate: null,
       publishedYear: null,
       language: null,
       genres: [],
@@ -243,6 +244,7 @@ describe('BookTableReadButtonCell', () => {
       pageCount: null,
       isbn13: null,
       narrators: [],
+      customMetadata: [],
       tags: [],
     }
   }
@@ -269,6 +271,19 @@ describe('BookTableReadButtonCell', () => {
       name: 'reader',
       params: { bookId: 42, fileId: 1 },
       query: { format: 'epub' },
+    })
+  })
+
+  it('opens the primary readable file in peek mode from the peek button', async () => {
+    routerPush.mockReset()
+    const wrapper = mountReadButton(makeBook([{ id: 1, format: 'epub', role: 'primary', sizeBytes: null }]))
+    const peekButton = wrapper.findAll('button').find((button) => button.attributes('aria-label') === 'Peek EPUB')
+    expect(peekButton).toBeTruthy()
+    await peekButton!.trigger('click')
+    expect(routerPush).toHaveBeenCalledWith({
+      name: 'reader',
+      params: { bookId: 42, fileId: 1 },
+      query: { format: 'epub', mode: 'peek' },
     })
   })
 

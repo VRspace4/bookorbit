@@ -7,12 +7,21 @@ import type {
   MetadataField,
 } from '@bookorbit/types';
 import type { SQL } from 'drizzle-orm';
-import { and, asc, count, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookAuthors, bookGenres, bookMetadata, bookMetadataFetchQueue, bookNarrators, books, libraries } from '../../db/schema';
+import {
+  bookAuthors,
+  bookCommunityRatings,
+  bookGenres,
+  bookMetadata,
+  bookMetadataFetchQueue,
+  bookNarrators,
+  books,
+  libraries,
+} from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -59,12 +68,13 @@ export class BookMetadataFetchQueueRepository {
     return touched.length;
   }
 
-  async fetchDue(limit: number): Promise<{ bookId: number; title: string | null }[]> {
+  async fetchDue(limit: number): Promise<{ bookId: number; title: string | null; reason: BookMetadataFetchReason }[]> {
     if (limit <= 0) return [];
-    return this.db
+    const rows = await this.db
       .select({
         bookId: bookMetadataFetchQueue.bookId,
         title: sql<string | null>`COALESCE(${bookMetadata.title}, ${books.folderPath})`,
+        reason: bookMetadataFetchQueue.reason,
       })
       .from(bookMetadataFetchQueue)
       .leftJoin(bookMetadata, eq(bookMetadata.bookId, bookMetadataFetchQueue.bookId))
@@ -72,6 +82,8 @@ export class BookMetadataFetchQueueRepository {
       .where(eq(bookMetadataFetchQueue.status, QUEUE_STATUS.QUEUED))
       .orderBy(asc(bookMetadataFetchQueue.createdAt), asc(bookMetadataFetchQueue.bookId))
       .limit(limit);
+
+    return rows.map((row) => ({ ...row, reason: row.reason as BookMetadataFetchReason }));
   }
 
   async markProcessing(bookId: number): Promise<boolean> {
@@ -104,6 +116,13 @@ export class BookMetadataFetchQueueRepository {
       .update(bookMetadataFetchQueue)
       .set({ status: QUEUE_STATUS.FAILED, lastError: error.slice(0, 2000), lastHttpStatus: httpStatus ?? null, updatedAt: now })
       .where(eq(bookMetadataFetchQueue.bookId, bookId));
+  }
+
+  async deferProcessing(bookId: number): Promise<void> {
+    await this.db
+      .update(bookMetadataFetchQueue)
+      .set({ status: QUEUE_STATUS.QUEUED, updatedAt: new Date() })
+      .where(and(eq(bookMetadataFetchQueue.bookId, bookId), eq(bookMetadataFetchQueue.status, QUEUE_STATUS.PROCESSING)));
   }
 
   async cancelPending(): Promise<number> {
@@ -206,6 +225,35 @@ export class BookMetadataFetchQueueRepository {
         reason,
       );
       cursorBookId = rows[rows.length - 1]!.bookId;
+    }
+
+    return totalQueued;
+  }
+
+  async scheduleEligibleBookIdsInBatches(
+    config: BookMetadataFetchConfig,
+    reason: BookMetadataFetchReason,
+    libraryId: number,
+    bookIds: readonly number[],
+    batchSize = 1000,
+  ): Promise<number> {
+    const ids = [...new Set(bookIds)].filter((id) => Number.isInteger(id) && id > 0);
+    const whereClause = this.buildEligibleBooksWhereClause(config, libraryId);
+    if (!whereClause || ids.length === 0 || batchSize <= 0) return 0;
+
+    let totalQueued = 0;
+    for (let offset = 0; offset < ids.length; offset += batchSize) {
+      const batch = ids.slice(offset, offset + batchSize);
+      const rows = await this.db
+        .select({ bookId: bookMetadata.bookId })
+        .from(bookMetadata)
+        .innerJoin(books, eq(books.id, bookMetadata.bookId))
+        .where(and(whereClause, inArray(bookMetadata.bookId, batch)));
+
+      totalQueued += await this.upsertSchedule(
+        rows.map((row) => row.bookId),
+        reason,
+      );
     }
 
     return totalQueued;
@@ -324,6 +372,8 @@ export class BookMetadataFetchQueueRepository {
         return sql`(${bookMetadata.language} IS NULL OR ${bookMetadata.language} = '')`;
       case 'pageCount':
         return sql`${bookMetadata.pageCount} IS NULL`;
+      case 'communityRating':
+        return sql`NOT EXISTS (SELECT 1 FROM ${bookCommunityRatings} WHERE ${bookCommunityRatings.bookId} = ${bookMetadata.bookId})`;
       case 'seriesName':
         return sql`(${bookMetadata.seriesName} IS NULL OR ${bookMetadata.seriesName} = '')`;
       case 'seriesIndex':

@@ -10,6 +10,23 @@ Server only: `pnpm start:dev` (from this directory).
 
 The server loads environment variables from `.env` in this directory. See `.env.example` for all available options.
 
+## API docs
+
+OpenAPI docs are disabled by default. Enable them with `SWAGGER_ENABLED=true`:
+
+```bash
+SWAGGER_ENABLED=true pnpm start:dev
+```
+
+Then open:
+
+- Swagger UI: http://localhost:3000/api/docs
+- OpenAPI JSON: http://localhost:3000/api/docs-json
+
+Dev watch uses a Nest config without the Swagger metadata generator so the
+server does not restart immediately after startup. Full build output still uses
+the standard Nest config and generates `src/metadata.ts` for enriched docs.
+
 ## Module structure
 
 Each feature is a self-contained NestJS module under `src/modules/`:

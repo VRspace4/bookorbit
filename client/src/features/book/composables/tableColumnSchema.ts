@@ -1,17 +1,18 @@
-import type { BookCard, BookMetadataLockField, SortField } from '@bookorbit/types'
+import type { BookCard, BookMetadataLockField, CustomMetadataFieldSummary, CustomMetadataFieldType, SortField } from '@bookorbit/types'
 import { formatBytes } from '@/lib/formatting'
 
 function getPrimaryFile(book: BookCard) {
   return book.files.find((f) => f.role === 'primary') ?? book.files[0] ?? null
 }
 
-export type ColumnId =
+export type StaticColumnId =
   | 'lockRow'
   | 'cover'
   | 'title'
   | 'authors'
   | 'seriesName'
   | 'seriesIndex'
+  | 'publishedDate'
   | 'publishedYear'
   | 'language'
   | 'rating'
@@ -33,22 +34,15 @@ export type ColumnId =
   | 'addedAt'
   | 'actions'
 
+export type CustomColumnId = `custom:${number}`
+
+export type ColumnId = StaticColumnId | CustomColumnId
+
 export type CellType =
-  | 'lockRow'
-  | 'cover'
-  | 'text'
-  | 'number'
-  | 'rating'
-  | 'chips'
-  | 'readStatus'
-  | 'format'
-  | 'read'
-  | 'date'
-  | 'progress'
-  | 'actions'
+  'lockRow' | 'cover' | 'text' | 'number' | 'rating' | 'chips' | 'readStatus' | 'format' | 'read' | 'date' | 'progress' | 'actions' | 'customBoolean'
 
 export type ColumnDef = {
-  id: ColumnId
+  id: string
   header: string
   cellType: CellType
   isEditable: boolean
@@ -59,6 +53,51 @@ export type ColumnDef = {
   pinned: 'left' | 'right' | null
   accessor?: (book: BookCard) => unknown
   lockField?: BookMetadataLockField
+  customFieldId?: number
+  customFieldType?: CustomMetadataFieldType
+}
+
+export function isCustomColumnId(id: string): id is CustomColumnId {
+  return id.startsWith('custom:')
+}
+
+export function parseCustomFieldId(id: string): number | null {
+  if (!isCustomColumnId(id)) return null
+  const n = parseInt(id.slice(7), 10)
+  return Number.isFinite(n) ? n : null
+}
+
+function customFieldCellType(type: CustomMetadataFieldType): CellType {
+  switch (type) {
+    case 'number':
+      return 'number'
+    case 'date':
+      return 'date'
+    case 'boolean':
+      return 'customBoolean'
+    default:
+      return 'text'
+  }
+}
+
+export function buildCustomColumnDef(field: CustomMetadataFieldSummary): ColumnDef {
+  const id: CustomColumnId = `custom:${field.id}`
+  // date fields use BookTableDateCell which is display-only (no edit UI in the table).
+  const isEditable = field.type !== 'date'
+  return {
+    id,
+    header: field.label,
+    cellType: customFieldCellType(field.type),
+    isEditable,
+    sortField: null,
+    defaultWidth: 160,
+    minWidth: 80,
+    defaultVisible: false,
+    pinned: null,
+    customFieldId: field.id,
+    customFieldType: field.type,
+    accessor: (book: BookCard) => book.customMetadata.find((f) => f.fieldId === field.id)?.value ?? null,
+  }
 }
 
 export const LOCK_ROW_COLUMN_DEF: ColumnDef = {
@@ -147,6 +186,19 @@ export const COLUMN_DEFS: ColumnDef[] = [
     pinned: null,
     accessor: (book) => book.seriesIndex,
     lockField: 'seriesIndex',
+  },
+  {
+    id: 'publishedDate',
+    header: 'Published',
+    cellType: 'date',
+    isEditable: false,
+    sortField: 'publishedDate',
+    defaultWidth: 132,
+    minWidth: 108,
+    defaultVisible: false,
+    pinned: null,
+    accessor: (book) => book.publishedDate,
+    lockField: 'publishedYear',
   },
   {
     id: 'publishedYear',
@@ -385,8 +437,8 @@ export const COLUMN_DEFS: ColumnDef[] = [
   },
 ]
 
-export const COLUMN_DEF_MAP = new Map(COLUMN_DEFS.map((c) => [c.id, c]))
+export const COLUMN_DEF_MAP = new Map<string, ColumnDef>(COLUMN_DEFS.map((c) => [c.id, c]))
 
-export const DEFAULT_ORDER: ColumnId[] = COLUMN_DEFS.map((c) => c.id)
-export const DEFAULT_HIDDEN: ColumnId[] = COLUMN_DEFS.filter((c) => !c.defaultVisible).map((c) => c.id)
+export const DEFAULT_ORDER: string[] = COLUMN_DEFS.map((c) => c.id)
+export const DEFAULT_HIDDEN: string[] = COLUMN_DEFS.filter((c) => !c.defaultVisible).map((c) => c.id)
 export const DEFAULT_WIDTHS: Record<string, number> = Object.fromEntries(COLUMN_DEFS.map((c) => [c.id, c.defaultWidth]))

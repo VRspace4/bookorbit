@@ -8,10 +8,19 @@ const PROVIDER_ICON_PATHS = {
   openLibrary: `${PROVIDER_ICON_BASE_PATH}/openlibrary.svg`,
   itunes: `${PROVIDER_ICON_BASE_PATH}/apple-books.svg`,
   audible: `${PROVIDER_ICON_BASE_PATH}/audible.svg`,
+  librofm: `${PROVIDER_ICON_BASE_PATH}/librofm.svg`,
+  kobo: `${PROVIDER_ICON_BASE_PATH}/kobo.svg`,
+  ranobedb: `${PROVIDER_ICON_BASE_PATH}/ranobedb.svg`,
+  lubimyczytac: `${PROVIDER_ICON_BASE_PATH}/lubimyczytac.svg`,
+  aladin: `${PROVIDER_ICON_BASE_PATH}/aladin.svg`,
 } as const
 
 type ProviderIconKey = keyof typeof PROVIDER_ICON_PATHS
 
 export function providerIconPath(provider: ProviderIconKey): string {
   return PROVIDER_ICON_PATHS[provider]
+}
+
+export function providerIconPathSafe(provider: string): string | null {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_ICON_PATHS, provider) ? PROVIDER_ICON_PATHS[provider as ProviderIconKey] : null
 }

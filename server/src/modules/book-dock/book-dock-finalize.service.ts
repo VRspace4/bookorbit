@@ -1,15 +1,41 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { basename, dirname, extname, join } from 'path';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnApplicationBootstrap,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
+import { basename, dirname, extname, join, resolve } from 'path';
 import { access as fsAccess, readFile, stat, unlink } from 'fs/promises';
 import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
-import type { BookDockAutoFinalizeMetadataMode, BookDockFinalizeFileResult, BookDockFinalizeResult, BookDockMetadata } from '@bookorbit/types';
+import type {
+  AudiobookChapter,
+  BookDockAutoFinalizeMetadataMode,
+  BookDockDiscardDuplicatesResult,
+  BookDockFinalizeFileResult,
+  BookDockFinalizePreviewItem,
+  BookDockFinalizePreviewResult,
+  BookDockFinalizePreviewStatus,
+  BookDockFinalizeResult,
+  BookDockMetadata,
+} from '@bookorbit/types';
 import { NotificationType, resolveUploadPath } from '@bookorbit/types';
 import { NotificationService } from '../notification/notification.service';
+import { SeriesIdentityService } from '../../common/services/series-identity.service';
+import { SeriesMembershipService } from '../../common/services/series-membership.service';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { normalizePublishedDate, publishedYearFromDateKey } from '../../common/utils/published-date.utils';
+import { formatSeriesIndex } from '../../common/utils/series-index-format.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { bookMetadata, books, libraries, libraryFolders } from '../../db/schema';
+import { authors, bookAuthors, bookMetadata, books, libraries, libraryFolders } from '../../db/schema';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { LibraryService } from '../library/library.service';
 import { MetadataService } from '../metadata/metadata.service';
@@ -19,11 +45,29 @@ import { UploadValidatorService } from '../upload/upload-validator.service';
 import { BookDockRepository } from './book-dock.repository';
 import { BookDockEventsService, BOOK_DOCK_FILE_INGESTED } from './book-dock-events.service';
 import { BookDockGateway } from './book-dock.gateway';
+import { BookDockProcessingStateService } from './book-dock-processing-state.service';
+import { BookDockWorkQueue } from './book-dock-work-queue';
 import type { BookDockFileRow } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
+type LibraryRow = typeof libraries.$inferSelect;
+type LibraryFolderRow = typeof libraryFolders.$inferSelect;
+
+type FinalizeOverrideEntry = {
+  libraryId?: number;
+  folderId?: number;
+  skipDuplicateCheck?: boolean;
+  targetFileName?: string;
+};
 
 const BATCH_SIZE = 100;
+const PREVIEW_ITEM_LIMIT = 200;
+const AUTO_FINALIZE_QUEUE_CONCURRENCY = 1;
+const MIN_PUBLISHED_YEAR = 1000;
+const MAX_PUBLISHED_YEAR = 2200;
+const PUBLISHED_YEAR_RANGE_CONSTRAINT = 'book_metadata_published_year_range_chk';
+const INVALID_PUBLISHED_YEAR_MESSAGE = `Invalid metadata: published year must be between ${MIN_PUBLISHED_YEAR} and ${MAX_PUBLISHED_YEAR}.`;
+const INVALID_METADATA_MESSAGE = 'Invalid metadata values for this file. Review metadata fields and try again.';
 
 type NormalizedFinalizeMetadata = {
   title: string | null;
@@ -32,6 +76,7 @@ type NormalizedFinalizeMetadata = {
   isbn10: string | null;
   isbn13: string | null;
   publisher: string | null;
+  publishedDate: string | null;
   publishedYear: number | null;
   language: string | null;
   pageCount: number | null;
@@ -42,9 +87,24 @@ type NormalizedFinalizeMetadata = {
   coverUrl: string | null;
 };
 
+type FinalizeCandidateAnalysis = {
+  fileId: number;
+  fileName: string;
+  row: BookDockFileRow;
+  status: BookDockFinalizePreviewStatus;
+  message?: string;
+  existingBookId?: number;
+  newName?: string;
+  library?: LibraryRow;
+  folder?: LibraryFolderRow;
+  format?: string;
+  destPath?: string;
+};
+
 @Injectable()
-export class BookDockFinalizeService implements OnModuleInit {
+export class BookDockFinalizeService implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(BookDockFinalizeService.name);
+  private readonly autoFinalizeQueue: BookDockWorkQueue;
 
   constructor(
     @Inject(DB) private readonly db: Db,
@@ -58,12 +118,31 @@ export class BookDockFinalizeService implements OnModuleInit {
     private readonly events: BookDockEventsService,
     private readonly gateway: BookDockGateway,
     private readonly notificationService: NotificationService,
-  ) {}
+    private readonly processingState: BookDockProcessingStateService,
+    @Optional() private readonly seriesIdentity?: SeriesIdentityService,
+    @Optional() private readonly seriesMemberships?: SeriesMembershipService,
+  ) {
+    this.autoFinalizeQueue = new BookDockWorkQueue(
+      AUTO_FINALIZE_QUEUE_CONCURRENCY,
+      (fileId) => this.triggerAutoFinalize(fileId),
+      (fileId, error) => this.logAutoFinalizeQueueFailure(fileId, error),
+    );
+  }
 
   onModuleInit() {
     this.events.on(BOOK_DOCK_FILE_INGESTED, (fileId: number) => {
-      void this.triggerAutoFinalize(fileId);
+      this.enqueueAutoFinalize(fileId);
     });
+  }
+
+  async onApplicationBootstrap(): Promise<void> {
+    if (await this.processingState.isPaused()) {
+      this.autoFinalizeQueue.pause();
+    }
+  }
+
+  onModuleDestroy(): void {
+    this.autoFinalizeQueue.stop();
   }
 
   async finalize(
@@ -74,7 +153,7 @@ export class BookDockFinalizeService implements OnModuleInit {
     excludedIds: number[] | undefined,
     defaultLibraryId: number | undefined,
     defaultFolderId: number | undefined,
-    overrides?: Array<{ fileId: number; libraryId?: number; folderId?: number }>,
+    overrides?: Array<{ fileId: number } & FinalizeOverrideEntry>,
     status?: string,
     search?: string,
   ): Promise<BookDockFinalizeResult> {
@@ -112,7 +191,7 @@ export class BookDockFinalizeService implements OnModuleInit {
     } else {
       for (let i = 0; i < ids.length; i += BATCH_SIZE) {
         const batch = ids.slice(i, i + BATCH_SIZE);
-        const rows = await this.repo.findByIds(batch);
+        const rows = await this.repo.findByIds(batch, userId, isSuperuser);
         const rowById = new Map(rows.map((row) => [row.id, row]));
         const duplicateLookup = await this.buildDuplicateLookup(rows, defaultLibraryId, overrideMap);
 
@@ -156,52 +235,18 @@ export class BookDockFinalizeService implements OnModuleInit {
     row: BookDockFileRow,
     defaultLibraryId: number | undefined,
     defaultFolderId: number | undefined,
-    overrideMap: Map<number, { libraryId?: number; folderId?: number }>,
+    overrideMap: Map<number, FinalizeOverrideEntry>,
     userId: number,
     isSuperuser: boolean,
     duplicateLookup?: Map<string, number>,
   ): Promise<BookDockFinalizeFileResult> {
     try {
-      const override = overrideMap.get(row.id);
-      const libraryId = override?.libraryId ?? row.targetLibraryId ?? defaultLibraryId ?? null;
-      const folderId = override?.folderId ?? row.targetFolderId ?? defaultFolderId ?? null;
+      const analysis = await this.analyzeFinalizeCandidate(row, defaultLibraryId, defaultFolderId, overrideMap, userId, isSuperuser, duplicateLookup);
+      if (analysis.status !== 'ready') return this.analysisToFileResult(analysis);
 
-      if (libraryId === null || folderId === null) {
-        return {
-          fileId: row.id,
-          fileName: row.fileName,
-          success: false,
-          message: 'Destination is not set for this file',
-        };
-      }
-
-      const library = await this.findLibraryOrFail(libraryId);
-      await this.libraryService.verifyUserAccess(userId, libraryId, isSuperuser);
-
-      const folder = await this.findFolderOrFail(folderId, libraryId);
-      const format = row.format ?? extname(row.fileName).toLowerCase().slice(1);
-      this.validator.validateFormat(row.fileName, library.allowedFormats);
-
-      const destPath = await this.resolveDestination(library, folder.path, row, format);
-
-      const exists = await fsAccess(destPath)
-        .then(() => true)
-        .catch(() => false);
-      if (exists) {
-        return { fileId: row.id, fileName: row.fileName, success: false, message: 'A file with this name already exists at the target location' };
-      }
-
-      const meta = normalizeFinalizeMetadata(row.selectedMetadata ?? row.embeddedMetadata ?? {});
-      const existingBookId = await this.findDuplicate(libraryId, meta, duplicateLookup);
-      if (existingBookId !== null) {
-        return {
-          fileId: row.id,
-          fileName: row.fileName,
-          success: false,
-          isDuplicate: true,
-          existingBookId,
-          message: `Duplicate: this book already exists in the library`,
-        };
+      const { destPath, folder, library, format } = analysis;
+      if (!destPath || !folder || !library || !format) {
+        return { fileId: row.id, fileName: row.fileName, success: false, message: 'Finalization target could not be resolved' };
       }
 
       await this.storage.moveToPath(row.absolutePath, destPath);
@@ -211,7 +256,7 @@ export class BookDockFinalizeService implements OnModuleInit {
         const { size } = await stat(destPath);
         const bookFolderPath = library.organizationMode === 'book_per_file' ? destPath : dirname(destPath);
         ({ bookId } = await this.processor.createBookRecord(
-          libraryId,
+          library.id,
           folder.id,
           bookFolderPath,
           destPath,
@@ -230,13 +275,274 @@ export class BookDockFinalizeService implements OnModuleInit {
       const newName = destPath.substring(folder.path.length + 1);
       return { fileId: row.id, fileName: row.fileName, newName, success: true, bookId };
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Finalization failed';
+      const message = resolveFinalizeErrorMessage(err);
       this.logger.warn(`Finalize failed for Book Dock file ${row.id}: ${message}`);
       return { fileId: row.id, fileName: row.fileName, success: false, message };
     }
   }
 
+  async previewFinalize(
+    userId: number,
+    isSuperuser: boolean,
+    fileIds: number[] | undefined,
+    selectAll: boolean | undefined,
+    excludedIds: number[] | undefined,
+    defaultLibraryId: number | undefined,
+    defaultFolderId: number | undefined,
+    overrides?: Array<{ fileId: number } & FinalizeOverrideEntry>,
+    status?: string,
+    search?: string,
+  ): Promise<BookDockFinalizePreviewResult> {
+    const summary = createFinalizePreviewSummary();
+    const overrideMap = new Map((overrides ?? []).map((o) => [o.fileId, o]));
+
+    await this.processFinalizeSelection(userId, isSuperuser, fileIds, selectAll, excludedIds, status, search, async (rows, missingIds) => {
+      const duplicateLookup = await this.buildDuplicateLookup(rows, defaultLibraryId, overrideMap);
+      for (const row of rows) {
+        const analysis = await this.analyzeFinalizeCandidate(
+          row,
+          defaultLibraryId,
+          defaultFolderId,
+          overrideMap,
+          userId,
+          isSuperuser,
+          duplicateLookup,
+        );
+        addFinalizePreviewAnalysis(summary, analysis);
+      }
+      for (const fileId of missingIds) {
+        addFinalizePreviewItem(summary, {
+          fileId,
+          fileName: `book-dock-file-${fileId}`,
+          status: 'error',
+          message: 'Book Dock file not found',
+        });
+      }
+    });
+
+    return summary;
+  }
+
+  async discardDuplicateCandidates(
+    userId: number,
+    isSuperuser: boolean,
+    fileIds: number[] | undefined,
+    selectAll: boolean | undefined,
+    excludedIds: number[] | undefined,
+    defaultLibraryId: number | undefined,
+    defaultFolderId: number | undefined,
+    overrides?: Array<{ fileId: number } & FinalizeOverrideEntry>,
+    status?: string,
+    search?: string,
+  ): Promise<BookDockDiscardDuplicatesResult> {
+    const startedAt = Date.now();
+    this.logger.log(`[book_dock.discard_duplicates] [start] userId=${userId} selectAll=${selectAll === true} - duplicate discard started`);
+
+    const overrideMap = new Map((overrides ?? []).map((o) => [o.fileId, o]));
+    let total = 0;
+    let discarded = 0;
+    const discardedFileIds: number[] = [];
+
+    try {
+      await this.processFinalizeSelection(userId, isSuperuser, fileIds, selectAll, excludedIds, status, search, async (rows, missingIds) => {
+        total += rows.length + missingIds.length;
+        const duplicateLookup = await this.buildDuplicateLookup(rows, defaultLibraryId, overrideMap);
+        const duplicateRows: BookDockFileRow[] = [];
+
+        for (const row of rows) {
+          const analysis = await this.analyzeFinalizeCandidate(
+            row,
+            defaultLibraryId,
+            defaultFolderId,
+            overrideMap,
+            userId,
+            isSuperuser,
+            duplicateLookup,
+          );
+          if (analysis.status === 'duplicate') duplicateRows.push(row);
+        }
+
+        if (duplicateRows.length === 0) return;
+
+        for (const row of duplicateRows) {
+          await this.cleanupDiscardedBookDockFile(row);
+          discardedFileIds.push(row.id);
+        }
+        await this.repo.deleteByIds(duplicateRows.map((row) => row.id));
+        discarded += duplicateRows.length;
+      });
+
+      await this.emitSummary();
+      const result = { total, discarded, skipped: total - discarded, discardedFileIds: selectAll ? [] : discardedFileIds };
+      this.logger.log(
+        `[book_dock.discard_duplicates] [end] userId=${userId} durationMs=${Date.now() - startedAt} total=${total} discarded=${discarded} skipped=${result.skipped} - duplicate discard completed`,
+      );
+      return result;
+    } catch (error) {
+      const errorClass = error instanceof Error ? error.name : 'Error';
+      const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : String(error));
+      this.logger.warn(
+        `[book_dock.discard_duplicates] [fail] userId=${userId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - duplicate discard failed`,
+      );
+      throw error;
+    }
+  }
+
+  private async analyzeFinalizeCandidate(
+    row: BookDockFileRow,
+    defaultLibraryId: number | undefined,
+    defaultFolderId: number | undefined,
+    overrideMap: Map<number, FinalizeOverrideEntry>,
+    userId: number,
+    isSuperuser: boolean,
+    duplicateLookup?: Map<string, number>,
+  ): Promise<FinalizeCandidateAnalysis> {
+    try {
+      const override = overrideMap.get(row.id);
+      const libraryId = override?.libraryId ?? row.targetLibraryId ?? defaultLibraryId ?? null;
+      const folderId = override?.folderId ?? row.targetFolderId ?? defaultFolderId ?? null;
+
+      if (libraryId === null || folderId === null) {
+        return {
+          fileId: row.id,
+          fileName: row.fileName,
+          row,
+          status: 'missing_destination',
+          message: 'Destination is not set for this file',
+        };
+      }
+
+      const library = await this.findLibraryOrFail(libraryId);
+      await this.libraryService.verifyUserAccess(userId, libraryId, isSuperuser);
+
+      const folder = await this.findFolderOrFail(folderId, libraryId);
+      const format = row.format ?? extname(row.fileName).toLowerCase().slice(1);
+      this.validator.validateFormat(row.fileName, library.allowedFormats);
+
+      const patternDestPath = await this.resolveDestination(library, folder.path, row, format);
+      let destPath = patternDestPath;
+      if (override?.targetFileName) {
+        const stem = format ? override.targetFileName.replace(new RegExp(`\\.${format}$`, 'i'), '') : override.targetFileName;
+        const safeFileName = this.validator.sanitizeFilename(format ? `${stem}.${format}` : stem);
+        const candidate = join(dirname(patternDestPath), safeFileName);
+        if (resolve(dirname(candidate)) !== resolve(dirname(patternDestPath))) {
+          return { fileId: row.id, fileName: row.fileName, row, status: 'invalid_target', message: 'Invalid file name' };
+        }
+        destPath = candidate;
+      }
+
+      const newName = destPath.substring(folder.path.length + 1);
+
+      if (!override?.skipDuplicateCheck) {
+        const meta = normalizeFinalizeMetadata(row.selectedMetadata ?? row.embeddedMetadata ?? {});
+        const existingBookId = await this.findDuplicate(libraryId, meta, duplicateLookup);
+        if (existingBookId !== null) {
+          return {
+            fileId: row.id,
+            fileName: row.fileName,
+            row,
+            status: 'duplicate',
+            existingBookId,
+            newName,
+            message: 'Duplicate: this book already exists in the library',
+          };
+        }
+      }
+
+      const exists = await fsAccess(destPath)
+        .then(() => true)
+        .catch(() => false);
+      if (exists) {
+        return {
+          fileId: row.id,
+          fileName: row.fileName,
+          row,
+          status: 'destination_conflict',
+          newName,
+          message: 'A file with this name already exists at the target location',
+        };
+      }
+
+      return { fileId: row.id, fileName: row.fileName, row, status: 'ready', newName, library, folder, format, destPath };
+    } catch (error) {
+      return {
+        fileId: row.id,
+        fileName: row.fileName,
+        row,
+        status: classifyFinalizePreviewError(error),
+        message: resolveFinalizeErrorMessage(error),
+      };
+    }
+  }
+
+  private analysisToFileResult(analysis: FinalizeCandidateAnalysis): BookDockFinalizeFileResult {
+    if (analysis.status === 'duplicate') {
+      return {
+        fileId: analysis.fileId,
+        fileName: analysis.fileName,
+        newName: analysis.newName,
+        success: false,
+        isDuplicate: true,
+        existingBookId: analysis.existingBookId,
+        message: analysis.message,
+      };
+    }
+
+    return {
+      fileId: analysis.fileId,
+      fileName: analysis.fileName,
+      newName: analysis.newName,
+      success: false,
+      message: analysis.message,
+    };
+  }
+
+  private async processFinalizeSelection(
+    userId: number,
+    isSuperuser: boolean,
+    fileIds: number[] | undefined,
+    selectAll: boolean | undefined,
+    excludedIds: number[] | undefined,
+    status: string | undefined,
+    search: string | undefined,
+    processBatch: (rows: BookDockFileRow[], missingIds: number[]) => Promise<void>,
+  ): Promise<void> {
+    if (selectAll) {
+      let afterId: number | undefined;
+      while (true) {
+        const rows = await this.repo.findSelectionBatch({
+          limit: BATCH_SIZE,
+          afterId,
+          excludedIds,
+          status,
+          search,
+          userId,
+          isSuperuser,
+        });
+        if (rows.length === 0) break;
+
+        await processBatch(rows, []);
+        afterId = rows[rows.length - 1]?.id;
+      }
+      return;
+    }
+
+    const ids = dedupeIds(fileIds ?? []);
+    for (let index = 0; index < ids.length; index += BATCH_SIZE) {
+      const batch = ids.slice(index, index + BATCH_SIZE);
+      const rows = await this.repo.findByIds(batch, userId, isSuperuser);
+      const rowById = new Map(rows.map((row) => [row.id, row]));
+      const missingIds = batch.filter((id) => !rowById.has(id));
+      await processBatch(rows, missingIds);
+    }
+  }
+
   async triggerAutoFinalize(fileId: number): Promise<void> {
+    if (await this.processingState.isPaused()) {
+      this.autoFinalizeQueue.pause();
+      return;
+    }
+
     const settings = await this.appSettings.getAutoFinalizeSettings();
     if (!settings.enabled || settings.libraryId === null || settings.folderId === null) return;
 
@@ -271,20 +577,74 @@ export class BookDockFinalizeService implements OnModuleInit {
     }
   }
 
+  private enqueueAutoFinalize(fileId: number): void {
+    if (this.processingState.getCachedPaused()) this.autoFinalizeQueue.pause();
+    this.autoFinalizeQueue.enqueue(fileId);
+  }
+
+  pauseProcessing(): void {
+    this.autoFinalizeQueue.pause();
+  }
+
+  async resumeProcessing(): Promise<void> {
+    if (await this.processingState.isPaused()) return;
+    this.autoFinalizeQueue.resume();
+  }
+
+  async requeueAutoFinalizeCandidates(): Promise<number> {
+    if (await this.processingState.isPaused()) return 0;
+
+    const settings = await this.appSettings.getAutoFinalizeSettings();
+    if (!settings.enabled || settings.libraryId === null || settings.folderId === null) return 0;
+
+    let queued = 0;
+    let afterId: number | undefined;
+    while (!(await this.processingState.isPaused())) {
+      const rows = await this.repo.findSelectionBatch({
+        limit: BATCH_SIZE,
+        afterId,
+        status: 'ready',
+        userId: 0,
+        isSuperuser: true,
+      });
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        if (shouldAutoFinalize(row, settings.metadataMode, settings.threshold) && this.autoFinalizeQueue.enqueue(row.id)) {
+          queued++;
+        }
+      }
+      afterId = rows[rows.length - 1]?.id;
+    }
+
+    return queued;
+  }
+
+  private logAutoFinalizeQueueFailure(fileId: number, err: unknown): void {
+    const errorClass = err instanceof Error ? err.name : 'Error';
+    const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+    this.logger.warn(
+      `[book_dock.auto_finalize_queue] [fail] fileId=${fileId} errorClass=${errorClass} error="${errorMessage}" - auto-finalize queue job failed`,
+    );
+  }
+
   async previewNames(
     fileIds: number[] | undefined,
     selectAll: boolean | undefined,
     excludedIds: number[] | undefined,
     defaultLibraryId: number | undefined,
+    userId: number | undefined,
+    isSuperuser: boolean | undefined,
     status?: string,
     search?: string,
   ): Promise<{ fileId: number; fileName: string; newName: string }[]> {
-    const ids = selectAll ? await this.repo.findAllIds(excludedIds, status, search) : (fileIds ?? []);
+    const ids = selectAll ? await this.repo.findAllIds(excludedIds, status, search, userId, isSuperuser) : (fileIds ?? []);
     if (!ids.length) return [];
 
-    const rows = await this.repo.findByIds(ids);
+    const rows = await this.repo.findByIds(ids, userId, isSuperuser);
     const appPatternFile = await this.appSettings.getUploadPattern();
     const appPatternFolder = await this.appSettings.getUploadPatternBookPerFolder();
+    const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
     const libraryIds = [...new Set(rows.map((row) => row.targetLibraryId ?? defaultLibraryId).filter((id): id is number => id != null))];
     const libraryMap = libraryIds.length
       ? new Map((await this.db.select().from(libraries).where(inArray(libraries.id, libraryIds))).map((lib) => [lib.id, lib]))
@@ -302,7 +662,7 @@ export class BookDockFinalizeService implements OnModuleInit {
 
       if (pattern) {
         const tokens = this.buildPatternTokens(meta, row.fileName, format);
-        const resolved = resolveUploadPath(pattern, tokens, format);
+        const resolved = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
         if (resolved) newName = resolved;
       }
 
@@ -313,9 +673,12 @@ export class BookDockFinalizeService implements OnModuleInit {
   private async buildDuplicateLookup(
     rows: BookDockFileRow[],
     defaultLibraryId: number | undefined,
-    overrideMap: Map<number, { libraryId?: number; folderId?: number }>,
+    overrideMap: Map<number, FinalizeOverrideEntry>,
   ): Promise<Map<string, number>> {
-    const needsByLibrary = new Map<number, { isbn13: Set<string>; isbn10: Set<string>; titles: Set<string> }>();
+    const needsByLibrary = new Map<
+      number,
+      { isbn13: Set<string>; isbn10: Set<string>; titles: Set<string>; authors: Set<string>; titleAuthorPairs: Set<string> }
+    >();
 
     for (const row of rows) {
       const override = overrideMap.get(row.id);
@@ -325,7 +688,7 @@ export class BookDockFinalizeService implements OnModuleInit {
       const meta = normalizeFinalizeMetadata(row.selectedMetadata ?? row.embeddedMetadata ?? {});
       let bucket = needsByLibrary.get(libraryId);
       if (!bucket) {
-        bucket = { isbn13: new Set(), isbn10: new Set(), titles: new Set() };
+        bucket = { isbn13: new Set(), isbn10: new Set(), titles: new Set(), authors: new Set(), titleAuthorPairs: new Set() };
         needsByLibrary.set(libraryId, bucket);
       }
 
@@ -334,7 +697,13 @@ export class BookDockFinalizeService implements OnModuleInit {
       } else if (meta.isbn10) {
         bucket.isbn10.add(meta.isbn10);
       } else if (meta.title) {
+        const normalizedAuthors = normalizeDuplicateAuthors(meta.authors);
+        if (normalizedAuthors.length === 0) continue;
         bucket.titles.add(meta.title.toLowerCase());
+        for (const authorName of normalizedAuthors) {
+          bucket.authors.add(authorName);
+          bucket.titleAuthorPairs.add(`${meta.title.toLowerCase()}|${authorName}`);
+        }
       }
     }
 
@@ -370,18 +739,34 @@ export class BookDockFinalizeService implements OnModuleInit {
         }
       }
 
-      if (values.titles.size > 0) {
-        const rowsByTitle = await this.db
+      if (values.titles.size > 0 && values.authors.size > 0) {
+        const rowsByTitleAuthor = await this.db
           .select({
             bookId: bookMetadata.bookId,
             normalizedTitle: sql<string>`lower(${bookMetadata.title})`,
+            normalizedAuthor: sql<string>`lower(${authors.name})`,
           })
           .from(bookMetadata)
           .innerJoin(books, eq(books.id, bookMetadata.bookId))
-          .where(and(eq(books.libraryId, libraryId), inArray(sql<string>`lower(${bookMetadata.title})`, [...values.titles])));
-        for (const row of rowsByTitle) {
-          if (!row.normalizedTitle) continue;
-          const key = this.buildDuplicateLookupKey(libraryId, { isbn13: null, isbn10: null, title: row.normalizedTitle });
+          .innerJoin(bookAuthors, eq(bookAuthors.bookId, bookMetadata.bookId))
+          .innerJoin(authors, eq(authors.id, bookAuthors.authorId))
+          .where(
+            and(
+              eq(books.libraryId, libraryId),
+              inArray(sql<string>`lower(${bookMetadata.title})`, [...values.titles]),
+              inArray(sql<string>`lower(${authors.name})`, [...values.authors]),
+            ),
+          );
+        for (const row of rowsByTitleAuthor) {
+          if (!row.normalizedTitle || !row.normalizedAuthor) continue;
+          const pairKey = `${row.normalizedTitle}|${row.normalizedAuthor}`;
+          if (!values.titleAuthorPairs.has(pairKey)) continue;
+          const key = this.buildDuplicateLookupKey(libraryId, {
+            isbn13: null,
+            isbn10: null,
+            title: row.normalizedTitle,
+            author: row.normalizedAuthor,
+          });
           if (key && !lookup.has(key)) {
             lookup.set(key, row.bookId);
           }
@@ -392,31 +777,34 @@ export class BookDockFinalizeService implements OnModuleInit {
     return lookup;
   }
 
-  private buildDuplicateLookupKey(libraryId: number, meta: Pick<NormalizedFinalizeMetadata, 'isbn13' | 'isbn10' | 'title'>): string | null {
+  private buildDuplicateLookupKey(
+    libraryId: number,
+    meta: { isbn13: string | null; isbn10: string | null; title: string | null; author?: string | null },
+  ): string | null {
     const isbn = meta.isbn13 ?? meta.isbn10;
     if (isbn) {
       const isbnKind = meta.isbn13 ? 'isbn13' : 'isbn10';
       return `library:${libraryId}|${isbnKind}:${isbn}`;
     }
-    if (meta.title) {
-      return `library:${libraryId}|title:${meta.title.toLowerCase()}`;
+    if (meta.title && meta.author) {
+      return `library:${libraryId}|title:${meta.title.toLowerCase()}|author:${meta.author.toLowerCase()}`;
     }
     return null;
   }
 
   private async findDuplicate(
     libraryId: number,
-    meta: Pick<NormalizedFinalizeMetadata, 'isbn13' | 'isbn10' | 'title'>,
+    meta: Pick<NormalizedFinalizeMetadata, 'isbn13' | 'isbn10' | 'title' | 'authors'>,
     duplicateLookup?: Map<string, number>,
   ): Promise<number | null> {
-    const lookupKey = this.buildDuplicateLookupKey(libraryId, meta);
-    if (lookupKey && duplicateLookup?.has(lookupKey)) {
-      return duplicateLookup.get(lookupKey) ?? null;
-    }
-
     const isbn = meta.isbn13 ?? meta.isbn10;
 
     if (isbn) {
+      const lookupKey = this.buildDuplicateLookupKey(libraryId, { isbn13: meta.isbn13, isbn10: meta.isbn10, title: null, author: null });
+      if (lookupKey && duplicateLookup?.has(lookupKey)) {
+        return duplicateLookup.get(lookupKey) ?? null;
+      }
+
       const conditions = meta.isbn13 ? [eq(bookMetadata.isbn13, meta.isbn13)] : [eq(bookMetadata.isbn10, meta.isbn10!)];
 
       const [existing] = await this.db
@@ -430,11 +818,34 @@ export class BookDockFinalizeService implements OnModuleInit {
     }
 
     if (!isbn && meta.title) {
+      const normalizedAuthors = normalizeDuplicateAuthors(meta.authors);
+      if (normalizedAuthors.length === 0) return null;
+
+      for (const authorName of normalizedAuthors) {
+        const lookupKey = this.buildDuplicateLookupKey(libraryId, {
+          isbn13: null,
+          isbn10: null,
+          title: meta.title,
+          author: authorName,
+        });
+        if (lookupKey && duplicateLookup?.has(lookupKey)) {
+          return duplicateLookup.get(lookupKey) ?? null;
+        }
+      }
+
       const [existing] = await this.db
         .select({ bookId: bookMetadata.bookId })
         .from(bookMetadata)
         .innerJoin(books, eq(books.id, bookMetadata.bookId))
-        .where(and(eq(books.libraryId, libraryId), sql`lower(${bookMetadata.title}) = lower(${meta.title})`))
+        .innerJoin(bookAuthors, eq(bookAuthors.bookId, bookMetadata.bookId))
+        .innerJoin(authors, eq(authors.id, bookAuthors.authorId))
+        .where(
+          and(
+            eq(books.libraryId, libraryId),
+            sql`lower(${bookMetadata.title}) = lower(${meta.title})`,
+            inArray(sql<string>`lower(${authors.name})`, normalizedAuthors),
+          ),
+        )
         .limit(1);
 
       if (existing) return existing.bookId;
@@ -454,11 +865,12 @@ export class BookDockFinalizeService implements OnModuleInit {
       (library.organizationMode === 'book_per_folder'
         ? await this.appSettings.getUploadPatternBookPerFolder()
         : await this.appSettings.getUploadPattern());
+    const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
     const meta = row.selectedMetadata ?? row.embeddedMetadata ?? {};
 
     if (pattern) {
       const tokens = this.buildPatternTokens(meta, row.fileName, format);
-      const resolved = resolveUploadPath(pattern, tokens, format);
+      const resolved = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
       if (resolved) return join(folderPath, resolved);
     }
 
@@ -476,12 +888,8 @@ export class BookDockFinalizeService implements OnModuleInit {
     if (meta.isbn13) tokens['isbn'] = meta.isbn13;
     if (meta.publishedYear) tokens['year'] = String(meta.publishedYear);
     if (meta.seriesName) tokens['series'] = meta.seriesName;
-    if (meta.seriesIndex != null) {
-      const whole = Math.floor(meta.seriesIndex);
-      const fraction = meta.seriesIndex - whole;
-      const padded = String(whole).padStart(2, '0');
-      tokens['seriesIndex'] = fraction > 0 ? `${padded}.${String(fraction).split('.')[1]}` : padded;
-    }
+    const seriesIndex = formatSeriesIndex(meta.seriesIndex ?? null);
+    if (seriesIndex) tokens['seriesIndex'] = seriesIndex;
     if (meta.authors && meta.authors.length > 0) {
       tokens['authors'] = meta.authors.join(', ');
     }
@@ -491,6 +899,7 @@ export class BookDockFinalizeService implements OnModuleInit {
 
   private async applyMetadata(bookId: number, row: BookDockFileRow): Promise<void> {
     const meta = normalizeFinalizeMetadata(row.selectedMetadata ?? row.embeddedMetadata);
+    const audio = resolveAudioFinalizeFields(row.embeddedMetadata ?? row.selectedMetadata);
     let selectedCoverApplied = false;
 
     const selectedCoverUrl = meta.coverUrl;
@@ -507,23 +916,28 @@ export class BookDockFinalizeService implements OnModuleInit {
       }
     }
 
+    const scalarFields = {
+      title: meta.title ?? null,
+      subtitle: meta.subtitle ?? null,
+      description: meta.description ?? null,
+      isbn10: meta.isbn10 ?? null,
+      isbn13: meta.isbn13 ?? null,
+      publisher: meta.publisher ?? null,
+      publishedDate: meta.publishedDate ?? null,
+      publishedYear: meta.publishedYear ?? null,
+      language: meta.language ?? null,
+      seriesName: meta.seriesName ?? null,
+      seriesIndex: meta.seriesIndex ?? null,
+      pageCount: meta.pageCount ?? null,
+      updatedAt: new Date(),
+    };
+    const patch = (await this.seriesIdentity?.resolveMetadataPatch(scalarFields)) ?? scalarFields;
+
     await this.db
       .update(bookMetadata)
-      .set({
-        title: meta.title ?? null,
-        subtitle: meta.subtitle ?? null,
-        description: meta.description ?? null,
-        isbn10: meta.isbn10 ?? null,
-        isbn13: meta.isbn13 ?? null,
-        publisher: meta.publisher ?? null,
-        publishedYear: meta.publishedYear ?? null,
-        language: meta.language ?? null,
-        seriesName: meta.seriesName ?? null,
-        seriesIndex: meta.seriesIndex ?? null,
-        pageCount: meta.pageCount ?? null,
-        updatedAt: new Date(),
-      })
+      .set({ ...patch, ...buildAudioMetadataPatch(audio) })
       .where(eq(bookMetadata.bookId, bookId));
+    await this.seriesMemberships?.syncPrimaryFromMetadata(bookId);
 
     if (meta.authors.length > 0) {
       await this.metadataService.replaceAuthors(
@@ -535,6 +949,13 @@ export class BookDockFinalizeService implements OnModuleInit {
     if (meta.genres.length > 0) {
       await this.metadataService.replaceGenres(bookId, meta.genres);
     }
+
+    if (audio.narrators.length > 0) {
+      await this.metadataService.replaceNarrators(
+        bookId,
+        audio.narrators.map((name) => ({ name, sortName: null })),
+      );
+    }
   }
 
   private async cleanupBookDockRecord(row: BookDockFileRow): Promise<void> {
@@ -544,6 +965,15 @@ export class BookDockFinalizeService implements OnModuleInit {
       await safeUnlink(thumbPath);
     }
     await this.repo.deleteById(row.id);
+  }
+
+  private async cleanupDiscardedBookDockFile(row: BookDockFileRow): Promise<void> {
+    await safeUnlink(row.absolutePath);
+    if (row.coverPath) {
+      await safeUnlink(row.coverPath);
+      const thumbPath = row.coverPath.replace(/\.\w+$/, '_thumb.jpg');
+      await safeUnlink(thumbPath);
+    }
   }
 
   private async findLibraryOrFail(libraryId: number) {
@@ -560,7 +990,8 @@ export class BookDockFinalizeService implements OnModuleInit {
 
   private async emitSummary(): Promise<void> {
     const summary = await this.repo.countsByStatus();
-    this.gateway.emitSummary(summary);
+    const paused = await this.processingState.isPaused();
+    this.gateway.emitSummary({ ...summary, paused });
   }
 }
 
@@ -570,6 +1001,57 @@ async function safeUnlink(path: string): Promise<void> {
   } catch {
     // file may already be deleted
   }
+}
+
+function createFinalizePreviewSummary(): BookDockFinalizePreviewResult {
+  return {
+    total: 0,
+    ready: 0,
+    duplicates: 0,
+    destinationConflicts: 0,
+    missingDestination: 0,
+    blocked: 0,
+    truncated: false,
+    itemLimit: PREVIEW_ITEM_LIMIT,
+    items: [],
+  };
+}
+
+function addFinalizePreviewAnalysis(summary: BookDockFinalizePreviewResult, analysis: FinalizeCandidateAnalysis): void {
+  addFinalizePreviewItem(summary, {
+    fileId: analysis.fileId,
+    fileName: analysis.fileName,
+    newName: analysis.newName,
+    status: analysis.status,
+    existingBookId: analysis.existingBookId,
+    message: analysis.message,
+  });
+}
+
+function addFinalizePreviewItem(summary: BookDockFinalizePreviewResult, item: BookDockFinalizePreviewItem): void {
+  summary.total++;
+  if (item.status === 'ready') summary.ready++;
+  else if (item.status === 'duplicate') summary.duplicates++;
+  else if (item.status === 'destination_conflict') summary.destinationConflicts++;
+  else if (item.status === 'missing_destination') summary.missingDestination++;
+  else summary.blocked++;
+
+  if (summary.items.length < PREVIEW_ITEM_LIMIT) {
+    summary.items.push(item);
+  } else {
+    summary.truncated = true;
+  }
+}
+
+function classifyFinalizePreviewError(error: unknown): BookDockFinalizePreviewStatus {
+  if (error instanceof ForbiddenException) return 'access_denied';
+  if (error instanceof NotFoundException) return 'invalid_target';
+  if (error instanceof BadRequestException) {
+    const message = error.message.toLowerCase();
+    if (message.includes('file type') || message.includes('does not allow')) return 'invalid_format';
+    return 'invalid_target';
+  }
+  return 'error';
 }
 
 function normalizeText(value: unknown, maxLength?: number): string | null {
@@ -584,6 +1066,13 @@ function normalizeInteger(value: unknown): number | null {
   const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseInt(value.trim(), 10) : NaN;
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return Math.floor(parsed);
+}
+
+function normalizePublishedYear(value: unknown): number | null {
+  const parsed = normalizeInteger(value);
+  if (parsed === null) return null;
+  if (parsed < MIN_PUBLISHED_YEAR || parsed > MAX_PUBLISHED_YEAR) return null;
+  return parsed;
 }
 
 function normalizeReal(value: unknown): number | null {
@@ -624,7 +1113,20 @@ function normalizeStringArray(value: unknown, maxLength: number): string[] {
   return normalized;
 }
 
+function normalizeDuplicateAuthors(value: string[] | null | undefined): string[] {
+  if (!Array.isArray(value)) return [];
+  const normalized = new Set<string>();
+  for (const author of value) {
+    if (typeof author !== 'string') continue;
+    const trimmed = author.trim().toLowerCase();
+    if (!trimmed) continue;
+    normalized.add(trimmed);
+  }
+  return [...normalized];
+}
+
 function normalizeFinalizeMetadata(meta: BookDockMetadata | null | undefined): NormalizedFinalizeMetadata {
+  const publishedDate = normalizePublishedDate(meta?.publishedDate) ?? null;
   return {
     title: normalizeText(meta?.title, 1000),
     subtitle: normalizeText(meta?.subtitle, 1000),
@@ -632,7 +1134,8 @@ function normalizeFinalizeMetadata(meta: BookDockMetadata | null | undefined): N
     isbn10: normalizeIsbn(meta?.isbn10, 10),
     isbn13: normalizeIsbn(meta?.isbn13, 13),
     publisher: normalizeText(meta?.publisher, 500),
-    publishedYear: normalizeInteger(meta?.publishedYear),
+    publishedDate,
+    publishedYear: publishedDate ? publishedYearFromDateKey(publishedDate) : normalizePublishedYear(meta?.publishedYear),
     language: normalizeLanguage(meta?.language),
     pageCount: normalizeInteger(meta?.pageCount),
     seriesName: normalizeText(meta?.seriesName, 500),
@@ -641,6 +1144,102 @@ function normalizeFinalizeMetadata(meta: BookDockMetadata | null | undefined): N
     genres: normalizeStringArray(meta?.genres, 200),
     coverUrl: normalizeText(meta?.coverUrl),
   };
+}
+
+type AudioFinalizeFields = {
+  durationSeconds: number | null;
+  chapters: AudiobookChapter[] | null;
+  narrators: string[];
+};
+
+function resolveAudioFinalizeFields(meta: BookDockMetadata | null | undefined): AudioFinalizeFields {
+  return {
+    durationSeconds: normalizeDurationSeconds(meta?.durationSeconds),
+    chapters: normalizeChapters(meta?.chapters),
+    narrators: normalizeStringArray(meta?.narrators, 500),
+  };
+}
+
+function buildAudioMetadataPatch(audio: AudioFinalizeFields): { durationSeconds?: number; chapters?: AudiobookChapter[] } {
+  const patch: { durationSeconds?: number; chapters?: AudiobookChapter[] } = {};
+  if (audio.durationSeconds !== null) patch.durationSeconds = audio.durationSeconds;
+  if (audio.chapters !== null) patch.chapters = audio.chapters;
+  return patch;
+}
+
+function normalizeDurationSeconds(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number.parseFloat(value.trim()) : NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed);
+}
+
+function normalizeChapters(value: unknown): AudiobookChapter[] | null {
+  if (!Array.isArray(value)) return null;
+  const chapters: AudiobookChapter[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const candidate = item as { title?: unknown; startMs?: unknown };
+    const startMs =
+      typeof candidate.startMs === 'number'
+        ? candidate.startMs
+        : typeof candidate.startMs === 'string'
+          ? Number.parseFloat(candidate.startMs.trim())
+          : NaN;
+    if (!Number.isFinite(startMs) || startMs < 0) continue;
+    const title = typeof candidate.title === 'string' ? candidate.title : '';
+    chapters.push({ title, startMs: Math.round(startMs) });
+  }
+  return chapters.length > 0 ? chapters : null;
+}
+
+function resolveFinalizeErrorMessage(error: unknown): string {
+  if (isPublishedYearConstraintViolation(error)) {
+    return INVALID_PUBLISHED_YEAR_MESSAGE;
+  }
+  if (isBookMetadataConstraintViolation(error)) {
+    return INVALID_METADATA_MESSAGE;
+  }
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return 'Finalization failed';
+}
+
+function isPublishedYearConstraintViolation(error: unknown): boolean {
+  for (const entry of iterateErrorChain(error)) {
+    if (entry.code === '23514') {
+      const constraint = asString(entry.constraint);
+      if (constraint === PUBLISHED_YEAR_RANGE_CONSTRAINT) return true;
+      const message = asString(entry.message);
+      if (message.includes(PUBLISHED_YEAR_RANGE_CONSTRAINT)) return true;
+    }
+  }
+  return false;
+}
+
+function isBookMetadataConstraintViolation(error: unknown): boolean {
+  for (const entry of iterateErrorChain(error)) {
+    if (entry.code !== '23514') continue;
+    const constraint = asString(entry.constraint);
+    if (constraint.startsWith('book_metadata_')) return true;
+    const message = asString(entry.message);
+    if (message.includes('book_metadata')) return true;
+  }
+  return false;
+}
+
+function* iterateErrorChain(error: unknown): Generator<Record<string, unknown>> {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    yield current as Record<string, unknown>;
+    current = (current as { cause?: unknown }).cause;
+  }
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }
 
 function mergeBookDockMetadata(

@@ -1,4 +1,20 @@
-import { Body, Controller, Delete, ForbiddenException, Get, Headers, Param, ParseIntPipe, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  ForbiddenException,
+  Get,
+  Headers,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  Put,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 
 import { Permission } from '@bookorbit/types';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -6,12 +22,26 @@ import { Public } from '../../common/decorators/public.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import type { RequestUser } from '../../common/types/request-user';
 import { KoreaderAuthGuard } from './koreader-auth.guard';
+import { KoreaderHashLinkService } from './koreader-hash-link.service';
+import { KoreaderPackageService } from './koreader-package.service';
 import { KoreaderService } from './koreader.service';
-import { CreateKoreaderUserDto, SaveProgressDto, TestConnectionDto, UpdateKoreaderUserDto } from './dto';
+import {
+  CreateKoreaderUserDto,
+  DownloadPluginPackageDto,
+  KoreaderSaveProgressDto,
+  LinkKoreaderUnmatchedBookDto,
+  TestConnectionDto,
+  UpdateKoreaderManualHashLinkDto,
+  UpdateKoreaderUserDto,
+} from './dto';
 
 @Controller('koreader')
 export class KoreaderController {
-  constructor(private readonly koreaderService: KoreaderService) {}
+  constructor(
+    private readonly koreaderService: KoreaderService,
+    private readonly hashLinkService: KoreaderHashLinkService,
+    private readonly packageService: KoreaderPackageService,
+  ) {}
 
   // --- KOReader kosync protocol endpoints (header-based auth) ---
 
@@ -31,7 +61,7 @@ export class KoreaderController {
   @Public()
   @UseGuards(KoreaderAuthGuard)
   @Put('syncs/progress')
-  async saveProgress(@CurrentUser() user: RequestUser, @Body() dto: SaveProgressDto) {
+  async saveProgress(@CurrentUser() user: RequestUser, @Body() dto: KoreaderSaveProgressDto) {
     return this.koreaderService.saveProgress(user.id, dto);
   }
 
@@ -85,15 +115,75 @@ export class KoreaderController {
   }
 
   @RequirePermission(Permission.KoreaderSync)
+  @Delete('devices/:deviceId')
+  async removeDevice(@CurrentUser() user: RequestUser, @Param('deviceId') deviceId: string) {
+    await this.koreaderService.removeDevice(user.id, deviceId);
+    return { success: true };
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Get('unmatched-books')
+  listUnmatchedBooks(@CurrentUser() user: RequestUser) {
+    return this.hashLinkService.listUnmatchedBooks(user);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Post('unmatched-books/:hash/link')
+  linkUnmatchedBook(@CurrentUser() user: RequestUser, @Param('hash') hash: string, @Body() dto: LinkKoreaderUnmatchedBookDto) {
+    return this.hashLinkService.linkUnmatchedBook(user, hash, dto.bookId);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Delete('unmatched-books/:hash')
+  dismissUnmatchedBook(@CurrentUser() user: RequestUser, @Param('hash') hash: string) {
+    return this.hashLinkService.dismissUnmatchedBook(user, hash);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Delete('unmatched-books')
+  dismissAllUnmatchedBooks(@CurrentUser() user: RequestUser) {
+    return this.hashLinkService.dismissAllUnmatchedBooks(user);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Get('hash-links')
+  listManualHashLinks(@CurrentUser() user: RequestUser) {
+    return this.hashLinkService.listManualHashLinks(user);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Patch('hash-links/:hash')
+  relinkManualHashLink(@CurrentUser() user: RequestUser, @Param('hash') hash: string, @Body() dto: UpdateKoreaderManualHashLinkDto) {
+    return this.hashLinkService.relinkManualHashLink(user, hash, dto.bookId);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Delete('hash-links/:hash')
+  unlinkManualHashLink(@CurrentUser() user: RequestUser, @Param('hash') hash: string) {
+    return this.hashLinkService.unlinkManualHashLink(user, hash);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
   @Get('books/:bookId/progress')
   getBookProgress(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number) {
     return this.koreaderService.getBookProgress(user.id, bookId);
   }
 
   @RequirePermission(Permission.KoreaderSync)
+  @Get('plugin-package')
+  async downloadPluginPackage(@CurrentUser() user: RequestUser, @Query() query: DownloadPluginPackageDto, @Res() reply: FastifyReply) {
+    const zip = await this.packageService.buildPluginPackage(user.id, query.origin);
+    reply
+      .header('Content-Type', 'application/zip')
+      .header('Content-Disposition', 'attachment; filename="bookorbit.koplugin.zip"')
+      .header('Cache-Control', 'no-store')
+      .send(zip);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
   @Post('test-connection')
   async testConnection(@CurrentUser() user: RequestUser, @Body() dto: TestConnectionDto) {
     const success = await this.koreaderService.testConnection(user.id, dto.username, dto.password);
-    return { success, username: dto.username, serverUrl: '/api/koreader' };
+    return { success, username: dto.username, serverUrl: '/api/v1/koreader' };
   }
 }

@@ -33,6 +33,19 @@ const RUNNING_STATUS: HardcoverActiveSyncStatus = {
   syncedBooks: 3,
 }
 
+const SETTINGS: HardcoverSettings = {
+  tokenConfigured: true,
+  enabled: true,
+  effectiveEnabled: true,
+  disabledReason: null,
+  bookSyncMode: 'all_eligible',
+  autoSyncOnStatusChange: true,
+  autoSyncOnProgressUpdate: true,
+  autoSyncOnRatingChange: true,
+  privacySettingId: 3,
+  lastSyncedAt: null,
+}
+
 async function loadComposable() {
   const { useHardcoverSync } = await import('../useHardcoverSync')
   return useHardcoverSync()
@@ -46,7 +59,7 @@ describe('useHardcoverSync', () => {
     mockStatus.mockResolvedValue(null)
     mockPendingSummary.mockResolvedValue({ totalBooks: 0, pendingBooks: 0 })
     mockStream.mockResolvedValue(undefined)
-    mockFetchSettings.mockResolvedValue(null as unknown as HardcoverSettings)
+    mockFetchSettings.mockResolvedValue(SETTINGS)
   })
 
   afterEach(() => {
@@ -75,6 +88,15 @@ describe('useHardcoverSync', () => {
     expect(c.error.value).toBe('Server busy')
   })
 
+  it('startSync does not mark a run active when the server reports no run', async () => {
+    mockStart.mockResolvedValue({ runId: 0 })
+    const c = await loadComposable()
+    await c.startSync()
+    expect(c.activeSyncStatus.value).toBeNull()
+    expect(c.error.value).toBe('Hardcover sync is not available right now')
+    expect(mockFetchSettings).toHaveBeenCalled()
+  })
+
   it('cancelSync clears status and stops stream tracking', async () => {
     mockCancel.mockResolvedValue(undefined)
     const c = await loadComposable()
@@ -97,6 +119,52 @@ describe('useHardcoverSync', () => {
     const c = await loadComposable()
     await c.fetchStatus()
     expect(c.pendingSummary.value).toEqual({ totalBooks: 6, pendingBooks: 2 })
+  })
+
+  it('refreshes settings and pending counts when the stream reports a completed status', async () => {
+    mockStart.mockResolvedValue({ runId: 1 })
+    mockStream.mockImplementationOnce(async (onStatus) => {
+      onStatus({
+        runId: 1,
+        status: 'completed',
+        totalBooks: 10,
+        syncedBooks: 10,
+      })
+      return new Promise<void>(() => {})
+    })
+
+    const c = await loadComposable()
+    await c.startSync()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockPendingSummary).toHaveBeenCalled()
+    expect(mockFetchSettings).toHaveBeenCalled()
+    expect(c.isSyncing.value).toBe(false)
+    expect(c.activeSyncStatus.value).toEqual({
+      runId: 1,
+      status: 'completed',
+      totalBooks: 10,
+      syncedBooks: 10,
+    })
+  })
+
+  it('restarts stream tracking when the stream fails while sync is still active', async () => {
+    mockStart.mockResolvedValue({ runId: 1 })
+    mockStream.mockRejectedValueOnce(new Error('stream closed')).mockImplementationOnce(async () => new Promise<void>(() => {}))
+
+    const c = await loadComposable()
+    await c.startSync()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockStream).toHaveBeenCalledTimes(2)
+    expect(c.activeSyncStatus.value).toEqual({
+      runId: 1,
+      status: 'running',
+      syncedBooks: 0,
+      totalBooks: 0,
+    })
   })
 
   it('syncProgress is 0 when no sync', async () => {

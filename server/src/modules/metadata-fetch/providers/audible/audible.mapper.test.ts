@@ -90,6 +90,22 @@ describe('mapAudibleProduct — basic fields', () => {
     const result = mapAudibleProduct(makeProduct({ language: 'english' }));
     expect(result.language).toBe('english');
   });
+
+  it('maps overall community rating and rating count', () => {
+    const result = mapAudibleProduct(
+      makeProduct({
+        rating: {
+          overall_distribution: {
+            average_rating: 4.936869108034913,
+            num_ratings: 125913,
+          },
+        },
+      }),
+    );
+
+    expect(result.communityRating).toBe(4.936869108034913);
+    expect(result.communityRatingCount).toBe(125913);
+  });
 });
 
 // ── COVER URL ────────────────────────────────────────────────────────────────
@@ -181,6 +197,7 @@ describe('mapAudibleProduct — series', () => {
     );
     expect(result.seriesName).toBe('Kingkiller Chronicle');
     expect(result.seriesIndex).toBe(1);
+    expect(result.seriesMemberships).toEqual([{ seriesName: 'Kingkiller Chronicle', seriesIndex: 1 }]);
   });
 
   it('handles decimal series index', () => {
@@ -190,17 +207,52 @@ describe('mapAudibleProduct — series', () => {
       }),
     );
     expect(result.seriesIndex).toBe(2.5);
+    expect(result.seriesMemberships).toEqual([{ seriesName: 'Wheel of Time', seriesIndex: 2.5 }]);
   });
 
   it('leaves seriesIndex undefined when sequence is absent', () => {
     const result = mapAudibleProduct(makeProduct({ series: [{ title: 'A Series', sequence: undefined }] }));
     expect(result.seriesIndex).toBeUndefined();
+    expect(result.seriesMemberships).toEqual([{ seriesName: 'A Series' }]);
+  });
+
+  it('maps all series memberships from the Audible Confessor fixture', () => {
+    const result = mapAudibleProduct(
+      makeProduct({
+        asin: 'B002V1NSN2',
+        title: 'Confessor',
+        subtitle: 'Chainfire Trilogy, Part 3, Sword of Truth, Book 11',
+        authors: [{ name: 'Terry Goodkind' }],
+        series: [
+          {
+            asin: 'B005NB27MK',
+            sequence: '11',
+            title: 'Sword of Truth',
+            url: '/pd/Sword-of-Truth-Audiobook/B005NB27MK',
+          },
+          {
+            asin: 'B014QFZEPK',
+            sequence: '3',
+            title: 'Chainfire Trilogy',
+            url: '/pd/Chainfire-Trilogy-Audiobook/B014QFZEPK',
+          },
+        ],
+      }),
+    );
+
+    expect(result.seriesName).toBe('Sword of Truth');
+    expect(result.seriesIndex).toBe(11);
+    expect(result.seriesMemberships).toEqual([
+      { seriesName: 'Sword of Truth', seriesIndex: 11 },
+      { seriesName: 'Chainfire Trilogy', seriesIndex: 3 },
+    ]);
   });
 
   it('returns undefined series fields when series array is absent', () => {
     const result = mapAudibleProduct(makeProduct());
     expect(result.seriesName).toBeUndefined();
     expect(result.seriesIndex).toBeUndefined();
+    expect(result.seriesMemberships).toBeUndefined();
   });
 });
 

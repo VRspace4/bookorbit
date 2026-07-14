@@ -1,16 +1,16 @@
 import { ref, type Ref } from 'vue'
-import type { ColumnId, ColumnDef } from './useTableColumns'
+import type { ColumnDef } from './useTableColumns'
 
-export function useTableDragReorder(allColumns: Ref<ColumnDef[]>, setColumnOrder: (order: ColumnId[]) => void) {
-  const dragSourceColId = ref<ColumnId | null>(null)
-  const dropTargetColId = ref<ColumnId | null>(null)
+export function useTableDragReorder(allColumns: Ref<ColumnDef[]>, setColumnOrder: (order: string[]) => void) {
+  const dragSourceColId = ref<string | null>(null)
+  const dropTargetColId = ref<string | null>(null)
   const dropSide = ref<'before' | 'after' | null>(null)
 
   function isDraggableCol(col: ColumnDef): boolean {
     return col.pinned === null
   }
 
-  function handleColDragStart(e: DragEvent, colId: ColumnId) {
+  function handleColDragStart(e: DragEvent, colId: string) {
     dragSourceColId.value = colId
     if (e.dataTransfer) {
       e.dataTransfer.effectAllowed = 'move'
@@ -29,14 +29,14 @@ export function useTableDragReorder(allColumns: Ref<ColumnDef[]>, setColumnOrder
     dropSide.value = e.clientX < midX ? 'before' : 'after'
   }
 
-  function handleColDragLeave(colId: ColumnId) {
+  function handleColDragLeave(colId: string) {
     if (dropTargetColId.value === colId) {
       dropTargetColId.value = null
       dropSide.value = null
     }
   }
 
-  function handleColDrop(e: DragEvent, targetColId: ColumnId) {
+  function handleColDrop(e: DragEvent, targetColId: string) {
     e.preventDefault()
     const sourceId = dragSourceColId.value
     if (!sourceId || sourceId === targetColId) {

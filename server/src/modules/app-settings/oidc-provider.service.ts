@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Injectable, Logger, NotFoundExc
 import { ConfigService } from '@nestjs/config';
 import type { OidcAutoProvision, OidcClaimMapping } from '@bookorbit/types';
 
-import { ensureSafeUrl } from '../../common/utils/ssrf.utils';
+import { ensureSafeUrl, PrivateAddressException } from '../../common/utils/ssrf.utils';
 import { OidcProviderRepository } from './oidc-provider.repository';
 
 const OIDC_TEST_TIMEOUT_MS = 10_000;
@@ -106,7 +106,21 @@ export class OidcProviderService {
   async testConnection(issuerUri: string) {
     if (!issuerUri) throw new BadRequestException('Issuer URI is required');
 
-    const parsed = await ensureSafeUrl(issuerUri, { allowLocal: this.config.get<string>('app.nodeEnv') !== 'production' });
+    const isProduction = this.config.get<string>('app.nodeEnv') === 'production';
+    const allowPrivateOidcIssuers = !isProduction || this.config.get<boolean>('app.oidcAllowLocalIssuers') === true;
+
+    let parsed: URL;
+    try {
+      parsed = await ensureSafeUrl(issuerUri, { allowLocal: allowPrivateOidcIssuers, allowPrivate: allowPrivateOidcIssuers });
+    } catch (err) {
+      if (err instanceof PrivateAddressException) {
+        throw new BadRequestException(
+          'Issuer URL resolves to a private or local address. To allow private network OIDC providers, set OIDC_ALLOW_LOCAL_ISSUERS=true.',
+        );
+      }
+      throw err;
+    }
+
     const normalized = parsed.href.replace(/\/$/, '');
     const discoveryUrl = `${normalized}/.well-known/openid-configuration`;
 

@@ -1,17 +1,29 @@
 import { computed, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
-import { FORMAT_TO_GROUP, type BookDetail } from '@bookorbit/types'
+import {
+  FORMAT_TO_GROUP,
+  type BookCommunityRating,
+  type BookDetail,
+  type BookMetadataLockField,
+  type BookMetadataSaveResult,
+  type CustomMetadataBookValue,
+  type CustomMetadataBookValueInput,
+} from '@bookorbit/types'
+
+export type EditableSeriesMembership = {
+  seriesName: string
+  seriesIndex: number | null
+}
 
 const ROOT_FIELDS = [
   'title',
   'subtitle',
   'description',
   'publisher',
+  'publishedDate',
   'publishedYear',
   'language',
   'pageCount',
-  'seriesName',
-  'seriesIndex',
   'isbn10',
   'isbn13',
   'rating',
@@ -22,10 +34,16 @@ const ROOT_FIELDS = [
   'goodreadsId',
   'amazonId',
   'hardcoverId',
+  'hardcoverEditionId',
   'openLibraryId',
   'itunesId',
   'audibleId',
+  'librofmId',
+  'koboId',
   'comicvineId',
+  'ranobedbId',
+  'lubimyczytacId',
+  'aladinId',
 ] as const
 
 const COMIC_FIELDS = {
@@ -48,6 +66,42 @@ const AUDIO_FIELDS = {
   abridged: 'abridged',
 } as const
 
+function normalizePageCount(value: number | null): number | null {
+  return typeof value === 'number' && value > 0 ? value : null
+}
+
+export function normalizeSeriesMemberships(values: readonly EditableSeriesMembership[]): EditableSeriesMembership[] {
+  const seen = new Set<string>()
+  const out: EditableSeriesMembership[] = []
+  for (const value of values) {
+    const seriesName = value.seriesName.trim()
+    if (!seriesName) continue
+    const key = seriesName.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ seriesName, seriesIndex: value.seriesIndex ?? null })
+  }
+  return out
+}
+
+function seriesMembershipsFromBook(book: BookDetail): EditableSeriesMembership[] {
+  const memberships = book.seriesMemberships ?? []
+  if (memberships.length > 0) {
+    return normalizeSeriesMemberships(memberships.map((membership) => ({ seriesName: membership.seriesName, seriesIndex: membership.seriesIndex })))
+  }
+  return book.seriesName ? [{ seriesName: book.seriesName, seriesIndex: book.seriesIndex }] : []
+}
+
+function changedCustomMetadataPayload(
+  currentValues: readonly CustomMetadataBookValue[],
+  previousValues: readonly CustomMetadataBookValue[],
+): CustomMetadataBookValueInput[] {
+  const previousByFieldId = new Map(previousValues.map((field) => [field.fieldId, field.value]))
+  return currentValues
+    .filter((field) => JSON.stringify(field.value) !== JSON.stringify(previousByFieldId.get(field.fieldId)))
+    .map((field) => ({ fieldId: field.fieldId, value: field.value }))
+}
+
 export function useMetadataEditor() {
   const saving = ref(false)
   const error = ref<string | null>(null)
@@ -57,11 +111,14 @@ export function useMetadataEditor() {
     subtitle: null as string | null,
     description: null as string | null,
     publisher: null as string | null,
+    publishedDate: null as string | null,
     publishedYear: null as number | null,
     language: null as string | null,
     pageCount: null as number | null,
+    communityRatings: [] as BookCommunityRating[],
     seriesName: null as string | null,
     seriesIndex: null as number | null,
+    seriesMemberships: [] as EditableSeriesMembership[],
     isbn10: null as string | null,
     isbn13: null as string | null,
     rating: null as number | null,
@@ -75,10 +132,16 @@ export function useMetadataEditor() {
     goodreadsId: null as string | null,
     amazonId: null as string | null,
     hardcoverId: null as string | null,
+    hardcoverEditionId: null as string | null,
     openLibraryId: null as string | null,
     itunesId: null as string | null,
     audibleId: null as string | null,
+    librofmId: null as string | null,
+    koboId: null as string | null,
     comicvineId: null as string | null,
+    ranobedbId: null as string | null,
+    lubimyczytacId: null as string | null,
+    aladinId: null as string | null,
     comicIssueNumber: null as string | null,
     comicVolumeName: null as string | null,
     comicStoryArcs: [] as string[],
@@ -90,6 +153,7 @@ export function useMetadataEditor() {
     comicCharacters: [] as string[],
     comicTeams: [] as string[],
     comicLocations: [] as string[],
+    customMetadata: [] as CustomMetadataBookValue[],
   })
 
   const snapshot = ref(JSON.stringify(form))
@@ -102,11 +166,14 @@ export function useMetadataEditor() {
     form.subtitle = book.subtitle
     form.description = book.description
     form.publisher = book.publisher
+    form.publishedDate = book.publishedDate
     form.publishedYear = book.publishedYear
     form.language = book.language
     form.pageCount = book.pageCount
+    form.communityRatings = [...book.communityRatings]
     form.seriesName = book.seriesName
     form.seriesIndex = book.seriesIndex
+    form.seriesMemberships = seriesMembershipsFromBook(book)
     form.isbn10 = book.isbn10
     form.isbn13 = book.isbn13
     form.rating = book.rating ?? null
@@ -120,10 +187,16 @@ export function useMetadataEditor() {
     form.goodreadsId = book.providerIds.goodreads ?? null
     form.amazonId = book.providerIds.amazon ?? null
     form.hardcoverId = book.providerIds.hardcover ?? null
+    form.hardcoverEditionId = book.hardcoverEditionId
     form.openLibraryId = book.providerIds.openLibrary ?? null
     form.itunesId = book.providerIds.itunes ?? null
     form.audibleId = book.providerIds.audible ?? null
+    form.librofmId = book.providerIds.librofm ?? null
+    form.koboId = book.providerIds.kobo ?? null
     form.comicvineId = book.providerIds.comicvine ?? null
+    form.ranobedbId = book.providerIds.ranobedb ?? null
+    form.lubimyczytacId = book.providerIds.lubimyczytac ?? null
+    form.aladinId = book.providerIds.aladin ?? null
     const cm = book.comicMetadata
     form.comicIssueNumber = cm?.issueNumber ?? null
     form.comicVolumeName = cm?.volumeName ?? null
@@ -136,6 +209,7 @@ export function useMetadataEditor() {
     form.comicCharacters = cm?.characters ?? []
     form.comicTeams = cm?.teams ?? []
     form.comicLocations = cm?.locations ?? []
+    form.customMetadata = (book.customMetadata ?? []).map((field) => ({ ...field }))
     includeAudioMetadata.value = book.audioMetadata != null || book.files.some((f) => f.format != null && FORMAT_TO_GROUP[f.format] === 'audio')
     snapshot.value = JSON.stringify(form)
     error.value = null
@@ -152,9 +226,22 @@ export function useMetadataEditor() {
     const payload: Record<string, unknown> = {}
 
     for (const field of ROOT_FIELDS) {
-      if (JSON.stringify(form[field]) !== JSON.stringify(previous[field])) {
-        payload[field] = form[field]
+      const current = field === 'pageCount' ? normalizePageCount(form.pageCount) : form[field]
+      if (JSON.stringify(current) !== JSON.stringify(previous[field])) {
+        payload[field] = current
       }
+    }
+
+    const currentSeriesMemberships = normalizeSeriesMemberships(form.seriesMemberships)
+    const previousSeriesMemberships = normalizeSeriesMemberships(previous.seriesMemberships)
+    if (JSON.stringify(currentSeriesMemberships) !== JSON.stringify(previousSeriesMemberships)) {
+      payload.seriesMemberships = currentSeriesMemberships
+    }
+
+    const currentCommunityRatings = form.communityRatings.map(({ provider, rating, ratingCount }) => ({ provider, rating, ratingCount }))
+    const previousCommunityRatings = previous.communityRatings.map(({ provider, rating, ratingCount }) => ({ provider, rating, ratingCount }))
+    if (JSON.stringify(currentCommunityRatings) !== JSON.stringify(previousCommunityRatings)) {
+      payload.communityRatings = currentCommunityRatings
     }
 
     const comicMetadata: Record<string, unknown> = {}
@@ -178,20 +265,34 @@ export function useMetadataEditor() {
         payload.audioMetadata = audioMetadata
       }
     }
+
+    const customMetadata = changedCustomMetadataPayload(form.customMetadata, previous.customMetadata)
+    if (customMetadata.length > 0) {
+      payload.customMetadata = customMetadata
+    }
     return payload
   }
 
-  async function save(bookId: number): Promise<BookDetail | null> {
+  function normalizeSaveResult(data: BookDetail | BookMetadataSaveResult): BookMetadataSaveResult {
+    if ('book' in data && 'libraryAutoWriteEnabled' in data) {
+      return data
+    }
+    return { book: data, write: null, libraryAutoWriteEnabled: false }
+  }
+
+  async function save(bookId: number, lockedFields: readonly BookMetadataLockField[]): Promise<BookMetadataSaveResult | null> {
     saving.value = true
     error.value = null
     try {
-      const res = await api(`/api/v1/books/${bookId}/metadata`, {
+      const metadata = buildPayload()
+      const shouldSyncFileWrite = Object.keys(metadata).length > 0
+      const res = await api(`/api/v1/books/${bookId}/metadata-and-locks${shouldSyncFileWrite ? '?syncFileWrite=true' : ''}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload()),
+        body: JSON.stringify({ metadata, lockedFields }),
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const updated: BookDetail = await res.json()
+      const updated = normalizeSaveResult((await res.json()) as BookDetail | BookMetadataSaveResult)
       snapshot.value = JSON.stringify(form)
       return updated
     } catch (e) {

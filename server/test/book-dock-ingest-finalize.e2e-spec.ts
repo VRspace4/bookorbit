@@ -3,7 +3,13 @@ import { dirname, join } from 'path';
 import { afterEach } from 'vitest';
 
 import { eq, inArray } from 'drizzle-orm';
-import { Permission, type BookDockFile, type BookDockFinalizeResult } from '@bookorbit/types';
+import {
+  Permission,
+  type BookDockDiscardDuplicatesResult,
+  type BookDockFile,
+  type BookDockFinalizePreviewResult,
+  type BookDockFinalizeResult,
+} from '@bookorbit/types';
 
 import * as schema from '../src/db/schema';
 import { buildFb2Fixture } from './e2e/book-dock/book-dock-fixture-builder';
@@ -365,7 +371,7 @@ describe('Book Dock ingest + finalize (e2e)', () => {
 
     const seedRow = await createBookDockRow(context, {
       fileName: 'seed-duplicate.fb2',
-      selectedMetadata: { title: 'Duplicate Title', authors: ['Duplicate Author'] },
+      selectedMetadata: { title: 'Duplicate Seed Title', authors: ['Duplicate Author'], isbn13: '9780306406157' },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
@@ -380,7 +386,7 @@ describe('Book Dock ingest + finalize (e2e)', () => {
 
     const duplicateRow = await createBookDockRow(context, {
       fileName: 'duplicate-input.fb2',
-      selectedMetadata: { title: 'Duplicate Title', authors: ['Another Author'] },
+      selectedMetadata: { title: 'Duplicate Candidate Title', authors: ['Another Author'], isbn13: '9780306406157' },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
@@ -445,6 +451,150 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     expect(await getBookDockRow(context, duplicateRow.id)).toBeDefined();
     expect(await getBookDockRow(context, conflictRow.id)).toBeDefined();
     expect(await getBookDockRow(context, successRow.id)).toBeUndefined();
+  });
+
+  it('finalize preview reports duplicates and discard removes only duplicate candidates', async () => {
+    const destination = await createLibraryWithFolder(context);
+
+    const seedRow = await createBookDockRow(context, {
+      fileName: 'preview-seed-duplicate.fb2',
+      selectedMetadata: { title: 'Preview Duplicate Seed', authors: ['Preview Author'], isbn13: '9780306406157' },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+    });
+    const seedResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize',
+      headers: authHeader(context.adminToken),
+      payload: { fileIds: [seedRow.id] },
+    });
+    const seedBody = seedResponse.json() as BookDockFinalizeResult;
+    const existingBookId = seedBody.results[0]!.bookId!;
+
+    const duplicateRow = await createBookDockRow(context, {
+      fileName: 'preview-duplicate-input.fb2',
+      selectedMetadata: { title: 'Preview Duplicate Candidate', authors: ['Different Author'], isbn13: '9780306406157' },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+    });
+    const conflictRow = await createBookDockRow(context, {
+      fileName: 'preview-name-conflict.fb2',
+      selectedMetadata: { title: 'Preview Conflict Title', authors: ['Preview Conflict Author'] },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+    });
+    const readyRow = await createBookDockRow(context, {
+      fileName: 'preview-ready.fb2',
+      selectedMetadata: { title: 'Preview Ready Title', authors: ['Preview Ready Author'] },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+    });
+
+    const previewNamesResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/files/preview-names',
+      headers: authHeader(context.adminToken),
+      payload: {
+        fileIds: [conflictRow.id],
+        defaultLibraryId: destination.libraryId,
+      },
+    });
+    const previewRows = previewNamesResponse.json() as Array<{ fileId: number; newName: string }>;
+    const conflictNewName = previewRows.find((row) => row.fileId === conflictRow.id)?.newName;
+    expect(conflictNewName).toEqual(expect.any(String));
+    const existingDestinationPath = join(destination.folderPath, conflictNewName!);
+    await mkdir(dirname(existingDestinationPath), { recursive: true });
+    await writeFile(existingDestinationPath, 'already exists');
+
+    const previewResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize/preview',
+      headers: authHeader(context.adminToken),
+      payload: {
+        fileIds: [duplicateRow.id, conflictRow.id, readyRow.id],
+      },
+    });
+
+    expect(previewResponse.statusCode).toBe(200);
+    const preview = previewResponse.json() as BookDockFinalizePreviewResult;
+    expect(preview).toMatchObject({
+      total: 3,
+      ready: 1,
+      duplicates: 1,
+      destinationConflicts: 1,
+      missingDestination: 0,
+      blocked: 0,
+    });
+    expect(preview.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ fileId: duplicateRow.id, status: 'duplicate', existingBookId }),
+        expect.objectContaining({ fileId: conflictRow.id, status: 'destination_conflict' }),
+        expect.objectContaining({ fileId: readyRow.id, status: 'ready' }),
+      ]),
+    );
+
+    const discardResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize/discard-duplicates',
+      headers: authHeader(context.adminToken),
+      payload: {
+        fileIds: [duplicateRow.id, conflictRow.id, readyRow.id],
+      },
+    });
+
+    expect(discardResponse.statusCode).toBe(200);
+    const discard = discardResponse.json() as BookDockDiscardDuplicatesResult;
+    expect(discard).toMatchObject({ total: 3, discarded: 1, skipped: 2, discardedFileIds: [duplicateRow.id] });
+    expect(await getBookDockRow(context, duplicateRow.id)).toBeUndefined();
+    expect(await getBookDockRow(context, conflictRow.id)).toBeDefined();
+    expect(await getBookDockRow(context, readyRow.id)).toBeDefined();
+    expect(await fileExists(duplicateRow.absolutePath)).toBe(false);
+    expect(await fileExists(conflictRow.absolutePath)).toBe(true);
+    expect(await fileExists(readyRow.absolutePath)).toBe(true);
+  });
+
+  it('finalize allows same title with different author when isbn is missing', async () => {
+    const destination = await createLibraryWithFolder(context);
+
+    const seedRow = await createBookDockRow(context, {
+      fileName: 'seed-same-title.fb2',
+      selectedMetadata: { title: 'Shared Title', authors: ['Author One'] },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+    });
+    const seedResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize',
+      headers: authHeader(context.adminToken),
+      payload: { fileIds: [seedRow.id] },
+    });
+    expect(seedResponse.statusCode).toBe(201);
+    const seedBody = seedResponse.json() as BookDockFinalizeResult;
+    expect(seedBody.results[0]?.success).toBe(true);
+    const existingBookId = seedBody.results[0]!.bookId!;
+
+    const candidateRow = await createBookDockRow(context, {
+      fileName: 'candidate-same-title.fb2',
+      selectedMetadata: { title: 'Shared Title', authors: ['Author Two'] },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+    });
+
+    const response = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize',
+      headers: authHeader(context.adminToken),
+      payload: { fileIds: [candidateRow.id] },
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = response.json() as BookDockFinalizeResult;
+    expect(body).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+    expect(body.results[0]).toMatchObject({ fileId: candidateRow.id, success: true });
+    expect(body.results[0]?.isDuplicate).toBeUndefined();
+    expect(body.results[0]?.bookId).toEqual(expect.any(Number));
+    expect(body.results[0]?.bookId).not.toBe(existingBookId);
+    expect(await getBookDockRow(context, candidateRow.id)).toBeUndefined();
   });
 
   it('finalize stores a folder path even when the naming pattern is flat', async () => {

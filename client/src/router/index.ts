@@ -1,15 +1,19 @@
 import { createRouter, createWebHistory, type RouteLocationNormalizedLoaded, type RouteRecordRaw } from 'vue-router'
-import { EMAIL_TAB_LABELS, normalizeEmailTab } from '@/features/email/lib/email-tabs'
-import { METADATA_TAB_INFO, normalizeMetadataTab } from '@/features/settings/lib/metadata-tabs'
-import { READER_TAB_TITLE_LABELS, normalizeReaderTab } from '@/features/settings/lib/reader-tabs'
-import { INTEGRATIONS_TAB_INFO, normalizeIntegrationsTab } from '@/features/settings/lib/integrations-tabs'
+import { normalizeEmailTab } from '@/features/email/lib/email-tabs'
+import { normalizeMetadataTab } from '@/features/settings/lib/metadata-tabs'
+import { normalizeReaderTab } from '@/features/settings/lib/reader-tabs'
 import { ADMIN_TAB_INFO, normalizeAdminTab } from '@/features/settings/lib/admin-tabs'
-import { SYSTEM_TAB_INFO, normalizeSystemTab } from '@/features/settings/lib/system-tabs'
-import { ACCOUNT_TAB_INFO, normalizeAccountTab } from '@/features/settings/lib/account-tabs'
+import { normalizeSystemTab } from '@/features/settings/lib/system-tabs'
+import { normalizeAccountTab } from '@/features/settings/lib/account-tabs'
 import { registerPwaRoutePersistence } from '@/features/pwa/lib/native-app'
+import { normalizeAppearanceTab } from '@/features/settings/lib/appearance-tabs'
+import { INTEGRATION_TAB_INFO, normalizeIntegrationTab } from '@/features/settings/lib/integration-tabs'
+import { i18n } from '@/i18n'
 import { registerAuthGuard } from './guards/auth.guard'
 import { registerReaderReturnRoute } from '@/features/reader/shared/lib/reader-navigation'
 import { registerRouteTitleHook } from './title-resolver'
+
+const t = i18n.global.t
 
 function firstText(value: unknown): string | null {
   if (Array.isArray(value)) return firstText(value[0])
@@ -22,50 +26,67 @@ function numericParam(to: RouteLocationNormalizedLoaded, key: string): number | 
   const value = firstText(to.params[key])
   if (!value) return null
   const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
 }
 
-function fallbackById(prefix: string, id: number | null): string {
+function fallbackById(prefixKey: string, id: number | null): string {
+  const prefix = t(prefixKey)
   return id === null ? prefix : `${prefix} #${id}`
 }
 
 function resolveReaderTitle(to: RouteLocationNormalizedLoaded): string {
   const tab = normalizeReaderTab(to.query.tab)
-  return READER_TAB_TITLE_LABELS[tab]
+  return t(`titles.reader.${tab}`)
+}
+
+function resolveAppearanceTitle(to: RouteLocationNormalizedLoaded): string {
+  const tab = normalizeAppearanceTab(to.query.tab)
+  return t(`titles.appearance.${tab}`)
 }
 
 function resolveEmailTitle(to: RouteLocationNormalizedLoaded): string {
   const tab = normalizeEmailTab(to.query.tab)
-  return `${EMAIL_TAB_LABELS[tab]} · Email`
+  return `${t(`titles.email.${tab}`)} · ${t('titles.emailSuffix')}`
 }
 
 function resolveMetadataTitle(to: RouteLocationNormalizedLoaded): string {
   const tab = normalizeMetadataTab(to.query.tab)
-  return METADATA_TAB_INFO[tab].titleLabel
-}
-
-function resolveIntegrationsTitle(to: RouteLocationNormalizedLoaded): string {
-  const tab = normalizeIntegrationsTab(to.query.tab)
-  return INTEGRATIONS_TAB_INFO[tab].titleLabel
+  return t(`titles.metadata.${tab}`)
 }
 
 function resolveAdminTitle(to: RouteLocationNormalizedLoaded): string {
   const tab = normalizeAdminTab(to.query.tab)
-  return ADMIN_TAB_INFO[tab].titleLabel
+  return t(ADMIN_TAB_INFO[tab].titleKey)
 }
 
 function resolveSystemTitle(to: RouteLocationNormalizedLoaded): string {
   const tab = normalizeSystemTab(to.query.tab)
-  return SYSTEM_TAB_INFO[tab].titleLabel
+  return t(`titles.system.${tab}`)
 }
 
 function resolveAccountTitle(to: RouteLocationNormalizedLoaded): string {
   const tab = normalizeAccountTab(to.query.tab)
-  return ACCOUNT_TAB_INFO[tab].titleLabel
+  return t(`titles.account.${tab}`)
+}
+
+function resolveIntegrationTitle(to: RouteLocationNormalizedLoaded): string {
+  const tab = normalizeIntegrationTab(to.query.tab)
+  return INTEGRATION_TAB_INFO[tab].titleLabel
 }
 
 function resolveStatisticsTitle(): string {
-  return 'Statistics'
+  return t('titles.statistics')
+}
+
+function resolveLegacyIntegrationRoute(tab: unknown): string | null {
+  switch (firstText(tab)) {
+    case 'koreader':
+      return 'settings-koreader'
+    case 'kobo':
+      return 'settings-kobo'
+    default:
+      return null
+  }
 }
 
 export const routes: RouteRecordRaw[] = [
@@ -77,7 +98,7 @@ export const routes: RouteRecordRaw[] = [
         path: '',
         name: 'dashboard',
         component: () => import('@/views/DashboardView.vue'),
-        meta: { title: 'Dashboard' },
+        meta: { title: () => t('titles.dashboard') },
       },
       {
         path: '/settings',
@@ -99,40 +120,56 @@ export const routes: RouteRecordRaw[] = [
             path: 'libraries',
             name: 'settings-libraries',
             component: () => import('@/features/settings/LibrariesSettings.vue'),
-            meta: { maxWidth: 'max-w-[52rem]', title: 'Libraries' },
+            meta: { maxWidth: 'max-w-[52rem]', title: () => t('titles.libraries') },
           },
           {
             path: 'appearance',
             name: 'settings-appearance',
             component: () => import('@/features/settings/AppearanceSettings.vue'),
-            meta: { title: 'Appearance' },
+            meta: { title: resolveAppearanceTitle },
           },
           {
             path: 'opds',
             name: 'settings-opds',
             component: () => import('@/features/settings/OpdsSettings.vue'),
-            meta: { title: 'OPDS' },
+            meta: { title: () => t('titles.opds') },
           },
           {
             path: 'integrations',
             name: 'settings-integrations',
-            component: () => import('@/features/settings/IntegrationsAllSettings.vue'),
-            meta: { maxWidth: 'max-w-3xl', title: resolveIntegrationsTitle },
+            component: () => import('@/features/settings/IntegrationAllSettings.vue'),
+            meta: { maxWidth: 'max-w-3xl', title: resolveIntegrationTitle },
+            beforeEnter: (to) => {
+              const legacyRoute = resolveLegacyIntegrationRoute(to.query.tab)
+              return legacyRoute ? { name: legacyRoute } : undefined
+            },
           },
           {
             path: 'kobo',
             name: 'settings-kobo',
-            redirect: () => ({ name: 'settings-integrations', query: { tab: 'kobo' } }),
+            component: () => import('@/features/settings/KoboSettings.vue'),
+            meta: { maxWidth: 'max-w-4xl', title: () => t('titles.koboSync') },
           },
           {
             path: 'koreader',
             name: 'settings-koreader',
-            redirect: () => ({ name: 'settings-integrations', query: { tab: 'koreader' } }),
+            component: () => import('@/features/settings/KoreaderSettings.vue'),
+            meta: { maxWidth: 'max-w-4xl', title: () => t('titles.koreaderSync') },
           },
           {
             path: 'hardcover',
             name: 'settings-hardcover',
-            redirect: () => ({ name: 'settings-integrations', query: { tab: 'hardcover' } }),
+            redirect: (to) => ({ name: 'settings-integrations', query: { ...to.query, tab: 'hardcover' } }),
+          },
+          {
+            path: 'readwise',
+            name: 'settings-readwise',
+            redirect: (to) => ({ name: 'settings-integrations', query: { ...to.query, tab: 'readwise' } }),
+          },
+          {
+            path: 'storygraph',
+            name: 'settings-storygraph',
+            redirect: (to) => ({ name: 'settings-integrations', query: { ...to.query, tab: 'storygraph' } }),
           },
           {
             path: 'email',
@@ -171,6 +208,13 @@ export const routes: RouteRecordRaw[] = [
             path: 'admin/users',
             name: 'settings-admin-users',
             redirect: () => ({ name: 'settings-admin', query: { tab: 'users' } }),
+          },
+          {
+            path: 'admin/account-activity/:userId/insights',
+            name: 'settings-admin-shared-insights',
+            component: () => import('@/features/admin/SharedReadingInsightsPage.vue'),
+            props: (route) => ({ userId: Number(route.params.userId) }),
+            meta: { maxWidth: 'max-w-6xl', title: resolveAdminTitle },
           },
           {
             path: 'admin/metadata',
@@ -217,7 +261,7 @@ export const routes: RouteRecordRaw[] = [
           {
             path: 'admin/magic-links',
             name: 'settings-admin-magic-links',
-            redirect: () => ({ name: 'settings-admin', query: { tab: 'users' } }),
+            redirect: () => ({ name: 'settings-admin', query: { tab: 'magic-links' } }),
           },
           { path: ':pathMatch(.*)*', redirect: { name: 'settings-libraries' } },
         ],
@@ -226,7 +270,19 @@ export const routes: RouteRecordRaw[] = [
         path: '/book-dock',
         name: 'book-dock',
         component: () => import('@/views/BookDockView.vue'),
-        meta: { title: 'Book Dock' },
+        meta: { title: () => t('titles.bookDock') },
+      },
+      {
+        path: '/whats-new',
+        name: 'whats-new',
+        component: () => import('@/features/whats-new/WhatsNewView.vue'),
+        meta: { title: () => t('titles.whatsNew') },
+      },
+      {
+        path: '/annotations',
+        name: 'annotations',
+        component: () => import('@/features/annotations/views/AnnotationsHubView.vue'),
+        meta: { title: () => t('titles.annotations') },
       },
       {
         path: '/statistics',
@@ -243,49 +299,49 @@ export const routes: RouteRecordRaw[] = [
         path: '/achievements',
         name: 'achievements',
         component: () => import('@/views/AchievementsView.vue'),
-        meta: { title: 'Achievements' },
+        meta: { title: () => t('titles.achievements') },
       },
       {
         path: '/library/:id',
         name: 'library',
         component: () => import('@/views/HomeView.vue'),
-        meta: { title: (to) => fallbackById('Library', numericParam(to, 'id')) },
+        meta: { title: (to) => fallbackById('titles.library', numericParam(to, 'id')) },
       },
       {
         path: '/smart-scope/:id',
         name: 'smartScope',
         component: () => import('@/views/SmartScopeView.vue'),
-        meta: { title: (to) => fallbackById('SmartScope', numericParam(to, 'id')) },
+        meta: { title: (to) => fallbackById('titles.smartScope', numericParam(to, 'id')) },
       },
       {
         path: '/collection/:id',
         name: 'collection',
         component: () => import('@/views/CollectionView.vue'),
-        meta: { title: (to) => fallbackById('Collection', numericParam(to, 'id')) },
+        meta: { title: (to) => fallbackById('titles.collection', numericParam(to, 'id')) },
       },
       {
         path: '/authors',
         name: 'authors',
         component: () => import('@/features/author/views/AuthorsView.vue'),
-        meta: { title: 'Authors' },
+        meta: { title: () => t('titles.authors') },
       },
       {
         path: '/authors/:id',
         name: 'author-detail',
         component: () => import('@/features/author/views/AuthorDetailView.vue'),
-        meta: { title: (to) => fallbackById('Author', numericParam(to, 'id')) },
+        meta: { title: (to) => fallbackById('titles.author', numericParam(to, 'id')) },
       },
       {
         path: '/series',
         name: 'series',
         component: () => import('@/features/series/views/SeriesView.vue'),
-        meta: { title: 'Series' },
+        meta: { title: () => t('titles.series') },
       },
       {
-        path: '/series/:seriesName',
+        path: '/series/:seriesId',
         name: 'series-detail',
         component: () => import('@/features/series/views/SeriesDetailView.vue'),
-        meta: { title: (to) => `Series · ${firstText(to.params.seriesName) ?? 'Series'}` },
+        meta: { title: (to) => fallbackById('titles.seriesItem', numericParam(to, 'seriesId')) },
       },
       {
         path: '/tools',
@@ -296,7 +352,13 @@ export const routes: RouteRecordRaw[] = [
             path: 'entity-manager',
             name: 'tools-entity-manager',
             component: () => import('@/features/tools/entity-manager/views/EntityManagerView.vue'),
-            meta: { title: 'Entity Manager' },
+            meta: { title: () => t('titles.entityManager') },
+          },
+          {
+            path: 'bulk-rename',
+            name: 'tools-bulk-rename',
+            component: () => import('@/features/tools/bulk-rename/views/BulkRenameView.vue'),
+            meta: { title: () => t('titles.bulkRename') },
           },
           { path: ':pathMatch(.*)*', redirect: { name: 'tools-entity-manager' } },
         ],
@@ -305,7 +367,7 @@ export const routes: RouteRecordRaw[] = [
         path: '/book/:bookId',
         name: 'book-detail',
         component: () => import('@/views/BookDetailView.vue'),
-        meta: { title: (to) => fallbackById('Book', numericParam(to, 'bookId')) },
+        meta: { title: (to) => fallbackById('titles.book', numericParam(to, 'bookId')) },
         beforeEnter: (to) => {
           if (!to.query.tab) {
             return { ...to, query: { ...to.query, tab: 'details' } }
@@ -320,50 +382,50 @@ export const routes: RouteRecordRaw[] = [
         path: '/book/:bookId/edit',
         redirect: (to) => ({ name: 'book-detail', params: to.params, query: { tab: 'edit' } }),
       },
-      { path: ':pathMatch(.*)*', component: () => import('@/views/NotFoundView.vue'), meta: { title: 'Not Found' } },
+      { path: ':pathMatch(.*)*', component: () => import('@/views/NotFoundView.vue'), meta: { title: () => t('titles.notFound') } },
     ],
   },
   {
     path: '/read/:bookId/:fileId',
     name: 'reader',
     component: () => import('@/features/reader/ReaderView.vue'),
-    meta: { title: (to) => `Read · ${fallbackById('Book', numericParam(to, 'bookId'))}` },
+    meta: { title: (to) => `${t('titles.readPrefix')} · ${fallbackById('titles.book', numericParam(to, 'bookId'))}` },
   },
   {
     path: '/login',
     name: 'login',
     component: () => import('@/features/auth/LoginPage.vue'),
-    meta: { public: true, title: 'Sign In' },
+    meta: { public: true, title: () => t('titles.signIn') },
   },
   {
     path: '/setup',
     name: 'setup',
     component: () => import('@/features/auth/SetupPage.vue'),
-    meta: { public: true, title: 'Initial Setup' },
+    meta: { public: true, title: () => t('titles.initialSetup') },
   },
   {
     path: '/forgot-password',
     name: 'forgot-password',
     component: () => import('@/features/auth/ForgotPasswordPage.vue'),
-    meta: { public: true, title: 'Forgot Password' },
+    meta: { public: true, title: () => t('titles.forgotPassword') },
   },
   {
     path: '/reset-password',
     name: 'reset-password',
     component: () => import('@/features/auth/ResetPasswordPage.vue'),
-    meta: { public: true, title: 'Reset Password' },
+    meta: { public: true, title: () => t('titles.resetPassword') },
   },
   {
     path: '/oauth2-callback',
     name: 'oidc-callback',
     component: () => import('@/features/auth/OidcCallbackPage.vue'),
-    meta: { public: true, title: 'Completing Sign In' },
+    meta: { public: true, title: () => t('titles.completingSignIn') },
   },
   {
     path: '/magic',
     name: 'magic-link-login',
     component: () => import('@/features/auth/MagicLinkLoginView.vue'),
-    meta: { public: true, title: 'Magic Link Login' },
+    meta: { public: true, title: () => t('titles.magicLinkLogin') },
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

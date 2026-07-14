@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 
+import { BadRequestException } from '@nestjs/common';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 import { of } from 'rxjs';
@@ -9,6 +10,7 @@ import { AUDITABLE_KEY } from '../../common/decorators/auditable.decorator';
 import { FORBIDDEN_PERMISSION_KEY } from '../../common/decorators/forbid-permission.decorator';
 import type { RequestUser } from '../../common/types/request-user';
 import { AuthorsController } from './authors.controller';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual('fs');
@@ -41,6 +43,8 @@ function makeUser(overrides?: Partial<RequestUser>): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -87,6 +91,8 @@ function makeController() {
     findBooks: vi.fn(),
     getThumbnailPath: vi.fn(),
     getImagePath: vi.fn(),
+    uploadImage: vi.fn(),
+    deleteImage: vi.fn(),
     refreshEnrichment: vi.fn(),
     update: vi.fn(),
     merge: vi.fn(),
@@ -273,6 +279,35 @@ describe('AuthorsController', () => {
     expect(imageReply.send).toHaveBeenCalledWith({ message: 'No image for author 55' });
   });
 
+  it('uploads author image bytes and delegates to AuthorsService', async () => {
+    const { controller, authorsService } = makeController();
+    const user = makeUser();
+    const bytes = Buffer.from('image-bytes');
+    const req = {
+      file: vi.fn().mockResolvedValue({
+        mimetype: 'image/png',
+        toBuffer: vi.fn().mockResolvedValue(bytes),
+      }),
+    };
+    authorsService.uploadImage.mockResolvedValue({ id: 9, imageUrl: '/api/v1/authors/9/image' });
+
+    await expect(controller.uploadImage(user, 9, req as never)).resolves.toEqual({ id: 9, imageUrl: '/api/v1/authors/9/image' });
+    expect(authorsService.uploadImage).toHaveBeenCalledWith(user, 9, bytes, 'image/png');
+  });
+
+  it('returns bad request when upload image request has no multipart file', async () => {
+    const { controller } = makeController();
+    const user = makeUser();
+    const req = {
+      file: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(controller.uploadImage(user, 9, req as never)).rejects.toMatchObject({
+      name: BadRequestException.name,
+      message: 'No file provided',
+    });
+  });
+
   it('delegates write endpoints for refresh/update/merge/delete', async () => {
     const { controller, authorsService } = makeController();
     const user = makeUser();
@@ -288,6 +323,15 @@ describe('AuthorsController', () => {
       affectedBookCount: 3,
     });
     await expect(controller.delete(user, { authorIds: [2] })).resolves.toEqual({ deletedAuthorIds: [2], affectedBookCount: 3 });
+  });
+
+  it('delegates delete image endpoint to AuthorsService', async () => {
+    const { controller, authorsService } = makeController();
+    const user = makeUser();
+    authorsService.deleteImage.mockResolvedValue({ id: 9, imageUrl: null });
+
+    await expect(controller.deleteImage(user, 9)).resolves.toEqual({ id: 9, imageUrl: null });
+    expect(authorsService.deleteImage).toHaveBeenCalledWith(user, 9);
   });
 
   it('uses correct merge audit description keys from DTO payload', () => {

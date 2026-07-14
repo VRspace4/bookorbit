@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   DefaultValuePipe,
@@ -13,10 +14,10 @@ import {
   Post,
   Put,
   Query,
+  Req,
   Res,
   Sse,
 } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 import type { FastifyReply } from 'fastify';
@@ -28,6 +29,7 @@ import { Auditable } from '../../common/decorators/auditable.decorator';
 import { ForbidPermission } from '../../common/decorators/forbid-permission.decorator';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { imageContentTypeFromPath } from '../../common/image-content-type';
+import type { MultipartRequest } from '../../common/types/multipart-request';
 import type { RequestUser } from '../../common/types/request-user';
 import type { AuthorMetadataCandidate } from '@bookorbit/types';
 import { AuthorEnrichmentConfigService } from './author-enrichment-config.service';
@@ -192,7 +194,6 @@ export class AuthorsController {
     return this.authorsService.findBooks(user, id, dto);
   }
 
-  @SkipThrottle()
   @Get(':id/thumbnail')
   async getThumbnail(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Res() reply: FastifyReply) {
     const thumbnailPath = await this.authorsService.getThumbnailPath(user, id);
@@ -208,7 +209,6 @@ export class AuthorsController {
     reply.send(createReadStream(thumbnailPath));
   }
 
-  @SkipThrottle()
   @Get(':id/image')
   async getImage(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Res() reply: FastifyReply) {
     const imagePath = await this.authorsService.getImagePath(user, id);
@@ -223,6 +223,52 @@ export class AuthorsController {
 
     reply.type(imageContentTypeFromPath(imagePath));
     reply.send(createReadStream(imagePath));
+  }
+
+  @Post(':id/image')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission(Permission.LibraryEditMetadata)
+  @Auditable({
+    action: AuditAction.AuthorUpdate,
+    resource: AuditResource.Author,
+    getResourceId: (req) => parseInt(req.params['id'], 10),
+    description: (req) => `Uploaded image for author #${req.params['id']}`,
+  })
+  async uploadImage(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number, @Req() req: MultipartRequest) {
+    let data;
+    try {
+      data = await req.file({ limits: { fileSize: AuthorsService.MAX_AUTHOR_IMAGE_BYTES } });
+    } catch (error) {
+      if (isMultipartFileTooLargeError(error)) {
+        throw new BadRequestException('Image exceeds 20 MB limit');
+      }
+      throw error;
+    }
+    if (!data) throw new BadRequestException('No file provided');
+
+    let buffer: Buffer;
+    try {
+      buffer = await data.toBuffer();
+    } catch (error) {
+      if (isMultipartFileTooLargeError(error)) {
+        throw new BadRequestException('Image exceeds 20 MB limit');
+      }
+      throw error;
+    }
+
+    return this.authorsService.uploadImage(user, id, buffer, data.mimetype);
+  }
+
+  @Delete(':id/image')
+  @RequirePermission(Permission.LibraryEditMetadata)
+  @Auditable({
+    action: AuditAction.AuthorUpdate,
+    resource: AuditResource.Author,
+    getResourceId: (req) => parseInt(req.params['id'], 10),
+    description: (req) => `Removed image for author #${req.params['id']}`,
+  })
+  deleteImage(@CurrentUser() user: RequestUser, @Param('id', ParseIntPipe) id: number) {
+    return this.authorsService.deleteImage(user, id);
   }
 
   @Post(':id/enrichment/refresh')
@@ -270,4 +316,15 @@ export class AuthorsController {
   delete(@CurrentUser() user: RequestUser, @Body() dto: DeleteAuthorsDto) {
     return this.authorsService.delete(user, dto);
   }
+}
+
+function isMultipartFileTooLargeError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const value = error as { code?: unknown; statusCode?: unknown; message?: unknown };
+  if (value.code === 'FST_REQ_FILE_TOO_LARGE') {
+    return true;
+  }
+  return value.statusCode === 413 && typeof value.message === 'string' && value.message.toLowerCase().includes('file too large');
 }

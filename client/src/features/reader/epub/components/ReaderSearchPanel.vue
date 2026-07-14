@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { ChevronRight, Loader2, Search, X } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { ChevronRight, Loader2, Search, X } from '@lucide/vue'
 import type { SearchResult } from '../composables/useSearch'
 import { MIN_SEARCH_QUERY_LENGTH } from '../composables/useSearch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   results: SearchResult[]
@@ -53,7 +56,10 @@ function onClear() {
   <div class="fixed inset-0 z-50 flex justify-end">
     <div class="flex-1" @click="emit('close')" />
 
-    <div class="search-panel w-80 h-full bg-card text-card-foreground flex flex-col shadow-2xl border-l border-border" @click.stop>
+    <div
+      class="search-panel w-[19rem] sm:w-[20rem] md:w-[21.5rem] lg:w-[22.5rem] h-full bg-card text-card-foreground flex flex-col shadow-2xl border-l border-border"
+      @click.stop
+    >
       <div class="flex items-center gap-2 px-3 py-2.5 border-b border-border shrink-0">
         <Tooltip>
           <TooltipTrigger as-child>
@@ -64,13 +70,13 @@ function onClear() {
               <ChevronRight :size="18" />
             </button>
           </TooltipTrigger>
-          <TooltipContent>Close</TooltipContent>
+          <TooltipContent>{{ t('common.close') }}</TooltipContent>
         </Tooltip>
         <Search :size="15" class="text-muted-foreground shrink-0" />
         <input
           v-model="inputValue"
           type="text"
-          placeholder="Search in book (min 2 chars)..."
+          :placeholder="t('reader.search.placeholder', { min: MIN_SEARCH_QUERY_LENGTH })"
           class="flex-1 min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           autofocus
         />
@@ -86,18 +92,18 @@ function onClear() {
       <div class="flex-1 overflow-y-auto">
         <div v-if="isSearching" class="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
           <Loader2 :size="16" class="animate-spin" />
-          Searching…
+          {{ t('reader.search.searching') }}
         </div>
 
         <div v-else-if="isTooShort" class="px-4 py-8 text-center text-sm text-muted-foreground">
-          Type at least {{ MIN_SEARCH_QUERY_LENGTH }} characters
+          {{ t('reader.search.tooShort', { min: MIN_SEARCH_QUERY_LENGTH }) }}
         </div>
 
         <div v-else-if="trimmedInputValue && !isSearching && results.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">
-          No results found
+          {{ t('reader.search.noResults') }}
         </div>
 
-        <div v-else-if="!trimmedInputValue" class="px-4 py-8 text-center text-sm text-muted-foreground">Type to search</div>
+        <div v-else-if="!trimmedInputValue" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ t('reader.search.prompt') }}</div>
 
         <ul v-else class="divide-y divide-border">
           <li
@@ -118,7 +124,7 @@ function onClear() {
         </ul>
 
         <p v-if="results.length > 0 && !isSearching" class="px-4 py-2 text-xs text-muted-foreground text-center border-t border-border">
-          {{ results.length }} result{{ results.length !== 1 ? 's' : '' }}
+          {{ t('reader.search.resultCount', { count: results.length }, results.length) }}
         </p>
       </div>
     </div>

@@ -1,8 +1,10 @@
 import {
+  ArrayMaxSize,
   IsIn,
   IsBoolean,
   IsArray,
   IsString,
+  MaxLength,
   IsOptional,
   Validate,
   ValidateNested,
@@ -28,9 +30,16 @@ export class FieldPreferenceDto {
   mergeStrategy!: MergeStrategy;
 }
 
-class GenreOptionsDto {
+export class GenreOptionsDto {
   @IsIn(GENRE_MERGE_MODES)
   mode!: GenreMergeMode;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  blocklist!: string[];
 }
 
 export class MetadataFetchOptionsDto {

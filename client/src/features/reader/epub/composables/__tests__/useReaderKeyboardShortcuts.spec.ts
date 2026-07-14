@@ -123,9 +123,7 @@ describe('useReaderKeyboardShortcuts', () => {
     document.body.appendChild(input)
     input.focus()
 
-    const event = new KeyboardEvent('keydown', { key: 't', bubbles: true })
-    Object.defineProperty(event, 'target', { value: input })
-    document.dispatchEvent(event)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 't', bubbles: true }))
 
     expect(handlers.toggleSidebar).not.toHaveBeenCalled()
     document.body.removeChild(input)
@@ -137,9 +135,7 @@ describe('useReaderKeyboardShortcuts', () => {
     document.body.appendChild(textarea)
     textarea.focus()
 
-    const event = new KeyboardEvent('keydown', { key: 's', bubbles: true })
-    Object.defineProperty(event, 'target', { value: textarea })
-    document.dispatchEvent(event)
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true }))
 
     expect(handlers.toggleSearch).not.toHaveBeenCalled()
     document.body.removeChild(textarea)

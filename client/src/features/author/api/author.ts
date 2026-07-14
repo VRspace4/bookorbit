@@ -2,6 +2,8 @@ import { api } from '@/lib/api'
 import type { AuthorsPage, AuthorDetail, AuthorMetadataCandidate, AuthorMetadataProviderKey, BooksPage, MergeAuthorsResult } from '@bookorbit/types'
 import type { AuthorBookSort, AuthorListSort, SortDirection } from '../types/author'
 
+export const MAX_AUTHOR_IMAGE_BYTES = 20 * 1024 * 1024
+
 type ListAuthorsParams = {
   q?: string
   page: number
@@ -55,6 +57,14 @@ export type BulkAuthorMetadataRefreshResult = {
   processed: number
   failed: number
   updated: number
+}
+
+function extractErrorMessage(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== 'object') return fallback
+  const message = (payload as { message?: unknown }).message
+  if (typeof message === 'string' && message.trim().length > 0) return message
+  if (Array.isArray(message) && typeof message[0] === 'string') return message[0]
+  return fallback
 }
 
 function toQuery(params: Record<string, string | number | (string | number)[] | null | undefined>): string {
@@ -117,6 +127,38 @@ export async function updateAuthor(authorId: number, payload: UpdateAuthorPayloa
     body: JSON.stringify(payload),
   })
   if (!res.ok) throw new Error('Failed to update author')
+  return res.json()
+}
+
+export async function uploadAuthorImage(authorId: number, file: File): Promise<AuthorDetail> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('File must be an image')
+  }
+  if (file.size > MAX_AUTHOR_IMAGE_BYTES) {
+    throw new Error('Image exceeds 20 MB limit')
+  }
+
+  const formData = new FormData()
+  formData.append('file', file)
+  const res = await api(`/api/v1/authors/${authorId}/image`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null)
+    throw new Error(extractErrorMessage(payload, 'Failed to upload author image'))
+  }
+  return res.json()
+}
+
+export async function deleteAuthorImage(authorId: number): Promise<AuthorDetail> {
+  const res = await api(`/api/v1/authors/${authorId}/image`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null)
+    throw new Error(extractErrorMessage(payload, 'Failed to remove author image'))
+  }
   return res.json()
 }
 
@@ -219,8 +261,7 @@ export async function bulkRefreshAuthorsMetadata(
       if (!line.startsWith('data: ')) continue
       try {
         const payload = JSON.parse(line.slice(6)) as
-          | (BulkAuthorMetadataRefreshEvent & { done?: false })
-          | (BulkAuthorMetadataRefreshResult & { done: true })
+          (BulkAuthorMetadataRefreshEvent & { done?: false }) | (BulkAuthorMetadataRefreshResult & { done: true })
 
         if ('done' in payload && payload.done) {
           summary = {

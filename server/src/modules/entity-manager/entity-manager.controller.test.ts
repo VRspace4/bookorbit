@@ -1,7 +1,8 @@
 import { EntityManagerController } from './entity-manager.controller';
 import type { RequestUser } from '../../common/types/request-user';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
-const mockUser: RequestUser = { id: 1, username: 'test', isSuperuser: false, permissions: [] };
+const mockUser: RequestUser = { id: 1, username: 'test', isSuperuser: false, permissions: [], contentFilters: EMPTY_CONTENT_FILTER_RULES };
 
 function makeController() {
   const service = {
@@ -181,16 +182,16 @@ describe('EntityManagerController', () => {
   describe('getEntityInfo', () => {
     it('handles numeric entity ID', async () => {
       const { controller, service } = makeController();
-      await controller.getEntityInfo('author', '42');
+      await controller.getEntityInfo('author', '42', mockUser);
 
-      expect(service.getEntityInfo).toHaveBeenCalledWith('author', 42);
+      expect(service.getEntityInfo).toHaveBeenCalledWith('author', mockUser, 42);
     });
 
     it('handles string entity ID for inline types', async () => {
       const { controller, service } = makeController();
-      await controller.getEntityInfo('publisher', 'Test Publisher');
+      await controller.getEntityInfo('publisher', 'Test Publisher', mockUser);
 
-      expect(service.getEntityInfo).toHaveBeenCalledWith('publisher', 'Test Publisher');
+      expect(service.getEntityInfo).toHaveBeenCalledWith('publisher', mockUser, 'Test Publisher');
     });
   });
 });

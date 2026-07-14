@@ -156,14 +156,13 @@ describe('EpubService', () => {
   const libraryService = {
     verifyUserAccess: vi.fn(),
   };
-
   let service: EpubService;
 
   beforeEach(() => {
     vi.resetAllMocks();
     service = new EpubService(bookReadService as any, libraryService as any);
     bookReadService.findLibraryIdByBookId.mockResolvedValue(3);
-    bookReadService.findPrimaryFilesByBookIds.mockResolvedValue([{ format: 'epub', absolutePath: '/books/book.epub' }]);
+    bookReadService.findPrimaryFilesByBookIds.mockResolvedValue([{ format: 'epub', absolutePath: '/books/book.epub', sizeBytes: null }]);
     libraryService.verifyUserAccess.mockResolvedValue(undefined);
     mockStat.mockResolvedValue({ mtimeMs: 100 } as Awaited<ReturnType<typeof stat>>);
   });
@@ -337,13 +336,23 @@ describe('EpubService', () => {
   });
 
   it('uses explicit fileId path when valid and skips primary-file lookup', async () => {
-    bookReadService.findFileById.mockResolvedValue({ bookId: 5, format: 'epub', absolutePath: '/books/alt.epub' });
+    bookReadService.findFileById.mockResolvedValue({ bookId: 5, format: 'epub', absolutePath: '/books/alt.epub', fileHash: 'hash1', sizeBytes: 123 });
     mockOpenFile.mockResolvedValueOnce(makeEpubArchive() as any);
 
     await service.getBookInfo(5, 88, user);
 
     expect(bookReadService.findFileById).toHaveBeenCalledWith(88);
     expect(bookReadService.findPrimaryFilesByBookIds).not.toHaveBeenCalled();
+  });
+
+  it('always serves the original EPUB regardless of Kobo settings', async () => {
+    bookReadService.findFileById.mockResolvedValue({ bookId: 5, format: 'epub', absolutePath: '/books/alt.epub', fileHash: 'hash1', sizeBytes: 123 });
+    mockOpenFile.mockResolvedValueOnce(makeEpubArchive() as any);
+
+    await service.getBookInfo(5, 88, user);
+
+    expect(mockStat).toHaveBeenCalledWith('/books/alt.epub');
+    expect(mockOpenFile).toHaveBeenCalledWith('/books/alt.epub');
   });
 
   it('evicts oldest cache entry when capacity is reached', () => {

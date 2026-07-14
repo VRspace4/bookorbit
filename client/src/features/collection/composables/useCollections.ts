@@ -1,12 +1,22 @@
 import { ref } from 'vue'
 import { api } from '@/lib/api'
-import type { Collection } from '@bookorbit/types'
+import type { BookSelectionPayload, Collection } from '@bookorbit/types'
 
 const collections = ref<Collection[]>([])
 const loaded = ref(false)
 const loading = ref(false)
 const error = ref<string | null>(null)
 let fetchPromise: Promise<void> | null = null
+let requestGeneration = 0
+
+export function resetCollections(): void {
+  requestGeneration += 1
+  collections.value = []
+  loaded.value = false
+  loading.value = false
+  error.value = null
+  fetchPromise = null
+}
 
 export function useCollections() {
   async function fetchCollections(): Promise<void> {
@@ -14,26 +24,36 @@ export function useCollections() {
     if (fetchPromise) return fetchPromise
     loading.value = true
     error.value = null
+    const generation = requestGeneration
     fetchPromise = api('/api/v1/collections')
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`)
         }
-        collections.value = await res.json()
+        const nextCollections: Collection[] = await res.json()
+        if (generation !== requestGeneration) return
+        collections.value = nextCollections
         loaded.value = true
       })
       .catch((e: unknown) => {
+        if (generation !== requestGeneration) return
         error.value = e instanceof Error ? e.message : 'Failed to load collections'
       })
       .finally(() => {
-        loading.value = false
-        fetchPromise = null
+        if (generation === requestGeneration) {
+          loading.value = false
+          fetchPromise = null
+        }
       })
     return fetchPromise
   }
 
-  async function fetchCollectionsWithMembership(bookIds: number[]): Promise<Collection[]> {
-    const res = await api(`/api/v1/collections?bookIds=${bookIds.join(',')}`)
+  async function fetchCollectionsWithMembership(selectionPayload: BookSelectionPayload): Promise<Collection[]> {
+    const res = await api('/api/v1/collections/membership', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(selectionPayload),
+    })
     if (!res.ok) throw new Error('Failed to fetch collections')
     return res.json()
   }
@@ -62,11 +82,11 @@ export function useCollections() {
     return updated
   }
 
-  async function addBooksToCollection(collectionId: number, bookIds: number[]): Promise<Collection> {
+  async function addBooksToCollection(collectionId: number, selectionPayload: BookSelectionPayload): Promise<Collection> {
     const res = await api(`/api/v1/collections/${collectionId}/books`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bookIds }),
+      body: JSON.stringify(selectionPayload),
     })
     if (!res.ok) throw new Error('Failed to add books to collection')
     const updated: Collection = await res.json()
@@ -74,11 +94,11 @@ export function useCollections() {
     return updated
   }
 
-  async function removeBooksFromCollection(collectionId: number, bookIds: number[]): Promise<Collection> {
+  async function removeBooksFromCollection(collectionId: number, selectionPayload: BookSelectionPayload): Promise<Collection> {
     const res = await api(`/api/v1/collections/${collectionId}/books`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bookIds }),
+      body: JSON.stringify(selectionPayload),
     })
     if (!res.ok) throw new Error('Failed to remove books from collection')
     const updated: Collection = await res.json()

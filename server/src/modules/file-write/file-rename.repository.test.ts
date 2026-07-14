@@ -82,9 +82,9 @@ describe('FileRenameRepository', () => {
     });
   });
 
-  it('applyFileRename updates file and book paths in one transaction', async () => {
+  it('updateBookFilePath updates absolutePath and relPath', async () => {
     const setCalls: unknown[] = [];
-    const tx = {
+    const db = {
       update: vi.fn().mockImplementation(() => ({
         set: vi.fn().mockImplementation((values: unknown) => {
           setCalls.push(values);
@@ -92,19 +92,32 @@ describe('FileRenameRepository', () => {
         }),
       })),
     };
+
+    const repo = new FileRenameRepository(db as never);
+
+    await repo.updateBookFilePath(10, '/library/new-folder/Dune.epub', 'new-folder/Dune.epub');
+
+    expect(db.update).toHaveBeenCalledTimes(1);
+    expect(setCalls).toEqual([{ absolutePath: '/library/new-folder/Dune.epub', relPath: 'new-folder/Dune.epub' }]);
+  });
+
+  it('updateBookFolderPath updates folderPath', async () => {
+    const setCalls: unknown[] = [];
     const db = {
-      transaction: vi.fn().mockImplementation(async (callback: (value: unknown) => Promise<unknown>) => callback(tx)),
+      update: vi.fn().mockImplementation(() => ({
+        set: vi.fn().mockImplementation((values: unknown) => {
+          setCalls.push(values);
+          return { where: vi.fn().mockResolvedValue(undefined) };
+        }),
+      })),
     };
 
     const repo = new FileRenameRepository(db as never);
 
-    await repo.applyFileRename(5, 10, '/library/new-folder/Dune.epub', 'new-folder/Dune.epub', '/library/new-folder/Dune.epub');
+    await repo.updateBookFolderPath(5, '/library/new-folder');
 
-    expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(setCalls).toEqual([
-      { absolutePath: '/library/new-folder/Dune.epub', relPath: 'new-folder/Dune.epub' },
-      { folderPath: '/library/new-folder/Dune.epub' },
-    ]);
+    expect(db.update).toHaveBeenCalledTimes(1);
+    expect(setCalls).toEqual([{ folderPath: '/library/new-folder' }]);
   });
 
   it('applyFolderRename updates every file path and the stored book folder', async () => {
@@ -138,6 +151,99 @@ describe('FileRenameRepository', () => {
       { absolutePath: '/library/Frank Herbert/Dune/cover.jpg', relPath: 'Frank Herbert/Dune/cover.jpg' },
       { folderPath: '/library/Frank Herbert/Dune' },
     ]);
+  });
+
+  it('findBookByExactFolderPath returns the exact folder owner in a library', async () => {
+    const row = { id: 99, folderPath: '/library/Author/Book', primaryFileId: 42, status: 'present' };
+    const db = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockResolvedValue([row]),
+      }),
+    };
+
+    const repo = new FileRenameRepository(db as never);
+
+    await expect(repo.findBookByExactFolderPath(3, '/library/Author/Book')).resolves.toEqual(row);
+  });
+
+  it('applyExistingFolderMerge reassigns files, deletes the source book, and fills a missing target primary', async () => {
+    const setCalls: unknown[] = [];
+    const deleteWhere = vi.fn().mockResolvedValue(undefined);
+    const tx = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        for: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockResolvedValue([{ libraryFolderId: 7, primaryFileId: null }]),
+      }),
+      update: vi.fn().mockImplementation(() => ({
+        set: vi.fn().mockImplementation((values: unknown) => {
+          setCalls.push(values);
+          return { where: vi.fn().mockResolvedValue(undefined) };
+        }),
+      })),
+      delete: vi.fn().mockReturnValue({ where: deleteWhere }),
+    };
+    const db = {
+      transaction: vi.fn().mockImplementation(async (callback: (value: unknown) => Promise<unknown>) => callback(tx)),
+    };
+
+    const repo = new FileRenameRepository(db as never);
+
+    await repo.applyExistingFolderMerge({
+      sourceBookId: 5,
+      targetBookId: 99,
+      fallbackPrimaryFileId: 10,
+      updates: [
+        { id: 10, absolutePath: '/library/Author/Book/Book.epub', relPath: 'Author/Book/Book.epub' },
+        { id: 11, absolutePath: '/library/Author/Book/old.opf', relPath: 'Author/Book/old.opf' },
+      ],
+    });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(setCalls).toEqual([
+      expect.objectContaining({ bookId: 99, libraryFolderId: 7, absolutePath: '/library/Author/Book/Book.epub', relPath: 'Author/Book/Book.epub' }),
+      expect.objectContaining({ bookId: 99, libraryFolderId: 7, absolutePath: '/library/Author/Book/old.opf', relPath: 'Author/Book/old.opf' }),
+      expect.objectContaining({ primaryFileId: 10, status: 'present' }),
+    ]);
+    expect(tx.delete).toHaveBeenCalledTimes(1);
+    expect(deleteWhere).toHaveBeenCalledTimes(1);
+  });
+
+  it('applyExistingFolderMerge does not replace an existing target primary file', async () => {
+    const setCalls: unknown[] = [];
+    const tx = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        for: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockResolvedValue([{ libraryFolderId: 7, primaryFileId: 42 }]),
+      }),
+      update: vi.fn().mockImplementation(() => ({
+        set: vi.fn().mockImplementation((values: unknown) => {
+          setCalls.push(values);
+          return { where: vi.fn().mockResolvedValue(undefined) };
+        }),
+      })),
+      delete: vi.fn().mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) }),
+    };
+    const db = {
+      transaction: vi.fn().mockImplementation(async (callback: (value: unknown) => Promise<unknown>) => callback(tx)),
+    };
+
+    const repo = new FileRenameRepository(db as never);
+
+    await repo.applyExistingFolderMerge({
+      sourceBookId: 5,
+      targetBookId: 99,
+      fallbackPrimaryFileId: 10,
+      updates: [{ id: 10, absolutePath: '/library/Author/Book/Book.epub', relPath: 'Author/Book/Book.epub' }],
+    });
+
+    expect(setCalls.at(-1)).toEqual(expect.not.objectContaining({ primaryFileId: 10 }));
+    expect(setCalls.at(-1)).toEqual(expect.objectContaining({ status: 'present' }));
   });
 
   it('checkPathTakenByOtherBook only flags collisions from other books', async () => {

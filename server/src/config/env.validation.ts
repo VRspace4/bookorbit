@@ -1,8 +1,39 @@
+import { parseIntoClientConfig } from 'pg-connection-string';
 import { z } from 'zod';
+
+const BOOLEAN_ENV_VALUES = ['true', 'false', '1', '0', 'yes', 'no', 'on', 'off'];
+
+function isValidPostgresConnectionString(value: string): boolean {
+  if (!value.trim()) {
+    return false;
+  }
+
+  if (!/^postgres(?:ql)?:\/\//i.test(value)) {
+    return false;
+  }
+
+  try {
+    parseIntoClientConfig(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function booleanEnvFlag(name: string) {
+  return z
+    .string()
+    .trim()
+    .toLowerCase()
+    .refine((val) => BOOLEAN_ENV_VALUES.includes(val), {
+      message: `${name} must be one of ${BOOLEAN_ENV_VALUES.join('/')}`,
+    })
+    .optional();
+}
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  DATABASE_URL: z.string().url('DATABASE_URL must be a valid URL').optional(),
+  DATABASE_URL: z.string().refine(isValidPostgresConnectionString, 'DATABASE_URL must be a valid PostgreSQL connection string').optional(),
   JWT_SECRET: z
     .string()
     .min(16, 'JWT_SECRET must be at least 16 characters')
@@ -14,6 +45,14 @@ const envSchema = z.object({
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
   SETUP_BOOTSTRAP_TOKEN: z.string().optional(),
   APP_DATA_PATH: z.string().default('/data'),
+  BOOK_DOCK_PATH: z
+    .string()
+    .transform((val) => val.trim())
+    .optional(),
+  LIBRARY_BROWSE_ROOT: z
+    .string()
+    .transform((val) => val.trim())
+    .optional(),
   FILE_WRITE_DEBOUNCE_MS: z.coerce.number().int().positive().optional(),
   FILE_WRITE_MAX_CONCURRENT_WRITES: z.coerce.number().int().positive().optional(),
   CLIENT_URL: z.string().url().optional(),
@@ -21,13 +60,24 @@ const envSchema = z.object({
   TRUST_PROXY: z.string().optional(),
   EMAIL_ENCRYPTION_KEY: z.string().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).optional(),
-  CSP_ALLOW_CLOUDFLARE_INSIGHTS: z
+  OIDC_ALLOW_LOCAL_ISSUERS: booleanEnvFlag('OIDC_ALLOW_LOCAL_ISSUERS'),
+  CSP_ALLOW_CLOUDFLARE_INSIGHTS: booleanEnvFlag('CSP_ALLOW_CLOUDFLARE_INSIGHTS'),
+  SWAGGER_ENABLED: booleanEnvFlag('SWAGGER_ENABLED'),
+  KOBO_CLOUDSCRAPER_PYTHON: z
     .string()
-    .trim()
-    .toLowerCase()
-    .refine((val) => ['true', 'false', '1', '0', 'yes', 'no', 'on', 'off'].includes(val), {
-      message: 'CSP_ALLOW_CLOUDFLARE_INSIGHTS must be one of true/false/1/0/yes/no/on/off',
-    })
+    .transform((val) => val.trim())
+    .optional(),
+  GITHUB_RELEASES_REPO: z
+    .string()
+    .transform((val) => val.trim())
+    .optional(),
+  GITHUB_RELEASES_TOKEN: z
+    .string()
+    .transform((val) => val.trim())
+    .optional(),
+  KOREADER_PLUGIN_PATH: z
+    .string()
+    .transform((val) => val.trim())
     .optional(),
 });
 

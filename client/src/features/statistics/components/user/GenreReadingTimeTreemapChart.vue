@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
-import { Tag } from 'lucide-vue-next'
+import { Tag } from '@lucide/vue'
+import { READING_SESSION_SOURCE_BUCKETS, READING_SESSION_SOURCE_BUCKET_LABELS } from '@bookorbit/types'
 
 import { useThemeStore } from '@/stores/theme'
 import { getThemePalette, readCssColor } from '@/lib/echarts'
@@ -12,6 +14,8 @@ import ChartEmptyState from '../ChartEmptyState.vue'
 const MIN_GENRES = 2
 
 const themeStore = useThemeStore()
+const { t } = useI18n()
+
 const { data, loading, error } = useUserGenreReadingTime()
 
 const totalSeconds = computed(() => data.value.reduce((s, item) => s + item.readingSeconds, 0))
@@ -26,6 +30,7 @@ watchEffect(() => {
 
   const palette = getThemePalette(themeStore.theme, themeStore.accent, 0.8, 0.8)
   const background = readCssColor('--background')
+  const bySourceByGenre = new Map(data.value.map((item) => [item.genre, item.bySource]))
 
   option.value = {
     tooltip: {
@@ -34,7 +39,14 @@ watchEffect(() => {
       formatter: (params: { name: string; value: number }) => {
         const hours = (params.value / 3600).toFixed(1)
         const pct = totalSeconds.value > 0 ? ((params.value / totalSeconds.value) * 100).toFixed(1) : '0'
-        return `<strong>${params.name}</strong><br/>${hours}h reading time<br/>${pct}% of total`
+        const bySource = bySourceByGenre.get(params.name)
+        const sourceRows = bySource
+          ? READING_SESSION_SOURCE_BUCKETS.filter((bucket) => (bySource[bucket] ?? 0) > 0)
+              .map((bucket) => `${READING_SESSION_SOURCE_BUCKET_LABELS[bucket]}: ${((bySource[bucket] ?? 0) / 3600).toFixed(1)}h`)
+              .join('<br/>')
+          : ''
+        const base = `<strong>${params.name}</strong><br/>${hours}h reading time<br/>${pct}% of total`
+        return sourceRows ? `${base}<br/>${sourceRows}` : base
       },
     },
     series: [
@@ -75,12 +87,12 @@ watchEffect(() => {
 </script>
 
 <template>
-  <ChartCard title="Genre Reading Time" :icon="Tag" :color-index="6" :loading :error :empty="isEmpty">
+  <ChartCard :title="t('statistics.charts.genreReadingTime.title')" :icon="Tag" :color-index="6" :loading :error :empty="isEmpty">
     <ChartEmptyState
       v-if="!hasEnoughData"
       :icon="Tag"
-      title="Not enough data yet"
-      :description="`Need at least ${MIN_GENRES} genres with reading time for this chart.`"
+      :title="t('statistics.empty.notEnoughData')"
+      :description="t('statistics.charts.genreReadingTime.notEnoughData', { count: MIN_GENRES })"
     />
     <VChart v-else :option autoresize style="height: 100%" />
   </ChartCard>

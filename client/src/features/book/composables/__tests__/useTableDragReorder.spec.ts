@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref, type Ref } from 'vue'
 import { useTableDragReorder } from '../useTableDragReorder'
-import type { ColumnDef, ColumnId } from '../useTableColumns'
+import type { ColumnDef } from '../useTableColumns'
 
 function makeColumns(): ColumnDef[] {
   return [
@@ -15,11 +15,11 @@ function makeColumns(): ColumnDef[] {
 
 describe('useTableDragReorder', () => {
   let allColumns: Ref<ColumnDef[]>
-  let setOrderSpy: (order: ColumnId[]) => void
+  let setOrderSpy: (order: string[]) => void
 
   beforeEach(() => {
     allColumns = ref(makeColumns())
-    setOrderSpy = vi.fn<(order: ColumnId[]) => void>()
+    setOrderSpy = vi.fn<(order: string[]) => void>()
   })
 
   it('isDraggableCol returns false for pinned columns', () => {

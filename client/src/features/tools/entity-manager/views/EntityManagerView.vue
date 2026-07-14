@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, RefreshCw, Search } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { formatDateTime } from '@/i18n/formatters'
+import { CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, RefreshCw, Search } from '@lucide/vue'
 import type { BrowseEntityItem, DuplicateCluster } from '@bookorbit/types'
 
 import { useEntityManager, type EntityManagerMode } from '../../composables/useEntityManager'
@@ -16,6 +18,7 @@ import SplitModal from '../components/SplitModal.vue'
 import BulkDeleteModal from '../components/BulkDeleteModal.vue'
 import BrowseMergeModal from '../components/BrowseMergeModal.vue'
 
+const { t } = useI18n()
 const em = useEntityManager()
 
 const renameTarget = ref<BrowseEntityItem | null>(null)
@@ -25,14 +28,25 @@ const showBulkDelete = ref(false)
 const showBrowseMerge = ref(false)
 
 const selectedBrowseItems = computed(() => Array.from(em.selectedItemsMap.value.values()))
+const deleteDefaultMode = computed<'soft' | 'hard'>(() => (deleteTarget.value?.bookCount === 0 ? 'hard' : 'soft'))
+const bulkDeleteDefaultMode = computed<'soft' | 'hard'>(() =>
+  selectedBrowseItems.value.length > 0 && selectedBrowseItems.value.every((item) => item.bookCount === 0) ? 'hard' : 'soft',
+)
 
 let searchDebounce: ReturnType<typeof setTimeout> | null = null
+
+function refreshBrowseFromFirstPage(): void {
+  if (em.browsePage.value === 1) {
+    em.fetchBrowse()
+    return
+  }
+  em.browsePage.value = 1
+}
 
 watch(em.browseSearch, () => {
   if (searchDebounce) clearTimeout(searchDebounce)
   searchDebounce = setTimeout(() => {
-    em.browsePage.value = 1
-    em.fetchBrowse()
+    refreshBrowseFromFirstPage()
   }, 300)
 })
 
@@ -102,6 +116,17 @@ function handleUpdatePage(value: number): void {
   em.browsePage.value = value
 }
 
+function handleBrowseSortChange(sortBy: 'name' | 'bookCount', sortOrder: 'asc' | 'desc'): void {
+  em.browseSortBy.value = sortBy
+  em.browseSortOrder.value = sortOrder
+  refreshBrowseFromFirstPage()
+}
+
+function handleUpdateBookCount(value: 'any' | 'empty'): void {
+  em.browseBookCount.value = em.isInline.value ? 'any' : value
+  refreshBrowseFromFirstPage()
+}
+
 async function handleMerge(targetId: number | string, sourceIds: (number | string)[], writeFiles: boolean): Promise<void> {
   await em.mergeEntities(targetId, sourceIds, writeFiles)
   em.removeClustersByIds(sourceIds)
@@ -131,7 +156,11 @@ function handleToggleDismissed(): void {
   em.showDismissed.value = !em.showDismissed.value
 }
 
-function handleSelectItem(id: number | string): void {
+function handleSelectItem(id: number | string, event: MouseEvent): void {
+  if (event.shiftKey) {
+    em.rangeSelectTo(id)
+    return
+  }
   em.toggleSelection(id)
 }
 
@@ -218,22 +247,24 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
           <template v-if="em.duplicateScanStatus.value.state === 'computing'">
             <Loader2 class="h-3 w-3 animate-spin shrink-0" />
             <span>
-              Computing candidates...
+              {{ t('tools.entityManager.duplicates.computing') }}
               <template v-if="em.duplicateScanStatus.value.progressPct !== null">{{ em.duplicateScanStatus.value.progressPct }}%</template>
             </span>
           </template>
           <template v-else-if="em.duplicateScanStatus.value.state === 'done' && em.duplicateScanStatus.value.computedAt">
-            <span>Candidates computed {{ new Date(em.duplicateScanStatus.value.computedAt).toLocaleString() }}</span>
+            <span>{{
+              t('tools.entityManager.duplicates.computedAt', { date: formatDateTime(new Date(em.duplicateScanStatus.value.computedAt)) })
+            }}</span>
             <button class="flex items-center gap-1 hover:text-foreground transition-colors" @click="handleRefreshDuplicates">
               <RefreshCw class="h-3 w-3" />
-              Recompute
+              {{ t('tools.entityManager.duplicates.recompute') }}
             </button>
           </template>
           <template v-else-if="em.duplicateScanStatus.value.state === 'idle'">
-            <span>No candidates computed yet.</span>
+            <span>{{ t('tools.entityManager.duplicates.noneComputed') }}</span>
             <button class="flex items-center gap-1 hover:text-foreground transition-colors" @click="handleRefreshDuplicates">
               <RefreshCw class="h-3 w-3" />
-              Compute now
+              {{ t('tools.entityManager.duplicates.computeNow') }}
             </button>
           </template>
         </div>
@@ -257,8 +288,8 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
               <Search class="h-8 w-8 text-muted-foreground" />
             </div>
             <div class="space-y-1">
-              <p class="text-sm font-medium">Find duplicate entities</p>
-              <p class="text-xs text-muted-foreground max-w-xs">Adjust the similarity threshold and click Scan to detect potential duplicates.</p>
+              <p class="text-sm font-medium">{{ t('tools.entityManager.duplicates.emptyTitle') }}</p>
+              <p class="text-xs text-muted-foreground max-w-xs">{{ t('tools.entityManager.duplicates.emptyDescription') }}</p>
             </div>
           </div>
           <div v-else class="rounded-lg border border-border/50 bg-card/40 px-6 py-12 flex flex-col items-center gap-4 text-center">
@@ -266,14 +297,16 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
               <CheckCircle2 class="h-8 w-8 text-green-500" />
             </div>
             <div class="space-y-1">
-              <p class="text-sm font-medium">No duplicates found</p>
-              <p class="text-xs text-muted-foreground">No potential duplicates were detected with the current settings.</p>
+              <p class="text-sm font-medium">{{ t('tools.entityManager.duplicates.noneFoundTitle') }}</p>
+              <p class="text-xs text-muted-foreground">{{ t('tools.entityManager.duplicates.noneFoundDescription') }}</p>
             </div>
           </div>
         </template>
 
         <div v-if="em.clusters.value.length > 0" class="space-y-3">
-          <p class="text-sm text-muted-foreground">{{ em.scanTotal.value }} {{ em.scanTotal.value === 1 ? 'cluster' : 'clusters' }} found</p>
+          <p class="text-sm text-muted-foreground">
+            {{ t('tools.entityManager.duplicates.clustersFound', { count: em.scanTotal.value }, em.scanTotal.value) }}
+          </p>
           <DuplicateClusterCard
             v-for="(cluster, idx) in em.clusters.value"
             :key="idx"
@@ -311,7 +344,7 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
           >
             <component :is="em.showDismissed.value ? ChevronUp : ChevronDown" class="h-4 w-4" />
             <span>
-              {{ em.showDismissed.value ? 'Hide' : 'Show' }} dismissed pairs
+              {{ em.showDismissed.value ? t('tools.entityManager.dismissed.hidePairs') : t('tools.entityManager.dismissed.showPairs') }}
               <template v-if="!em.showDismissed.value && em.dismissedPairs.value.length > 0"> ({{ em.dismissedPairs.value.length }}) </template>
             </span>
           </button>
@@ -330,12 +363,17 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
           :page-size="em.browsePageSize.value"
           :total-pages="em.browseTotalPages.value"
           :search="em.browseSearch.value"
+          :sort-by="em.browseSortBy.value"
+          :sort-order="em.browseSortOrder.value"
+          :book-count="em.browseBookCount.value"
           :loading="em.browseLoading.value"
           :selected-ids="em.selectedIds.value"
           :capabilities="em.capabilities.value"
           :is-inline="em.isInline.value"
           @update:page="handleUpdatePage"
           @update:search="handleUpdateSearch"
+          @update:book-count="handleUpdateBookCount"
+          @sort-change="handleBrowseSortChange"
           @select="handleSelectItem"
           @rename="handleRename"
           @delete="handleDelete"
@@ -361,6 +399,7 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
       v-if="deleteTarget"
       :entity-name="deleteTarget.name"
       :is-inline="em.isInline.value"
+      :default-mode="deleteDefaultMode"
       :loading="em.operationLoading.value"
       @confirm="handleDeleteConfirm"
       @cancel="deleteTarget = null"
@@ -378,6 +417,7 @@ async function handleBulkDeleteConfirm(mode: 'soft' | 'hard' | 'inline', writeFi
       v-if="showBulkDelete"
       :count="em.selectedIds.value.size"
       :is-inline="em.isInline.value"
+      :default-mode="bulkDeleteDefaultMode"
       :loading="em.operationLoading.value"
       @confirm="handleBulkDeleteConfirm"
       @cancel="showBulkDelete = false"

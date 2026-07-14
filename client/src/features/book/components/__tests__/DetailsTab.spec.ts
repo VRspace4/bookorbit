@@ -16,6 +16,12 @@ import DetailsTab from '../detail/tabs/DetailsTab.vue'
 import type { BookDetail } from '@bookorbit/types'
 import { api } from '@/lib/api'
 
+const COLLECTION_MEMBERSHIP_REQUEST = {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ bookIds: [1] }),
+}
+
 vi.mock('vue-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue-router')>()
   return {
@@ -64,6 +70,7 @@ const globalStubs = {
     DialogClose: { template: '<button><slot /></button>' },
     AddToCollectionSheet: true,
     DeleteBookDialog: true,
+    ResetReadingStateDialog: true,
   },
 }
 
@@ -73,6 +80,7 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     libraryId: 1,
     libraryName: 'Test Library',
     addedAt: '2024-01-01T00:00:00.000Z',
+    updatedAt: null,
     status: 'present',
     title: 'Test Book',
     subtitle: null,
@@ -80,13 +88,18 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     isbn10: null,
     isbn13: null,
     publisher: null,
+    publishedDate: null,
     publishedYear: null,
     language: null,
     pageCount: null,
     seriesName: null,
     seriesIndex: null,
     rating: null,
+    personalNote: null,
+    personalNoteUpdatedAt: null,
+    communityRatings: [],
     coverSource: null,
+    hardcoverEditionId: null,
     providerIds: {},
     authors: [],
     genres: [],
@@ -99,6 +112,7 @@ function makeBook(overrides: Partial<BookDetail> = {}): BookDetail {
     audioMetadata: null,
     formatPriority: [],
     comicMetadata: null,
+    customMetadata: [],
     lockedFields: [],
     collections: [],
     ...overrides,
@@ -156,6 +170,9 @@ describe('DetailsTab - present state', () => {
           providerIds: {
             amazon: '0345415000',
             goodreads: '12345',
+            librofm: '9781234567890',
+            kobo: 'beautiful-ugly-3',
+            ranobedb: '1287',
           },
         }),
       },
@@ -164,12 +181,24 @@ describe('DetailsTab - present state', () => {
 
     expect(wrapper.find('a[title="Open in Amazon"]').exists()).toBe(true)
     expect(wrapper.find('a[title="Open in Goodreads"]').exists()).toBe(true)
+    const libroFmLink = wrapper.find('a[title="Open in Libro.fm"]')
+    expect(libroFmLink.exists()).toBe(true)
+    expect(libroFmLink.attributes('href')).toBe('https://libro.fm/audiobooks/9781234567890')
+    expect(libroFmLink.find('img[alt="Libro.fm"][src="/assets/provider-icons/librofm.svg"]').exists()).toBe(true)
+    const koboLink = wrapper.find('a[title="Open in Kobo"]')
+    expect(koboLink.exists()).toBe(true)
+    expect(koboLink.attributes('href')).toBe('https://www.kobo.com/us/en/ebook/beautiful-ugly-3')
+    expect(koboLink.find('img[alt="Kobo"][src="/assets/provider-icons/kobo.svg"]').exists()).toBe(true)
+    const ranobedbLink = wrapper.find('a[title="Open in RanobeDB"]')
+    expect(ranobedbLink.exists()).toBe(true)
+    expect(ranobedbLink.attributes('href')).toBe('https://ranobedb.org/book/1287')
+    expect(ranobedbLink.find('img[alt="RanobeDB"][src="/assets/provider-icons/ranobedb.svg"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('Info Links')
   })
 
   it('fetches collections data for Kobo sync but does not display them', async () => {
     vi.mocked(api).mockImplementation(async (input) => {
-      if (input === '/api/v1/collections?bookIds=1') {
+      if (input === '/api/v1/collections/membership') {
         return makeApiResponse([
           { id: 10, name: 'Favorites', syncToKobo: false, memberCount: 1 },
           { id: 11, name: 'Want to Read', syncToKobo: true, memberCount: 0 },
@@ -186,9 +215,45 @@ describe('DetailsTab - present state', () => {
 
     await flushPromises()
 
-    expect(vi.mocked(api)).toHaveBeenCalledWith('/api/v1/collections?bookIds=1')
+    expect(vi.mocked(api)).toHaveBeenCalledWith('/api/v1/collections/membership', COLLECTION_MEMBERSHIP_REQUEST)
     expect(wrapper.text()).not.toContain('Favorites')
     expect(wrapper.text()).not.toContain('Collections')
+  })
+
+  it('saves personal reviews through the personal note endpoint', async () => {
+    const updated = makeBook({ personalNote: 'Loved it.', personalNoteUpdatedAt: '2026-07-06T12:00:00.000Z' })
+    let personalNoteRequest: RequestInit | undefined
+
+    vi.mocked(api).mockImplementation(async (input, init) => {
+      if (input === '/api/v1/books/1/personal-note') {
+        personalNoteRequest = init
+        return makeApiResponse(updated)
+      }
+
+      if (input === '/api/v1/collections/membership') return makeApiResponse([])
+      return makeApiResponse({}, false)
+    })
+
+    const wrapper = mount(DetailsTab, {
+      props: { book: makeBook({ id: 1 }) },
+      global: globalStubs,
+    })
+    await flushPromises()
+
+    await wrapper.find('button[aria-label="Toggle personal review"]').trigger('click')
+    await wrapper.find('button[aria-label="Edit personal review"]').trigger('click')
+    await wrapper.find('textarea').setValue('  Loved it.  ')
+    const saveButton = wrapper.findAll('button').find((button) => button.text().includes('Save'))
+    expect(saveButton).toBeTruthy()
+    await saveButton!.trigger('click')
+    await flushPromises()
+
+    expect(personalNoteRequest).toEqual({
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: 'Loved it.' }),
+    })
+    expect(wrapper.emitted('saved')?.[0]).toEqual([updated])
   })
 
   it('shows reading date fields when both dates are null and status is null', () => {
@@ -214,7 +279,7 @@ describe('DetailsTab - present state', () => {
           updatedAt: '2026-04-11T00:00:00.000Z',
         })
       }
-      if (input === '/api/v1/collections?bookIds=1') return makeApiResponse([])
+      if (input === '/api/v1/collections/membership') return makeApiResponse([])
       return makeApiResponse({}, false)
     })
 
@@ -256,7 +321,7 @@ describe('DetailsTab - present state', () => {
 
   it('shows validation for finished date earlier than started date and blocks save', async () => {
     vi.mocked(api).mockImplementation(async (input) => {
-      if (input === '/api/v1/collections?bookIds=1') return makeApiResponse([])
+      if (input === '/api/v1/collections/membership') return makeApiResponse([])
       return makeApiResponse({}, false)
     })
 
@@ -294,7 +359,7 @@ describe('DetailsTab - present state', () => {
       if (input === '/api/v1/books/1/progress') {
         return makeApiResponse([{ fileId: 101, cfi: null, pageNumber: null, percentage: 0.4, updatedAt: null }])
       }
-      if (input === '/api/v1/collections?bookIds=1') {
+      if (input === '/api/v1/collections/membership') {
         return makeApiResponse([])
       }
       return makeApiResponse({}, false)
@@ -330,7 +395,7 @@ describe('DetailsTab - present state', () => {
       if (input === '/api/v1/books/1/progress') {
         return makeApiResponse([{ fileId: 101, cfi: null, pageNumber: null, percentage: 99.6, updatedAt: null }])
       }
-      if (input === '/api/v1/collections?bookIds=1') {
+      if (input === '/api/v1/collections/membership') {
         return makeApiResponse([])
       }
       return makeApiResponse({}, false)
@@ -373,7 +438,7 @@ describe('DetailsTab - present state', () => {
       if (input === '/api/v1/books/1/progress') {
         return makeApiResponse(progressRows)
       }
-      if (input === '/api/v1/collections?bookIds=1') {
+      if (input === '/api/v1/collections/membership') {
         return makeApiResponse([])
       }
       return makeApiResponse({}, false)
@@ -655,7 +720,7 @@ describe('DetailsTab - reading dates compact display', () => {
           updatedAt: '2026-05-21T00:00:00.000Z',
         })
       }
-      if (input === '/api/v1/collections?bookIds=1') return makeApiResponse([])
+      if (input === '/api/v1/collections/membership') return makeApiResponse([])
       return makeApiResponse({}, false)
     })
 

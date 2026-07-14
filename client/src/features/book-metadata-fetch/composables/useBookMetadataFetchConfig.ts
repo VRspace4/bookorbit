@@ -31,7 +31,7 @@ export function useBookMetadataFetchConfig() {
     return res.json()
   }
 
-  async function saveLibraryConfig(libraryId: number, override: BookMetadataFetchConfigOverride): Promise<BookMetadataFetchConfig> {
+  async function saveLibraryConfig(libraryId: number, override: BookMetadataFetchConfigOverride): Promise<BookMetadataFetchLibraryConfig> {
     const res = await api(`/api/v1/book-metadata-fetch/config/libraries/${libraryId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

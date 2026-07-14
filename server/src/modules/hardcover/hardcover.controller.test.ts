@@ -16,16 +16,31 @@ const mockSyncService = {
   getSyncStatus: vi.fn(),
   streamSyncStatus: vi.fn(),
   getSyncPendingSummary: vi.fn(),
+  getBookSyncState: vi.fn(),
+  updateBookSyncState: vi.fn(),
+  syncBook: vi.fn(),
+};
+
+const mockImportService = {
+  previewImport: vi.fn(),
+  applyImport: vi.fn(),
+};
+
+const mockBookService = {
+  verifyBookAccess: vi.fn(),
 };
 
 const mockUser = { id: 1, isSuperuser: false, permissions: [] };
 
 function makeController() {
-  return new HardcoverController(mockSettingsService as any, mockSyncService as any);
+  return new HardcoverController(mockSettingsService as any, mockSyncService as any, mockImportService as any, mockBookService as any);
 }
 
 describe('HardcoverController', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockBookService.verifyBookAccess.mockResolvedValue(undefined);
+  });
 
   it('getSettings delegates to service', async () => {
     mockSettingsService.getSettings.mockResolvedValue({ tokenConfigured: false });
@@ -77,5 +92,103 @@ describe('HardcoverController', () => {
     const result = await makeController().getSyncPendingSummary(mockUser as any);
     expect(result).toEqual({ totalBooks: 10, pendingBooks: 2 });
     expect(mockSyncService.getSyncPendingSummary).toHaveBeenCalledWith(1);
+  });
+
+  it('gets per-book sync state after verifying book access', async () => {
+    mockSyncService.getBookSyncState.mockResolvedValue({
+      bookId: 42,
+      syncOverride: null,
+      syncEnabled: true,
+      canSyncNow: false,
+      effectiveReason: null,
+      lastSyncedAt: null,
+      syncError: null,
+    });
+
+    const result = await makeController().getBookSyncState(mockUser as any, 42);
+
+    expect(result).toEqual({
+      bookId: 42,
+      syncOverride: null,
+      syncEnabled: true,
+      canSyncNow: false,
+      effectiveReason: null,
+      lastSyncedAt: null,
+      syncError: null,
+    });
+    expect(mockBookService.verifyBookAccess).toHaveBeenCalledWith(42, mockUser);
+    expect(mockSyncService.getBookSyncState).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('updates per-book sync state after verifying book access', async () => {
+    mockSyncService.updateBookSyncState.mockResolvedValue({
+      bookId: 42,
+      syncOverride: 'excluded',
+      syncEnabled: false,
+      canSyncNow: false,
+      effectiveReason: 'excluded',
+      lastSyncedAt: null,
+      syncError: null,
+    });
+
+    const result = await makeController().updateBookSyncState(mockUser as any, 42, { syncEnabled: false });
+
+    expect(result).toEqual({
+      bookId: 42,
+      syncOverride: 'excluded',
+      syncEnabled: false,
+      canSyncNow: false,
+      effectiveReason: 'excluded',
+      lastSyncedAt: null,
+      syncError: null,
+    });
+    expect(mockBookService.verifyBookAccess).toHaveBeenCalledWith(42, mockUser);
+    expect(mockSyncService.updateBookSyncState).toHaveBeenCalledWith(1, 42, { syncEnabled: false });
+  });
+
+  it('syncs a single book after verifying book access', async () => {
+    mockSyncService.syncBook.mockResolvedValue('synced');
+    mockSyncService.getBookSyncState.mockResolvedValue({
+      bookId: 42,
+      syncOverride: 'included',
+      syncEnabled: true,
+      canSyncNow: false,
+      effectiveReason: null,
+      lastSyncedAt: '2026-01-01T00:00:00.000Z',
+      syncError: null,
+    });
+
+    const result = await makeController().syncBook(mockUser as any, 42);
+
+    expect(result).toEqual({
+      result: 'synced',
+      state: {
+        bookId: 42,
+        syncOverride: 'included',
+        syncEnabled: true,
+        canSyncNow: false,
+        effectiveReason: null,
+        lastSyncedAt: '2026-01-01T00:00:00.000Z',
+        syncError: null,
+      },
+    });
+    expect(mockBookService.verifyBookAccess).toHaveBeenCalledWith(42, mockUser);
+    expect(mockSyncService.syncBook).toHaveBeenCalledWith(1, 42);
+    expect(mockSyncService.getBookSyncState).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('previewImport delegates to service', async () => {
+    mockImportService.previewImport.mockResolvedValue({ summary: { willUpdate: 1 }, rows: [] });
+    const result = await makeController().previewImport(mockUser as any);
+    expect(result).toEqual({ summary: { willUpdate: 1 }, rows: [] });
+    expect(mockImportService.previewImport).toHaveBeenCalledWith(mockUser);
+  });
+
+  it('applyImport delegates to service', async () => {
+    mockImportService.applyImport.mockResolvedValue({ applied: 1, failed: 0 });
+    const dto = { hardcoverUserBookIds: [1000], importProgress: true };
+    const result = await makeController().applyImport(mockUser as any, dto);
+    expect(result).toEqual({ applied: 1, failed: 0 });
+    expect(mockImportService.applyImport).toHaveBeenCalledWith(mockUser, dto);
   });
 });

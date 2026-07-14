@@ -1,5 +1,6 @@
 import type { RequestUser } from '../../common/types/request-user';
 import { DashboardController } from './dashboard.controller';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
   return {
@@ -16,6 +17,8 @@ function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -45,6 +48,20 @@ function makeController() {
 describe('DashboardController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('scroller endpoint', () => {
+    it('getScroller delegates to dashboardService with the provided scroller type and params', async () => {
+      const { controller, dashboardService } = makeController();
+      const user = makeUser({ id: 7 });
+      const mockResult = [{ id: 101 }];
+      dashboardService.getScroller.mockResolvedValue(mockResult);
+
+      const result = await controller.getScroller('up-next-in-series', 33, 0, user);
+
+      expect(dashboardService.getScroller).toHaveBeenCalledWith('up-next-in-series', user, 33, 0);
+      expect(result).toEqual(mockResult);
+    });
   });
 
   describe('widget endpoints', () => {

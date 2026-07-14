@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { watch, type FSWatcher } from 'chokidar';
 import { eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { stat } from 'fs/promises';
 import { dirname, sep } from 'path';
-import type { AsyncSubscription } from '@parcel/watcher';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { DB } from '../../db';
@@ -27,7 +27,7 @@ const RECONCILE_MS = 30 * 60 * 1_000;
 @Injectable()
 export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(FileWatcherService.name);
-  private readonly subscriptions = new Map<number, AsyncSubscription[]>();
+  private readonly subscriptions = new Map<number, FSWatcher[]>();
   private readonly watchedLibraryPaths = new Map<number, string[]>();
   private readonly pendingTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; type: EventType; libraryId: number }>();
   private readonly pendingFolderScanTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; libraryId: number }>();
@@ -105,7 +105,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.suppressedDirScanTimers.clear();
       this.suppressedDirScans.clear();
       for (const subs of this.subscriptions.values()) {
-        for (const sub of subs) await sub.unsubscribe();
+        for (const sub of subs) await sub.close();
       }
       this.subscriptions.clear();
       this.watchedLibraryPaths.clear();
@@ -132,13 +132,15 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       const results = await this.processor.reconcileMissingBooks(libraryIds);
       for (const result of results) {
         if (result.type === 'book-missing') {
-          this.gateway.emitBookMissing({ libraryId: result.libraryId, bookIds: result.bookIds });
+          this.scannerService.bufferBookMissingEvent(result.libraryId, result.bookIds);
           this.scannerService.bufferBooksUnavailableNotification(result.libraryId, result.bookIds);
         } else if (result.type === 'book-restored') {
           this.gateway.emitBookRestored({ libraryId: result.libraryId, bookIds: result.bookIds });
           this.scannerService.bufferBooksRestoredNotification(result.libraryId, result.bookIds);
         } else if (result.type === 'book-moved') {
           this.gateway.emitBookMoved({ libraryId: result.libraryId, bookIds: result.bookIds });
+        } else if (result.type === 'book-transferred') {
+          this.gateway.emitBookTransferred({ fromLibraryId: result.fromLibraryId, toLibraryId: result.toLibraryId, bookIds: result.bookIds });
         }
       }
       this.logger.log(
@@ -158,7 +160,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     const event = 'scanner.watcher.start';
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] libraryId=${libraryId} pathCount=${paths.length} - watcher start requested`);
-    const subs: AsyncSubscription[] = [];
+    const subs: FSWatcher[] = [];
     let currentPath: string | null = null;
     try {
       await this.stopWatcher(libraryId);
@@ -168,24 +170,31 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
         return;
       }
 
-      const { subscribe } = await import('@parcel/watcher');
-
       for (const path of paths) {
         currentPath = path;
-        const sub = await subscribe(path, (err, events) => {
-          if (err) {
+        const sub = watch(path, { ignoreInitial: true });
+        sub.on('all', (eventName, eventPath) => {
+          const normalizedType = normalizeWatchEvent(eventName);
+          if (!normalizedType) return;
+          this.schedule(normalizedType, eventPath, libraryId);
+        });
+        sub.on('error', (err) => {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.logger.warn(
+            `[${event}] [fail] libraryId=${libraryId} path="${sanitizeLogValue(path)}" errorClass=${error.name} error="${sanitizeLogValue(error.message)}" - watcher callback error`,
+          );
+        });
+        try {
+          await waitForWatcherReady(sub);
+        } catch (err) {
+          if (err instanceof Error) {
             this.logger.warn(
               `[${event}] [fail] libraryId=${libraryId} path="${sanitizeLogValue(path)}" errorClass=${err.name ?? 'Error'} error="${sanitizeLogValue(err.message)}" - watcher callback error`,
             );
-            return;
           }
-          for (const fsEvent of events) {
-            const normalizedType: EventType | null =
-              fsEvent.type === 'delete' ? 'delete' : fsEvent.type === 'create' || fsEvent.type === 'update' ? 'create' : null;
-            if (!normalizedType) continue;
-            this.schedule(normalizedType, fsEvent.path, libraryId);
-          }
-        });
+          await sub.close();
+          throw err;
+        }
         subs.push(sub);
       }
 
@@ -198,7 +207,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     } catch (err) {
       for (const sub of subs) {
         try {
-          await sub.unsubscribe();
+          await sub.close();
         } catch {
           // best-effort cleanup after a partial watcher startup
         }
@@ -224,7 +233,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
         this.logger.log(`[${event}] [end] libraryId=${libraryId} durationMs=${Date.now() - startedAt} hadWatcher=false - watcher stop completed`);
         return;
       }
-      for (const sub of existing) await sub.unsubscribe();
+      for (const sub of existing) await sub.close();
       this.subscriptions.delete(libraryId);
       this.clearPendingTimersForLibrary(libraryId);
       this.pendingCrossLibraryReconcileLibraryIds.delete(libraryId);
@@ -273,12 +282,12 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     }
   }
 
-  // Only reconcile missing books in other libraries instead of full rescan
-  private scheduleCrossLibraryReconcile(sourceLibraryId: number): void {
-    const otherLibraryIds = [...this.subscriptions.keys()].filter((id) => id !== sourceLibraryId);
-    if (otherLibraryIds.length === 0) return;
+  // Reconcile watched libraries instead of running a full rescan.
+  private scheduleCrossLibraryReconcile(): void {
+    const watchedLibraryIds = [...this.subscriptions.keys()];
+    if (watchedLibraryIds.length === 0) return;
 
-    for (const libraryId of otherLibraryIds) this.pendingCrossLibraryReconcileLibraryIds.add(libraryId);
+    for (const libraryId of watchedLibraryIds) this.pendingCrossLibraryReconcileLibraryIds.add(libraryId);
     if (this.pendingCrossLibraryReconcileTimer) clearTimeout(this.pendingCrossLibraryReconcileTimer);
 
     this.pendingCrossLibraryReconcileTimer = setTimeout(() => {
@@ -296,6 +305,8 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
               this.scannerService.bufferBooksRestoredNotification(result.libraryId, result.bookIds);
             } else if (result.type === 'book-moved') {
               this.gateway.emitBookMoved({ libraryId: result.libraryId, bookIds: result.bookIds });
+            } else if (result.type === 'book-transferred') {
+              this.gateway.emitBookTransferred({ fromLibraryId: result.fromLibraryId, toLibraryId: result.toLibraryId, bookIds: result.bookIds });
             }
           }
         })
@@ -405,9 +416,9 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     }
 
     if (result.type === 'book-missing') {
-      this.gateway.emitBookMissing({ libraryId: result.libraryId, bookIds: result.bookIds });
+      this.scannerService.bufferBookMissingEvent(result.libraryId, result.bookIds);
       this.scannerService.bufferBooksUnavailableNotification(result.libraryId, result.bookIds);
-      if (type === 'delete') this.scheduleCrossLibraryReconcile(result.libraryId);
+      if (type === 'delete') this.scheduleCrossLibraryReconcile();
     } else if (result.type === 'book-restored') {
       this.gateway.emitBookRestored({ libraryId: result.libraryId, bookIds: result.bookIds });
       this.scannerService.bufferBooksRestoredNotification(result.libraryId, result.bookIds);
@@ -416,6 +427,30 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       // A move updates the file's path and may consolidate virtual-sibling books.
       // Schedule a folder scan so upsertBook can drain any remaining siblings.
       if (type === 'create') this.scheduleFolderScan(path, libraryId);
+    } else if (result.type === 'book-transferred') {
+      this.gateway.emitBookTransferred({ fromLibraryId: result.fromLibraryId, toLibraryId: result.toLibraryId, bookIds: result.bookIds });
     }
   }
+}
+
+function normalizeWatchEvent(eventName: string): EventType | null {
+  if (eventName === 'unlink' || eventName === 'unlinkDir') return 'delete';
+  if (eventName === 'add' || eventName === 'addDir' || eventName === 'change') return 'create';
+  return null;
+}
+
+function waitForWatcherReady(watcher: FSWatcher): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const handleReady = () => {
+      watcher.off('error', handleError);
+      resolve();
+    };
+    const handleError = (error: unknown) => {
+      watcher.off('ready', handleReady);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+
+    watcher.once('ready', handleReady);
+    watcher.once('error', handleError);
+  });
 }

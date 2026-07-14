@@ -8,6 +8,7 @@ import { bookMetadata } from '../../db/schema';
 import * as schema from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
+type LockMutationExecutor = Pick<Db, 'insert'>;
 
 @Injectable()
 export class BookMetadataLockRepository {
@@ -31,9 +32,9 @@ export class BookMetadataLockRepository {
     return new Map(rows.map((r) => [r.bookId, r.lockedFields ?? []]));
   }
 
-  async replaceLockedFields(bookId: number, lockedFields: BookMetadataLockField[]): Promise<void> {
+  async replaceLockedFields(bookId: number, lockedFields: BookMetadataLockField[], executor: LockMutationExecutor = this.db): Promise<void> {
     const now = new Date();
-    await this.db
+    await executor
       .insert(bookMetadata)
       .values({ bookId, lockedFields, updatedAt: now })
       .onConflictDoUpdate({ target: bookMetadata.bookId, set: { lockedFields, updatedAt: now } });

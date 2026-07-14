@@ -1,28 +1,36 @@
-import { onMounted, onUnmounted, watch, type Ref } from 'vue'
-import type { BookCard } from '@bookorbit/types'
+import { onActivated, onDeactivated, onMounted, watch, type Ref } from 'vue'
 import { useBookNavigation } from './useBookNavigation'
+import type { BookSlot } from './useBookWindow'
 
-export function useBookViewContext(books: Ref<BookCard[]>, total: Ref<number>, loadMore: () => Promise<unknown> | unknown) {
-  const { setBookContext, registerLoadMore } = useBookNavigation()
+export function useBookViewContext(slots: Ref<BookSlot[]>, total: Ref<number>, loadMore: () => Promise<unknown> | unknown) {
+  const { setBookSlotContext, registerLoadMore } = useBookNavigation()
+  let active = true
 
-  watch(
-    [books, total],
-    ([items, count]) => {
-      setBookContext(
-        items.map((book) => book.id),
-        count,
-      )
-    },
-    { immediate: true },
-  )
+  const syncBookContext = () => {
+    if (!active) return
+    setBookSlotContext(slots.value, total.value)
+  }
 
-  onMounted(() => {
+  watch([slots, total], () => syncBookContext(), { immediate: true })
+
+  function registerContextLoader() {
     registerLoadMore(async () => {
       await loadMore()
+      setBookSlotContext(slots.value, total.value)
     })
+  }
+
+  onMounted(() => {
+    registerContextLoader()
   })
 
-  onUnmounted(() => {
-    registerLoadMore(null)
+  onActivated(() => {
+    active = true
+    registerContextLoader()
+    syncBookContext()
+  })
+
+  onDeactivated(() => {
+    active = false
   })
 }

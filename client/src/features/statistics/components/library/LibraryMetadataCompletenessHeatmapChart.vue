@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, shallowRef, watchEffect } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
-import { ListChecks } from 'lucide-vue-next'
+import { ListChecks } from '@lucide/vue'
 import { useThemeStore } from '@/stores/theme'
 
-import { buildHeatmapPalette } from '../../heatmap-palette'
+import { buildHeatmapPalette } from '@/lib/heatmap-palette'
 import { useLibraryMetadataCompleteness } from '../../composables/useLibraryMetadataCompleteness'
 import ChartCard from '../ChartCard.vue'
 
@@ -25,6 +26,8 @@ const FIELD_ORDER = [
 ]
 
 const themeStore = useThemeStore()
+const { t } = useI18n()
+
 const { data, loading, error } = useLibraryMetadataCompleteness()
 const option = shallowRef({})
 const heatmapPaletteState = computed(() => ({
@@ -109,7 +112,14 @@ watchEffect(() => {
 </script>
 
 <template>
-  <ChartCard title="Library Metadata Completeness" :icon="ListChecks" :color-index="7" :loading :error :empty="!data.items.length">
+  <ChartCard
+    :title="t('statistics.charts.libraryMetadataCompleteness.title')"
+    :icon="ListChecks"
+    :color-index="7"
+    :loading
+    :error
+    :empty="!data.items.length"
+  >
     <VChart :option autoresize style="height: 100%" />
   </ChartCard>
 </template>

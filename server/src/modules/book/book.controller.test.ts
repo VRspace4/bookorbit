@@ -1,6 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { MockedFunction } from 'vitest';
-import archiver from 'archiver';
+import { ZipArchive } from 'archiver';
 import { createReadStream } from 'fs';
 import { stat } from 'fs/promises';
 import { Permission } from '@bookorbit/types';
@@ -9,16 +9,18 @@ import type { RequestUser } from '../../common/types/request-user';
 import { AUDITABLE_KEY } from '../../common/decorators/auditable.decorator';
 import { FORBIDDEN_PERMISSION_KEY } from '../../common/decorators/forbid-permission.decorator';
 import { BookController } from './book.controller';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 vi.mock('archiver', () => ({
-  __esModule: true,
-  default: vi.fn(() => ({
-    pipe: vi.fn(),
-    file: vi.fn(),
-    on: vi.fn().mockReturnThis(),
-    abort: vi.fn(),
-    finalize: vi.fn().mockResolvedValue(undefined),
-  })),
+  ZipArchive: vi.fn(function () {
+    return {
+      pipe: vi.fn(),
+      file: vi.fn(),
+      on: vi.fn().mockReturnThis(),
+      abort: vi.fn(),
+      finalize: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
 }));
 
 vi.mock('fs', async () => {
@@ -54,6 +56,8 @@ function makeUser(): RequestUser {
     provisioningMethod: 'local',
     isSuperuser: false,
     permissions: [],
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -111,6 +115,16 @@ function makeReply() {
   };
 }
 
+function mockZipArchiveOnce(archive: unknown) {
+  (ZipArchive as unknown as vi.Mock).mockImplementationOnce(
+    class {
+      constructor() {
+        return archive;
+      }
+    } as never,
+  );
+}
+
 function makeController() {
   const bookService = {
     embedAll: vi.fn(),
@@ -120,6 +134,8 @@ function makeController() {
     bulkRefreshMetadata: vi.fn(),
     bulkReExtractCover: vi.fn(),
     bulkSetMetadata: vi.fn(),
+    bulkEditMetadata: vi.fn(),
+    bulkUpdateTags: vi.fn(),
     getExportFiles: vi.fn(),
     getMetadataExportPreflight: vi.fn(),
     buildMetadataExport: vi.fn(),
@@ -134,10 +150,13 @@ function makeController() {
     saveProgress: vi.fn(),
     clearFileProgress: vi.fn(),
     saveAudioProgress: vi.fn(),
+    updatePersonalNote: vi.fn(),
     updateMetadata: vi.fn(),
+    updateMetadataAndLocks: vi.fn(),
     updateMetadataLocks: vi.fn(),
     refreshMetadata: vi.fn(),
     getMetadataFromFile: vi.fn(),
+    writeAndRename: vi.fn(),
     verifyBookAccess: vi.fn(),
     getKoboState: vi.fn(),
     setReadStatus: vi.fn(),
@@ -177,6 +196,16 @@ describe('BookController', () => {
 
     await expect(controller.embedAll()).resolves.toEqual({ queued: 5 });
     expect(bookService.embedAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates a personal note through the service', async () => {
+    const { controller, bookService } = makeController();
+    const user = makeUser();
+    const updated = { id: 7, personalNote: 'private note' };
+    bookService.updatePersonalNote.mockResolvedValue(updated);
+
+    await expect(controller.updatePersonalNote(7, { note: 'private note' }, user)).resolves.toBe(updated);
+    expect(bookService.updatePersonalNote).toHaveBeenCalledWith(7, { note: 'private note' }, user);
   });
 
   it('returns 304 when cover etag matches (unversioned → 24h private cache)', async () => {
@@ -385,16 +414,20 @@ describe('BookController', () => {
       projectedBytes: 30,
       bookCount: 2,
       scope: 'primary',
+      archiveFilename: 'Selected Books.zip',
     });
 
     await controller.exportBooks({ bookIds: [1, 2], allFormats: false }, makeUser(), reply);
 
     expect(raw.setHeader).toHaveBeenCalledWith('Content-Type', 'application/zip');
-    expect(raw.setHeader).toHaveBeenCalledWith('Content-Disposition', 'attachment; filename="books.zip"');
+    expect(raw.setHeader).toHaveBeenCalledWith(
+      'Content-Disposition',
+      `attachment; filename="Selected Books.zip"; filename*=UTF-8''Selected%20Books.zip`,
+    );
 
-    const archiverMock = archiver as unknown as vi.Mock;
-    expect(archiverMock).toHaveBeenCalledWith('zip', { zlib: { level: 0 } });
-    const archive = archiverMock.mock.results[0].value;
+    const zipArchiveMock = ZipArchive as unknown as vi.Mock;
+    expect(zipArchiveMock).toHaveBeenCalledWith({ zlib: { level: 0 } });
+    const archive = zipArchiveMock.mock.results[0].value;
 
     expect(archive.pipe).toHaveBeenCalledWith(raw);
     expect(archive.file).toHaveBeenCalledWith('/books/a.epub', { name: 'A.epub' });
@@ -418,7 +451,7 @@ describe('BookController', () => {
       abort: vi.fn(),
       finalize: vi.fn().mockRejectedValue(new Error('zip failure')),
     };
-    (archiver as unknown as vi.Mock).mockReturnValueOnce(archive);
+    mockZipArchiveOnce(archive);
 
     await expect(controller.exportBooks({ bookIds: [1], allFormats: false }, makeUser(), reply)).rejects.toThrow('zip failure');
   });
@@ -554,7 +587,7 @@ describe('BookController', () => {
         return Promise.reject(new Error('stream closed'));
       }),
     };
-    (archiver as unknown as vi.Mock).mockReturnValueOnce(archive);
+    mockZipArchiveOnce(archive);
 
     await expect(controller.exportBooks({ bookIds: [1], allFormats: false }, makeUser(), reply)).resolves.toBeUndefined();
     expect(archive.abort).toHaveBeenCalled();
@@ -579,7 +612,7 @@ describe('BookController', () => {
         return Promise.reject(new Error('stream aborted'));
       }),
     };
-    (archiver as unknown as vi.Mock).mockReturnValueOnce(archive);
+    mockZipArchiveOnce(archive);
 
     await expect(controller.exportBooks({ bookIds: [1], allFormats: false }, makeUser(), reply)).resolves.toBeUndefined();
     expect(archive.abort).toHaveBeenCalled();
@@ -603,7 +636,7 @@ describe('BookController', () => {
       abort: vi.fn(),
       finalize: vi.fn().mockRejectedValue(new Error('zip failure')),
     };
-    (archiver as unknown as vi.Mock).mockReturnValueOnce(archive);
+    mockZipArchiveOnce(archive);
 
     await expect(controller.exportBooks({ bookIds: [1], allFormats: false }, makeUser(), reply)).rejects.toThrow('zip failure');
     expect(release).toHaveBeenCalledTimes(1);
@@ -632,7 +665,7 @@ describe('BookController', () => {
         return new Promise<void>(() => {});
       }),
     };
-    (archiver as unknown as vi.Mock).mockReturnValueOnce(archive);
+    mockZipArchiveOnce(archive);
 
     await expect(controller.exportBooks({ bookIds: [1], allFormats: false }, makeUser(), reply)).rejects.toThrow('archive warning');
   });
@@ -734,7 +767,16 @@ describe('BookController', () => {
     const user = makeUser();
     bookService.getProgress.mockResolvedValue(null);
 
-    await expect(controller.getFileProgress(9, user)).resolves.toEqual({ cfi: null, pageNumber: null, percentage: 0 });
+    await expect(controller.getFileProgress(9, user)).resolves.toEqual({
+      cfi: null,
+      pageNumber: null,
+      percentage: 0,
+      koboLocationSource: null,
+      koboLocationType: null,
+      koboLocationValue: null,
+      koboContentSourceProgressPercent: null,
+      koreaderProgress: null,
+    });
     expect(bookService.getProgress).toHaveBeenCalledWith(user.id, 9, user);
   });
 
@@ -754,15 +796,21 @@ describe('BookController', () => {
   it('delegates remaining book endpoints to service methods', async () => {
     const { controller, bookService } = makeController();
     const user = makeUser();
-    bookService.updateMetadata.mockResolvedValue({ id: 7 });
+    bookService.updateMetadata.mockResolvedValue({ book: { id: 7 }, write: null, libraryAutoWriteEnabled: false });
+    bookService.updateMetadataAndLocks.mockResolvedValue({
+      book: { id: 7, lockedFields: ['goodreadsId'] },
+      write: null,
+      libraryAutoWriteEnabled: false,
+    });
     bookService.updateMetadataLocks.mockResolvedValue({ id: 7, lockedFields: ['title'] });
     bookService.refreshMetadata.mockResolvedValue({ id: 7 });
     bookService.getMetadataFromFile.mockResolvedValue({ title: 'File Title' });
-    bookService.getKoboState.mockResolvedValue({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshot: null });
+    bookService.getKoboState.mockResolvedValue({ eligibleForKoboSync: false, syncCollections: [], readingState: null, snapshots: [] });
     bookService.getAudioProgress.mockResolvedValue({ positionSeconds: 15 });
     bookService.getDetail.mockResolvedValue({ id: 7, title: 'Detail' });
 
     await controller.updateMetadata(7, { title: 'New' } as never, user);
+    await controller.updateMetadataAndLocks(7, { metadata: { goodreadsId: '123' }, lockedFields: ['goodreadsId'] } as never, user);
     await controller.bulkSetMetadata({ bookIds: [7, 8], field: 'language', value: 'fr' } as never, user);
     await controller.updateMetadataLocks(7, { lockedFields: ['title'] } as never, user);
     await controller.refreshMetadata(7, 'true', user);
@@ -772,7 +820,10 @@ describe('BookController', () => {
     await controller.getAudioProgress(7, user);
     await controller.getDetail(7, user);
 
-    expect(bookService.updateMetadata).toHaveBeenCalledWith(7, { title: 'New' }, user);
+    expect(bookService.updateMetadata).toHaveBeenCalledWith(7, { title: 'New' }, user, { postSaveMode: 'schedule' });
+    expect(bookService.updateMetadataAndLocks).toHaveBeenCalledWith(7, { metadata: { goodreadsId: '123' }, lockedFields: ['goodreadsId'] }, user, {
+      postSaveMode: 'schedule',
+    });
     expect(bookService.bulkSetMetadata).toHaveBeenCalledWith([7, 8], 'language', 'fr', user);
     expect(bookService.updateMetadataLocks).toHaveBeenCalledWith(7, ['title'], user);
     expect(bookService.refreshMetadata).toHaveBeenCalledWith(7, true, user);
@@ -781,6 +832,53 @@ describe('BookController', () => {
     expect(bookService.setReadStatus).toHaveBeenCalledWith(7, { status: 'reading' }, user);
     expect(bookService.getAudioProgress).toHaveBeenCalledWith(user.id, 7, user);
     expect(bookService.getDetail).toHaveBeenCalledWith(7, user);
+  });
+
+  it('returns the save result shape only when synchronous file write is requested', async () => {
+    const { controller, bookService } = makeController();
+    const user = makeUser();
+    const result = {
+      book: { id: 7, title: 'New' },
+      write: { status: 'success', fieldsWritten: ['title'], durationMs: 12 },
+      libraryAutoWriteEnabled: true,
+    };
+    const lockResult = {
+      book: { id: 7, lockedFields: ['goodreadsId'] },
+      write: { status: 'success', fieldsWritten: ['goodreadsId'], durationMs: 9 },
+      libraryAutoWriteEnabled: true,
+    };
+    bookService.updateMetadata.mockResolvedValue(result);
+    bookService.updateMetadataAndLocks.mockResolvedValue(lockResult);
+
+    await expect(controller.updateMetadata(7, { title: 'New' } as never, user)).resolves.toEqual({ id: 7, title: 'New' });
+    await expect(controller.updateMetadata(7, { title: 'New' } as never, user, 'true')).resolves.toEqual(result);
+    await expect(
+      controller.updateMetadataAndLocks(7, { metadata: { goodreadsId: '123' }, lockedFields: ['goodreadsId'] } as never, user),
+    ).resolves.toEqual(lockResult.book);
+    await expect(
+      controller.updateMetadataAndLocks(7, { metadata: { goodreadsId: '123' }, lockedFields: ['goodreadsId'] } as never, user, 'true'),
+    ).resolves.toEqual(lockResult);
+
+    expect(bookService.updateMetadata).toHaveBeenNthCalledWith(1, 7, { title: 'New' }, user, { postSaveMode: 'schedule' });
+    expect(bookService.updateMetadata).toHaveBeenNthCalledWith(2, 7, { title: 'New' }, user, { postSaveMode: 'sync' });
+    expect(bookService.updateMetadataAndLocks).toHaveBeenNthCalledWith(
+      1,
+      7,
+      { metadata: { goodreadsId: '123' }, lockedFields: ['goodreadsId'] },
+      user,
+      {
+        postSaveMode: 'schedule',
+      },
+    );
+    expect(bookService.updateMetadataAndLocks).toHaveBeenNthCalledWith(
+      2,
+      7,
+      { metadata: { goodreadsId: '123' }, lockedFields: ['goodreadsId'] },
+      user,
+      {
+        postSaveMode: 'sync',
+      },
+    );
   });
 
   it('throws when writing to a closed sse stream', () => {
@@ -810,6 +908,10 @@ describe('BookController', () => {
       getResourceId: (req: { params: Record<string, string> }) => number;
       description: (req: { params: Record<string, string> }) => string;
     };
+    const updateMetadataAndLocksAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.updateMetadataAndLocks) as {
+      getResourceId: (req: { params: Record<string, string> }) => number;
+      description: (req: { params: Record<string, string> }) => string;
+    };
     const updateLocksAudit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.updateMetadataLocks) as {
       getResourceId: (req: { params: Record<string, string> }) => number;
       description: (req: { params: Record<string, string> }) => string;
@@ -825,6 +927,8 @@ describe('BookController', () => {
     expect(bulkSetMetadataAudit.description({ body: { bookIds: [1, 2], field: 'language' } })).toBe('Bulk set language for 2 books');
     expect(updateMetadataAudit.getResourceId({ params: { id: '44' } })).toBe(44);
     expect(updateMetadataAudit.description({ params: { id: '44' } })).toBe('Updated metadata for book #44');
+    expect(updateMetadataAndLocksAudit.getResourceId({ params: { id: '44' } })).toBe(44);
+    expect(updateMetadataAndLocksAudit.description({ params: { id: '44' } })).toBe('Updated metadata and locks for book #44');
     expect(updateLocksAudit.getResourceId({ params: { id: '44' } })).toBe(44);
     expect(updateLocksAudit.description({ params: { id: '44' } })).toBe('Updated metadata locks for book #44');
     expect(refreshAudit.getResourceId({ params: { id: '44' } })).toBe(44);
@@ -841,6 +945,7 @@ describe('BookController', () => {
       BookController.prototype.bulkSetMetadata,
       BookController.prototype.bulkUpdateTags,
       BookController.prototype.bulkSetMetadataLock,
+      BookController.prototype.bulkEditMetadata,
     ];
 
     for (const method of bulkMethods) {
@@ -880,5 +985,66 @@ describe('BookController', () => {
     await controller.downloadFile(1, makeUser(), reply);
 
     expect(headers['Content-Disposition']).toBe(`attachment; filename="ok-__-_.epub"; filename*=UTF-8''ok-%F0%9F%98%80-.epub`);
+  });
+
+  describe('bulkEditMetadata', () => {
+    it('resolves selection and delegates to service', async () => {
+      const { controller, bookService } = makeController();
+      const user = makeUser();
+      const fields = { publisher: { value: 'Penguin' } };
+      const expectedResult = {
+        updatedBooks: 2,
+        fields: { publisher: { updated: 2, skippedLocked: 0 } },
+      };
+      bookService.resolveSelectionToIds.mockResolvedValue([7, 9]);
+      bookService.bulkEditMetadata.mockResolvedValue(expectedResult);
+
+      const result = await controller.bulkEditMetadata({ bookIds: [7, 9], fields } as never, user);
+
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith({ bookIds: [7, 9], fields }, user);
+      expect(bookService.bulkEditMetadata).toHaveBeenCalledWith([7, 9], fields, user);
+      expect(result).toEqual(expectedResult);
+    });
+
+    it('has the correct permission and audit decorators', () => {
+      const permission = Reflect.getMetadata('permission', BookController.prototype.bulkEditMetadata);
+      expect(permission).toBe(Permission.LibraryEditMetadata);
+
+      const forbidden = Reflect.getMetadata(FORBIDDEN_PERMISSION_KEY, BookController.prototype.bulkEditMetadata);
+      expect(forbidden).toEqual({
+        permission: Permission.DemoRestricted,
+        message: 'Demo-restricted account cannot perform bulk edits',
+      });
+
+      const audit = Reflect.getMetadata(AUDITABLE_KEY, BookController.prototype.bulkEditMetadata);
+      expect(audit).toBeDefined();
+      expect(audit.action).toBe('book.bulk.edit_metadata');
+    });
+  });
+
+  describe('writeAndRename', () => {
+    it('calls bookService.writeAndRename with user and book id', async () => {
+      const { controller, bookService } = makeController();
+      const user = { ...makeUser(), id: 5 };
+      const expected = {
+        write: { status: 'success', fieldsWritten: ['title'], durationMs: 10 },
+        rename: { status: 'skipped', durationMs: 0, reason: 'path unchanged' },
+        libraryAutoWriteEnabled: false,
+        libraryAutoRenameEnabled: false,
+      };
+      bookService.writeAndRename.mockResolvedValue(expected);
+
+      const result = await controller.writeAndRename(42, user);
+
+      expect(bookService.writeAndRename).toHaveBeenCalledWith(42, user);
+      expect(result).toEqual(expected);
+    });
+
+    it('propagates NotFoundException from bookService.writeAndRename', async () => {
+      const { controller, bookService } = makeController();
+      bookService.writeAndRename.mockRejectedValue(new NotFoundException('Book 999 not found'));
+
+      await expect(controller.writeAndRename(999, makeUser())).rejects.toThrow(NotFoundException);
+    });
   });
 });

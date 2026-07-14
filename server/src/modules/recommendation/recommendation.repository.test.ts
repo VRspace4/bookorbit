@@ -1,7 +1,7 @@
 import { RecommendationRepository } from './recommendation.repository';
 
 type SelectStep = {
-  terminal: 'where' | 'limit';
+  terminal: 'where' | 'limit' | 'groupBy';
   result: unknown;
 };
 
@@ -26,7 +26,10 @@ function makeDb(steps: SelectStep[]) {
     chain.innerJoin.mockReturnValue(chain);
     chain.leftJoin.mockReturnValue(chain);
     chain.orderBy.mockReturnValue(chain);
-    chain.groupBy.mockReturnValue(chain);
+    chain.groupBy.mockImplementation(() => {
+      if (step.terminal === 'groupBy') return Promise.resolve(step.result);
+      return chain;
+    });
     chain.where.mockImplementation(() => {
       if (step.terminal === 'where') return Promise.resolve(step.result);
       return chain;
@@ -57,7 +60,7 @@ describe('RecommendationRepository', () => {
 
   it('combines metadata, authors, genres, and tags for target book data', async () => {
     const { db, select } = makeDb([
-      { terminal: 'limit', result: [{ embedding: [0.1, 0.2], seriesName: 'Saga', rating: 4.5 }] },
+      { terminal: 'limit', result: [{ embedding: [0.1, 0.2], seriesId: 42, seriesName: 'Saga', rating: 4.5 }] },
       {
         terminal: 'where',
         result: [
@@ -81,6 +84,7 @@ describe('RecommendationRepository', () => {
     expect(select).toHaveBeenCalledTimes(4);
     expect(result).toEqual({
       embedding: [0.1, 0.2],
+      seriesId: 42,
       seriesName: 'Saga',
       rating: 4.5,
       authorNames: ['Author A', 'Author B'],
@@ -110,7 +114,7 @@ describe('RecommendationRepository', () => {
   });
 
   it('queries ANN candidates with expected query shape when input is valid', async () => {
-    const rows = [{ bookId: 11, cosineSim: 0.77, seriesName: null, rating: 3.8 }];
+    const rows = [{ bookId: 11, cosineSim: 0.77, seriesId: null, seriesName: null, rating: 3.8 }];
     const { db, select, chains } = makeDb([{ terminal: 'limit', result: rows }]);
     const repo = new RecommendationRepository(db);
 
@@ -181,56 +185,56 @@ describe('RecommendationRepository', () => {
     ]);
   });
 
-  it('returns null for getSeriesName when no metadata exists', async () => {
+  it('returns null for getSeriesIdentity when no metadata exists', async () => {
     const { db, select } = makeDb([{ terminal: 'limit', result: [] }]);
     const repo = new RecommendationRepository(db);
 
-    const result = await repo.getSeriesName(100);
+    const result = await repo.getSeriesIdentity(100);
 
     expect(result).toBeNull();
     expect(select).toHaveBeenCalledTimes(1);
   });
 
-  it('returns trimmed series name for getSeriesName', async () => {
-    const { db } = makeDb([{ terminal: 'limit', result: [{ seriesName: '  Dune Saga  ' }] }]);
+  it('returns id and trimmed name for getSeriesIdentity', async () => {
+    const { db } = makeDb([{ terminal: 'limit', result: [{ seriesId: 88, seriesName: '  Dune Saga  ' }] }]);
     const repo = new RecommendationRepository(db);
 
-    const result = await repo.getSeriesName(7);
+    const result = await repo.getSeriesIdentity(7);
 
-    expect(result).toBe('Dune Saga');
+    expect(result).toEqual({ id: 88, name: 'Dune Saga' });
   });
 
-  it('returns null for getSeriesName when series name is empty or whitespace', async () => {
-    const { db } = makeDb([{ terminal: 'limit', result: [{ seriesName: '   ' }] }]);
+  it('returns identity with null name when series name is empty or whitespace', async () => {
+    const { db } = makeDb([{ terminal: 'limit', result: [{ seriesId: 88, seriesName: '   ' }] }]);
     const repo = new RecommendationRepository(db);
 
-    expect(await repo.getSeriesName(7)).toBeNull();
+    expect(await repo.getSeriesIdentity(7)).toEqual({ id: 88, name: null });
   });
 
   it('returns empty series books when libraryIds is empty', async () => {
     const { db, select } = makeDb([]);
     const repo = new RecommendationRepository(db);
 
-    const result = await repo.findSeriesBooks('Test', []);
+    const result = await repo.findSeriesBooks(88, []);
 
     expect(result).toEqual([]);
     expect(select).not.toHaveBeenCalled();
   });
 
-  it('returns empty series books when series name is blank', async () => {
-    const { db, select } = makeDb([]);
+  it('returns null series identity when the metadata row has no series id', async () => {
+    const { db, select } = makeDb([{ terminal: 'limit', result: [{ seriesId: null, seriesName: 'Dune' }] }]);
     const repo = new RecommendationRepository(db);
 
-    const result = await repo.findSeriesBooks('  ', [1]);
+    const result = await repo.getSeriesIdentity(7);
 
-    expect(result).toEqual([]);
-    expect(select).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+    expect(select).toHaveBeenCalledTimes(1);
   });
 
   it('queries series books with expected shape when input is valid', async () => {
     const rows = [
-      { bookId: 1, title: 'Book 1', seriesIndex: 1, coverSource: 'extracted' },
-      { bookId: 2, title: 'Book 2', seriesIndex: 2, coverSource: null },
+      { bookId: 1, title: 'Book 1', seriesIndex: 1, coverSource: 'extracted', primaryFormat: 'm4b' },
+      { bookId: 2, title: 'Book 2', seriesIndex: 2, coverSource: null, primaryFormat: 'epub' },
     ];
     const authorRows = [{ bookId: 1, name: 'Frank Herbert' }];
     const { db, select, chains } = makeDb([
@@ -239,31 +243,42 @@ describe('RecommendationRepository', () => {
     ]);
     const repo = new RecommendationRepository(db);
 
-    const result = await repo.findSeriesBooks('Dune', [3, 4]);
+    const result = await repo.findSeriesBooks(88, [3, 4]);
 
     expect(result).toEqual([
-      { bookId: 1, title: 'Book 1', seriesIndex: 1, coverSource: 'extracted', authorNames: ['Frank Herbert'] },
-      { bookId: 2, title: 'Book 2', seriesIndex: 2, coverSource: null, authorNames: [] },
+      {
+        bookId: 1,
+        title: 'Book 1',
+        updatedAt: null,
+        seriesIndex: 1,
+        coverSource: 'extracted',
+        authorNames: ['Frank Herbert'],
+        isAudiobook: true,
+        isComic: false,
+      },
+      { bookId: 2, title: 'Book 2', updatedAt: null, seriesIndex: 2, coverSource: null, authorNames: [], isAudiobook: false, isComic: false },
     ]);
     expect(select).toHaveBeenCalledTimes(2);
     expect(chains[0].from).toHaveBeenCalledTimes(1);
-    expect(chains[0].leftJoin).toHaveBeenCalledTimes(1);
+    expect(chains[0].leftJoin).toHaveBeenCalledTimes(2);
     expect(chains[0].where).toHaveBeenCalledTimes(1);
     expect(chains[0].orderBy).toHaveBeenCalledTimes(1);
     expect(chains[0].limit).toHaveBeenCalledWith(50);
   });
 
   it('returns series books with empty authorNames when no authors exist', async () => {
-    const rows = [{ bookId: 5, title: 'Solo Book', seriesIndex: null, coverSource: null }];
+    const rows = [{ bookId: 5, title: 'Solo Book', seriesIndex: null, coverSource: null, primaryFormat: null }];
     const { db } = makeDb([
       { terminal: 'limit', result: rows },
       { terminal: 'where', result: [] },
     ]);
     const repo = new RecommendationRepository(db);
 
-    const result = await repo.findSeriesBooks('Lone Series', [1]);
+    const result = await repo.findSeriesBooks(88, [1]);
 
-    expect(result).toEqual([{ bookId: 5, title: 'Solo Book', seriesIndex: null, coverSource: null, authorNames: [] }]);
+    expect(result).toEqual([
+      { bookId: 5, title: 'Solo Book', updatedAt: null, seriesIndex: null, coverSource: null, authorNames: [], isAudiobook: false, isComic: false },
+    ]);
   });
 
   it('returns empty author books when libraryIds is empty', async () => {
@@ -277,7 +292,7 @@ describe('RecommendationRepository', () => {
   });
 
   it('queries author books with expected shape when input is valid', async () => {
-    const rows = [{ bookId: 10, title: 'Other Book', sharedAuthors: 2, coverSource: 'extracted' }];
+    const rows = [{ bookId: 10, title: 'Other Book', sharedAuthors: 2, coverSource: 'extracted', primaryFormat: 'MP3' }];
     const authorRows = [{ bookId: 10, name: 'Terry Pratchett' }];
     const { db, select, chains } = makeDb([
       { terminal: 'where', result: undefined },
@@ -288,15 +303,25 @@ describe('RecommendationRepository', () => {
 
     const result = await repo.findAuthorBooks(1, [3]);
 
-    expect(result).toEqual([{ bookId: 10, title: 'Other Book', coverSource: 'extracted', authorNames: ['Terry Pratchett'] }]);
+    expect(result).toEqual([
+      {
+        bookId: 10,
+        title: 'Other Book',
+        updatedAt: null,
+        coverSource: 'extracted',
+        authorNames: ['Terry Pratchett'],
+        isAudiobook: true,
+        isComic: false,
+      },
+    ]);
     expect(select).toHaveBeenCalledTimes(3);
     expect(chains[1].innerJoin).toHaveBeenCalledTimes(1);
-    expect(chains[1].leftJoin).toHaveBeenCalledTimes(1);
+    expect(chains[1].leftJoin).toHaveBeenCalledTimes(2);
     expect(chains[1].limit).toHaveBeenCalledWith(25);
   });
 
   it('returns author books with empty authorNames when no authors exist', async () => {
-    const rows = [{ bookId: 7, title: 'Anonymous Work', sharedAuthors: 1, coverSource: null }];
+    const rows = [{ bookId: 7, title: 'Anonymous Work', sharedAuthors: 1, coverSource: null, primaryFormat: null }];
     const { db } = makeDb([
       { terminal: 'where', result: undefined },
       { terminal: 'limit', result: rows },
@@ -306,6 +331,32 @@ describe('RecommendationRepository', () => {
 
     const result = await repo.findAuthorBooks(1, [1]);
 
-    expect(result).toEqual([{ bookId: 7, title: 'Anonymous Work', coverSource: null, authorNames: [] }]);
+    expect(result).toEqual([
+      { bookId: 7, title: 'Anonymous Work', updatedAt: null, coverSource: null, authorNames: [], isAudiobook: false, isComic: false },
+    ]);
+  });
+
+  it('flags comic primary formats as isComic for series books', async () => {
+    const rows = [{ bookId: 9, title: 'Comic Issue', seriesIndex: 3, coverSource: 'extracted', primaryFormat: 'CBZ' }];
+    const { db } = makeDb([
+      { terminal: 'limit', result: rows },
+      { terminal: 'where', result: [] },
+    ]);
+    const repo = new RecommendationRepository(db);
+
+    const result = await repo.findSeriesBooks(88, [1]);
+
+    expect(result).toEqual([
+      {
+        bookId: 9,
+        title: 'Comic Issue',
+        updatedAt: null,
+        seriesIndex: 3,
+        coverSource: 'extracted',
+        authorNames: [],
+        isAudiobook: false,
+        isComic: true,
+      },
+    ]);
   });
 });

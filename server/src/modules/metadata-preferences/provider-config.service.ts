@@ -1,8 +1,9 @@
 import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
 import { eq, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { MetadataProviderKey, ProviderConfigurations, ProviderStatus } from '@bookorbit/types';
+import { MetadataProviderKey, ProviderConfigurations, ProviderConnectionTestResult, ProviderStatus } from '@bookorbit/types';
 
+import { stripBearerPrefix, toBearerAuthorization } from '../../common/utils/bearer-token.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
@@ -13,6 +14,23 @@ type ProviderConfigPatch = {
 };
 
 const PROVIDER_CONFIG_KEY = 'metadata_provider_config';
+const PROVIDER_TEST_EVENT = 'metadata_provider_config.test_provider';
+const HARDCOVER_GRAPHQL_URL = 'https://api.hardcover.app/v1/graphql';
+const HARDCOVER_TEST_QUERY = 'query { me { username } }';
+const AMAZON_TEST_QUERY = 'books';
+const PROVIDER_TEST_TIMEOUT_MS = 10_000;
+const AMAZON_CAPTCHA_PATTERNS = [/validateCaptcha/i, /captcha/i, /not a robot/i];
+const AMAZON_TEST_HEADERS: HeadersInit = {
+  'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'accept-language': 'en-US,en;q=0.9',
+  'sec-ch-ua': '"Google Chrome";v="137", "Chromium";v="137", "Not_A Brand";v="24"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"macOS"',
+  'sec-fetch-dest': 'document',
+  'sec-fetch-mode': 'navigate',
+  'sec-fetch-site': 'none',
+};
 
 const DEFAULT_CONFIG: ProviderConfigurations = {
   google: { enabled: false, apiKey: '' },
@@ -23,7 +41,12 @@ const DEFAULT_CONFIG: ProviderConfigurations = {
   itunes: { enabled: true, coverResolution: 'high' },
   audible: { enabled: false, domain: 'com' },
   audnexus: { enabled: false },
+  librofm: { enabled: false },
   comicvine: { enabled: false, apiKey: '' },
+  ranobedb: { enabled: false },
+  kobo: { enabled: false, country: 'us', language: 'en' },
+  lubimyczytac: { enabled: false },
+  aladin: { enabled: false, ttbKey: '' },
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -96,6 +119,23 @@ function mergeComicVineConfig(base: ProviderConfigurations['comicvine'], value: 
   };
 }
 
+function mergeKoboConfig(base: ProviderConfigurations['kobo'], value: unknown): ProviderConfigurations['kobo'] {
+  const next = asObject(value);
+  return {
+    enabled: asBoolean(next.enabled, base.enabled),
+    country: asString(next.country, base.country),
+    language: asString(next.language, base.language),
+  };
+}
+
+function mergeAladinConfig(base: ProviderConfigurations['aladin'], value: unknown): ProviderConfigurations['aladin'] {
+  const next = asObject(value);
+  return {
+    enabled: asBoolean(next.enabled, base.enabled),
+    ttbKey: asString(next.ttbKey, base.ttbKey),
+  };
+}
+
 const PROVIDER_LABELS: Record<MetadataProviderKey, string> = {
   [MetadataProviderKey.GOOGLE]: 'Google Books',
   [MetadataProviderKey.AMAZON]: 'Amazon',
@@ -105,8 +145,42 @@ const PROVIDER_LABELS: Record<MetadataProviderKey, string> = {
   [MetadataProviderKey.ITUNES]: 'iTunes',
   [MetadataProviderKey.AUDIBLE]: 'Audible',
   [MetadataProviderKey.AUDNEXUS]: 'AudNexus',
+  [MetadataProviderKey.LIBROFM]: 'Libro.fm',
   [MetadataProviderKey.COMICVINE]: 'ComicVine',
+  [MetadataProviderKey.RANOBEDB]: 'RanobeDB',
+  [MetadataProviderKey.KOBO]: 'Kobo',
+  [MetadataProviderKey.LUBIMYCZYTAC]: 'LubimyCzytac',
+  [MetadataProviderKey.ALADIN]: 'Aladin',
 };
+
+type ProviderEnableRule = {
+  canEnable: (config: ProviderConfigurations) => boolean;
+  blockedMessage: string;
+  setupHint: string;
+};
+
+const PROVIDER_ENABLE_RULES = {
+  google: {
+    canEnable: (config) => !!config.google.apiKey.trim(),
+    blockedMessage: 'Google Books requires an API key before it can be enabled',
+    setupHint: 'API key required',
+  },
+  hardcover: {
+    canEnable: (config) => !!config.hardcover.apiKey.trim(),
+    blockedMessage: 'Hardcover requires an API key before it can be enabled',
+    setupHint: 'API key required. Run Test and save before enabling.',
+  },
+  comicvine: {
+    canEnable: (config) => !!config.comicvine.apiKey.trim(),
+    blockedMessage: 'ComicVine requires an API key before it can be enabled',
+    setupHint: 'API key required',
+  },
+  aladin: {
+    canEnable: (config) => !!config.aladin.ttbKey.trim(),
+    blockedMessage: 'Aladin requires a TTB Key before it can be enabled',
+    setupHint: 'TTB Key required',
+  },
+} satisfies Partial<Record<keyof ProviderConfigurations, ProviderEnableRule>>;
 
 @Injectable()
 export class ProviderConfigService {
@@ -124,7 +198,12 @@ export class ProviderConfigService {
       itunes: { ...DEFAULT_CONFIG.itunes },
       audible: { ...DEFAULT_CONFIG.audible },
       audnexus: { ...DEFAULT_CONFIG.audnexus },
+      librofm: { ...DEFAULT_CONFIG.librofm },
       comicvine: { ...DEFAULT_CONFIG.comicvine },
+      ranobedb: { ...DEFAULT_CONFIG.ranobedb },
+      kobo: { ...DEFAULT_CONFIG.kobo },
+      lubimyczytac: { ...DEFAULT_CONFIG.lubimyczytac },
+      aladin: { ...DEFAULT_CONFIG.aladin },
     };
   }
 
@@ -139,22 +218,115 @@ export class ProviderConfigService {
       itunes: mergeITunesConfig(base.itunes, next.itunes),
       audible: mergeAudibleConfig(base.audible, next.audible),
       audnexus: mergeSimpleConfig(base.audnexus, next.audnexus),
+      librofm: mergeSimpleConfig(base.librofm, next.librofm),
       comicvine: mergeComicVineConfig(base.comicvine, next.comicvine),
+      ranobedb: mergeSimpleConfig(base.ranobedb, next.ranobedb),
+      kobo: mergeKoboConfig(base.kobo, next.kobo),
+      lubimyczytac: mergeSimpleConfig(base.lubimyczytac, next.lubimyczytac),
+      aladin: mergeAladinConfig(base.aladin, next.aladin),
     };
+  }
+
+  private getEnableRule(key: keyof ProviderConfigurations): ProviderEnableRule | null {
+    return PROVIDER_ENABLE_RULES[key] ?? null;
+  }
+
+  private getEnableBlockedMessage(config: ProviderConfigurations, key: keyof ProviderConfigurations): string | null {
+    const rule = this.getEnableRule(key);
+    if (!rule) return null;
+    return rule.canEnable(config) ? null : rule.blockedMessage;
   }
 
   private validateConfig(config: ProviderConfigurations): void {
-    if (config.google.enabled && !config.google.apiKey.trim()) {
-      throw new BadRequestException('Google Books requires an API key before it can be enabled');
+    for (const key of Object.keys(PROVIDER_ENABLE_RULES) as Array<keyof ProviderConfigurations>) {
+      if (!config[key].enabled) continue;
+      const blockedMessage = this.getEnableBlockedMessage(config, key);
+      if (!blockedMessage) continue;
+      throw new BadRequestException(blockedMessage);
     }
   }
 
+  private shouldValidateHardcoverConnection(current: ProviderConfigurations, next: ProviderConfigurations): boolean {
+    if (!next.hardcover.enabled) return false;
+    return !current.hardcover.enabled || current.hardcover.apiKey !== next.hardcover.apiKey;
+  }
+
+  private async validateExternalEnableChecks(current: ProviderConfigurations, next: ProviderConfigurations): Promise<void> {
+    if (!this.shouldValidateHardcoverConnection(current, next)) return;
+    let result: ProviderConnectionTestResult;
+    try {
+      result = await this.testHardcoverProvider(next.hardcover.apiKey);
+    } catch (error) {
+      const message =
+        error instanceof Error && error.name === 'TimeoutError'
+          ? 'Hardcover validation timed out. Please try again.'
+          : 'Could not reach Hardcover to validate the token.';
+      throw new BadRequestException(message);
+    }
+    if (result.status === 'success' && result.ok) return;
+    throw new BadRequestException(result.message);
+  }
+
   private normalizeConfig(config: ProviderConfigurations): ProviderConfigurations {
-    if (!config.google.enabled || config.google.apiKey.trim()) return config;
-    return {
+    const googleApiKey = config.google.apiKey.trim();
+    const normalized: ProviderConfigurations = {
       ...config,
-      google: { ...config.google, enabled: false },
+      google: { ...config.google, apiKey: googleApiKey },
+      amazon: {
+        ...config.amazon,
+        domain: this.normalizeDomain(config.amazon.domain, DEFAULT_CONFIG.amazon.domain),
+        cookie: this.normalizeAmazonCookie(config.amazon.cookie),
+      },
+      hardcover: {
+        ...config.hardcover,
+        apiKey: stripBearerPrefix(config.hardcover.apiKey),
+      },
+      audible: {
+        ...config.audible,
+        domain: this.normalizeDomain(config.audible.domain, DEFAULT_CONFIG.audible.domain),
+      },
+      comicvine: {
+        ...config.comicvine,
+        apiKey: config.comicvine.apiKey.trim(),
+      },
+      kobo: {
+        ...config.kobo,
+        country: this.normalizeKoboPathSegment(config.kobo.country, DEFAULT_CONFIG.kobo.country),
+        language: this.normalizeKoboPathSegment(config.kobo.language, DEFAULT_CONFIG.kobo.language),
+      },
+      aladin: {
+        ...config.aladin,
+        ttbKey: config.aladin.ttbKey.trim(),
+      },
     };
+
+    if (!normalized.google.enabled || normalized.google.apiKey) return normalized;
+    return {
+      ...normalized,
+      google: { ...normalized.google, enabled: false },
+    };
+  }
+
+  private normalizeDomain(value: string, fallback: string): string {
+    const normalized = value.trim().toLowerCase();
+    return normalized || fallback;
+  }
+
+  private normalizeAmazonCookie(cookie: string): string {
+    const normalized = cookie.trim();
+    if (!normalized) return '';
+    if (normalized.toLowerCase().startsWith('cookie:')) {
+      return normalized.slice('cookie:'.length).trim();
+    }
+    return normalized;
+  }
+
+  private normalizeKoboPathSegment(value: string, fallback: string): string {
+    const normalized = value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '');
+    return normalized || fallback;
   }
 
   private parsePersistedConfig(
@@ -197,8 +369,9 @@ export class ProviderConfigService {
         where: eq(schema.appSettings.key, PROVIDER_CONFIG_KEY),
       });
       const current = row ? this.normalizeConfig(this.parsePersistedConfig(row.value, defaults, 'update', startedAt)) : defaults;
-      const next = this.mergeConfig(current, patch);
+      const next = this.normalizeConfig(this.mergeConfig(current, patch));
       this.validateConfig(next);
+      await this.validateExternalEnableChecks(current, next);
       const value = JSON.stringify(next);
       await tx
         .insert(schema.appSettings)
@@ -215,8 +388,8 @@ export class ProviderConfigService {
         key: MetadataProviderKey.GOOGLE,
         label: PROVIDER_LABELS[MetadataProviderKey.GOOGLE],
         enabled: cfg.google.enabled,
-        configured: !!cfg.google.apiKey.trim(),
-        hint: !cfg.google.apiKey.trim() ? 'API key required' : undefined,
+        configured: !!this.getEnableRule('google')?.canEnable(cfg),
+        hint: !this.getEnableRule('google')?.canEnable(cfg) ? this.getEnableRule('google')?.setupHint : undefined,
       },
       {
         key: MetadataProviderKey.AMAZON,
@@ -235,7 +408,8 @@ export class ProviderConfigService {
         key: MetadataProviderKey.HARDCOVER,
         label: PROVIDER_LABELS[MetadataProviderKey.HARDCOVER],
         enabled: cfg.hardcover.enabled,
-        configured: !!cfg.hardcover.apiKey,
+        configured: !!this.getEnableRule('hardcover')?.canEnable(cfg),
+        hint: !this.getEnableRule('hardcover')?.canEnable(cfg) ? this.getEnableRule('hardcover')?.setupHint : undefined,
       },
       {
         key: MetadataProviderKey.OPEN_LIBRARY,
@@ -262,11 +436,243 @@ export class ProviderConfigService {
         configured: true,
       },
       {
+        key: MetadataProviderKey.LIBROFM,
+        label: PROVIDER_LABELS[MetadataProviderKey.LIBROFM],
+        enabled: cfg.librofm.enabled,
+        configured: true,
+        hint: 'Uses an undocumented Libro.fm catalog endpoint',
+      },
+      {
         key: MetadataProviderKey.COMICVINE,
         label: PROVIDER_LABELS[MetadataProviderKey.COMICVINE],
         enabled: cfg.comicvine.enabled,
-        configured: !!cfg.comicvine.apiKey,
+        configured: !!this.getEnableRule('comicvine')?.canEnable(cfg),
+        hint: !this.getEnableRule('comicvine')?.canEnable(cfg) ? this.getEnableRule('comicvine')?.setupHint : undefined,
+      },
+      {
+        key: MetadataProviderKey.RANOBEDB,
+        label: PROVIDER_LABELS[MetadataProviderKey.RANOBEDB],
+        enabled: cfg.ranobedb.enabled,
+        configured: true,
+      },
+      {
+        key: MetadataProviderKey.KOBO,
+        label: PROVIDER_LABELS[MetadataProviderKey.KOBO],
+        enabled: cfg.kobo.enabled,
+        configured: true,
+        hint: 'Web scraping may be blocked by Kobo bot protection',
+      },
+      {
+        key: MetadataProviderKey.LUBIMYCZYTAC,
+        label: PROVIDER_LABELS[MetadataProviderKey.LUBIMYCZYTAC],
+        enabled: cfg.lubimyczytac.enabled,
+        configured: true,
+        hint: 'Polish book catalog (lubimyczytac.pl). Scrapes public pages.',
+      },
+      {
+        key: MetadataProviderKey.ALADIN,
+        label: PROVIDER_LABELS[MetadataProviderKey.ALADIN],
+        enabled: cfg.aladin.enabled,
+        configured: !!this.getEnableRule('aladin')?.canEnable(cfg),
+        hint: !this.getEnableRule('aladin')?.canEnable(cfg) ? this.getEnableRule('aladin')?.setupHint : undefined,
       },
     ];
+  }
+
+  async testProvider(key: MetadataProviderKey, patch?: ProviderConfigPatch): Promise<ProviderConnectionTestResult> {
+    const startedAt = Date.now();
+    this.logger.log(`[${PROVIDER_TEST_EVENT}] [start] provider=${key} hasPatch=${patch !== undefined} - provider connection test started`);
+    try {
+      const current = await this.getConfig();
+      const effective = patch ? this.normalizeConfig(this.mergeConfig(current, patch)) : current;
+      const result = await this.runProviderTest(key, effective);
+      this.logger.log(
+        `[${PROVIDER_TEST_EVENT}] [end] provider=${key} durationMs=${Date.now() - startedAt} ok=${result.ok} status=${result.status} - provider connection test completed`,
+      );
+      return result;
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const errorClass = error instanceof Error ? error.name : 'UnknownError';
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const message = sanitizeLogValue(rawMessage);
+      this.logger.warn(
+        `[${PROVIDER_TEST_EVENT}] [fail] provider=${key} durationMs=${durationMs} errorClass=${errorClass} error="${message}" - provider connection test failed`,
+      );
+      if (error instanceof BadRequestException) throw error;
+      throw new BadRequestException('Failed to test provider connection');
+    }
+  }
+
+  private async runProviderTest(key: MetadataProviderKey, config: ProviderConfigurations): Promise<ProviderConnectionTestResult> {
+    switch (key) {
+      case MetadataProviderKey.AMAZON:
+        return this.testAmazonProvider(config.amazon);
+      case MetadataProviderKey.HARDCOVER:
+        return this.testHardcoverProvider(config.hardcover.apiKey);
+      case MetadataProviderKey.ALADIN:
+        return this.testAladinProvider(config.aladin.ttbKey);
+      default:
+        throw new BadRequestException(`Provider test not supported for ${key}`);
+    }
+  }
+
+  private async testAmazonProvider(config: ProviderConfigurations['amazon']): Promise<ProviderConnectionTestResult> {
+    const domain = this.normalizeDomain(config.domain, DEFAULT_CONFIG.amazon.domain);
+    const cookie = this.normalizeAmazonCookie(config.cookie);
+    const url = `https://www.${domain}/s?k=${encodeURIComponent(AMAZON_TEST_QUERY)}&i=stripbooks`;
+    const headers: HeadersInit = cookie ? { ...AMAZON_TEST_HEADERS, cookie } : AMAZON_TEST_HEADERS;
+    const response = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(PROVIDER_TEST_TIMEOUT_MS) });
+
+    if (!response.ok) {
+      return {
+        key: MetadataProviderKey.AMAZON,
+        ok: false,
+        status: 'fail',
+        message: `Amazon request failed with HTTP ${response.status}.`,
+      };
+    }
+
+    const body = await response.text();
+    const captchaDetected = AMAZON_CAPTCHA_PATTERNS.some((pattern) => pattern.test(body));
+    if (captchaDetected) {
+      return {
+        key: MetadataProviderKey.AMAZON,
+        ok: false,
+        status: 'warning',
+        message: 'Amazon responded with a bot-check page. Use a fresh browser session cookie.',
+      };
+    }
+
+    if (!cookie) {
+      return {
+        key: MetadataProviderKey.AMAZON,
+        ok: true,
+        status: 'warning',
+        message: 'Amazon is reachable. Add a session cookie for better reliability.',
+      };
+    }
+
+    return {
+      key: MetadataProviderKey.AMAZON,
+      ok: true,
+      status: 'success',
+      message: 'Amazon is reachable and accepted the request.',
+    };
+  }
+
+  private async testHardcoverProvider(apiKey: string): Promise<ProviderConnectionTestResult> {
+    const token = stripBearerPrefix(apiKey);
+    if (!token) {
+      return {
+        key: MetadataProviderKey.HARDCOVER,
+        ok: false,
+        status: 'fail',
+        message: 'Hardcover API key is required.',
+      };
+    }
+
+    const response = await fetch(HARDCOVER_GRAPHQL_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: toBearerAuthorization(token),
+      },
+      body: JSON.stringify({ query: HARDCOVER_TEST_QUERY }),
+      signal: AbortSignal.timeout(PROVIDER_TEST_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      return {
+        key: MetadataProviderKey.HARDCOVER,
+        ok: false,
+        status: 'fail',
+        message: `Hardcover request failed with HTTP ${response.status}.`,
+      };
+    }
+
+    const body = (await response.json()) as {
+      data?: { me?: Array<{ username?: string | null }> };
+      errors?: Array<{ message?: string }>;
+    };
+
+    if (body.errors?.length) {
+      const firstError = body.errors[0]?.message;
+      return {
+        key: MetadataProviderKey.HARDCOVER,
+        ok: false,
+        status: 'fail',
+        message: firstError ? `Hardcover API error: ${firstError}` : 'Hardcover API returned an error.',
+      };
+    }
+
+    const username = body.data?.me?.[0]?.username?.trim();
+    if (!username) {
+      return {
+        key: MetadataProviderKey.HARDCOVER,
+        ok: false,
+        status: 'fail',
+        message: 'Hardcover token validation failed.',
+      };
+    }
+
+    return {
+      key: MetadataProviderKey.HARDCOVER,
+      ok: true,
+      status: 'success',
+      message: `Connected as ${username}.`,
+    };
+  }
+
+  private async testAladinProvider(ttbKey: string): Promise<ProviderConnectionTestResult> {
+    const key = ttbKey.trim();
+    if (!key) {
+      return {
+        key: MetadataProviderKey.ALADIN,
+        ok: false,
+        status: 'fail',
+        message: 'Aladin TTB Key is required.',
+      };
+    }
+
+    const testUrl = `https://www.aladin.co.kr/ttb/api/ItemSearch.aspx?TTBKey=${encodeURIComponent(key)}&Query=%ED%8C%8C%EC%9D%B4%EC%8D%AC&QueryType=Keyword&MaxResults=1&start=1&SearchTarget=Book&output=JS&Version=20131101`;
+
+    try {
+      const response = await fetch(testUrl, { method: 'GET', signal: AbortSignal.timeout(PROVIDER_TEST_TIMEOUT_MS) });
+
+      if (!response.ok) {
+        return {
+          key: MetadataProviderKey.ALADIN,
+          ok: false,
+          status: 'fail',
+          message: `Aladin request failed with HTTP ${response.status}.`,
+        };
+      }
+
+      const body = (await response.json()) as { item?: unknown[]; errorCode?: number; errorMessage?: string };
+
+      if (body.errorCode) {
+        return {
+          key: MetadataProviderKey.ALADIN,
+          ok: false,
+          status: 'fail',
+          message: `Aladin API error: ${body.errorMessage ?? body.errorCode}`,
+        };
+      }
+
+      return {
+        key: MetadataProviderKey.ALADIN,
+        ok: true,
+        status: 'success',
+        message: 'Aladin API connection successful.',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        key: MetadataProviderKey.ALADIN,
+        ok: false,
+        status: 'fail',
+        message: `Aladin connection test failed: ${message}`,
+      };
+    }
   }
 }

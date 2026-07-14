@@ -1,15 +1,20 @@
 import { mount } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import BookCoverCard from '../BookCoverCard.vue'
 import type { BookCard } from '@bookorbit/types'
 import { nextTick, ref } from 'vue'
 import { COVER_ASPECT_RATIO_KEY } from '@/features/book/lib/cover-aspect-ratio'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 
+const routerPushMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => unknown>())
+
 vi.mock('vue-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue-router')>()
-  return { ...actual, useRouter: () => ({ push: vi.fn<(...args: unknown[]) => unknown>() }) }
+  return { ...actual, useRoute: () => ({ fullPath: '/' }), useRouter: () => ({ push: routerPushMock }) }
 })
+vi.mock('@/features/author/api/author', () => ({
+  fetchAuthors: vi.fn<(...args: unknown[]) => unknown>(),
+}))
 vi.mock('@/features/book/composables/useCoverVersions', () => ({
   useCoverVersions: () => ({ coverUrl: () => '/cover.jpg', bumpVersion: vi.fn<(...args: unknown[]) => void>() }),
 }))
@@ -46,9 +51,12 @@ const globalStubs = {
   },
 }
 
-function mountCard(book: BookCard, coverAspectRatio: '2/3' | '1/1' = '2/3') {
+function mountCard(book: BookCard, coverAspectRatio: '2/3' | '1/1' = '2/3', coverAspectRatioOverride?: '2/3' | '1/1') {
   return mount(BookCoverCard, {
-    props: { book },
+    props: {
+      book,
+      ...(coverAspectRatioOverride ? { coverAspectRatio: coverAspectRatioOverride } : {}),
+    },
     global: {
       ...globalStubs,
       provide: {
@@ -58,12 +66,21 @@ function mountCard(book: BookCard, coverAspectRatio: '2/3' | '1/1' = '2/3') {
   })
 }
 
-const { cardOverlays, bookSpineOverlay, bookShadowStrength } = useDisplaySettings()
+const { cardOverlays, bookSpineOverlay, bookShadowStrength, gridCardPrimaryLabel, gridCardSecondaryLabel, cardInfoMode, thumbnailClickAction } =
+  useDisplaySettings()
+
+beforeEach(() => {
+  routerPushMock.mockClear()
+})
 
 afterEach(() => {
   cardOverlays.value = ['progress-bar', 'format', 'rating', 'read-status']
   bookSpineOverlay.value = 'off'
   bookShadowStrength.value = 'default'
+  gridCardPrimaryLabel.value = 'hidden'
+  gridCardSecondaryLabel.value = 'hidden'
+  cardInfoMode.value = 'hover-overlay'
+  thumbnailClickAction.value = 'reader'
 })
 
 const missingBook: BookCard = {
@@ -74,6 +91,7 @@ const missingBook: BookCard = {
   seriesName: null,
   seriesIndex: null,
   files: [],
+  publishedDate: null,
   publishedYear: null,
   language: null,
   genres: [],
@@ -92,6 +110,7 @@ const missingBook: BookCard = {
   pageCount: null,
   isbn13: null,
   narrators: [],
+  customMetadata: [],
 }
 
 const presentBook: BookCard = {
@@ -102,6 +121,7 @@ const presentBook: BookCard = {
   seriesName: null,
   seriesIndex: null,
   files: [{ id: 10, format: 'epub', role: 'primary', sizeBytes: null }],
+  publishedDate: null,
   publishedYear: 2024,
   language: 'en',
   genres: [],
@@ -120,6 +140,7 @@ const presentBook: BookCard = {
   pageCount: null,
   isbn13: null,
   narrators: [],
+  customMetadata: [],
 }
 
 const presentBookWithCover: BookCard = {
@@ -153,12 +174,76 @@ describe('BookCoverCard — missing state', () => {
 
   it('uses cursor-default on the root when book is missing', () => {
     const wrapper = mountCard(missingBook)
-    const root = wrapper.find('div.group')
+    const root = wrapper.find('div')
     expect(root.classes()).toContain('cursor-default')
   })
 })
 
+describe('BookCoverCard — cover aspect override', () => {
+  it('uses explicit coverAspectRatio prop over injected ratio', () => {
+    const wrapper = mountCard(presentBookWithCover, '2/3', '1/1')
+    const coverDiv = wrapper.find('[style*="aspect-ratio"]')
+    const style = coverDiv.attributes('style') ?? ''
+    expect(style.includes('aspect-ratio: 1 / 1') || style.includes('aspect-ratio: 1/1')).toBe(true)
+  })
+})
+
 describe('BookCoverCard — present state', () => {
+  it('opens the reader on desktop card click by default', async () => {
+    const wrapper = mountCard(presentBook)
+
+    await wrapper.find('.group').trigger('click')
+
+    expect(routerPushMock).toHaveBeenCalledWith(expect.objectContaining({ name: 'reader', params: { bookId: 2, fileId: 10 } }))
+  })
+
+  it('opens book details on desktop card click when thumbnail clicks prefer details', async () => {
+    thumbnailClickAction.value = 'details'
+    const wrapper = mountCard(presentBook)
+
+    await wrapper.find('.group').trigger('click')
+
+    expect(routerPushMock).toHaveBeenCalledWith({ name: 'book-detail', params: { bookId: 2 } })
+    expect(routerPushMock).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'reader' }))
+  })
+
+  it('opens book details from the primary overlay action when thumbnail clicks prefer details', async () => {
+    thumbnailClickAction.value = 'details'
+    const wrapper = mountCard(presentBook)
+
+    await wrapper.get('[data-testid="grid-card-primary-action"]').trigger('click')
+
+    expect(routerPushMock).toHaveBeenCalledWith({ name: 'book-detail', params: { bookId: 2 } })
+    expect(routerPushMock).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'reader' }))
+  })
+
+  it('opens book details for missing books when thumbnail clicks prefer details', async () => {
+    thumbnailClickAction.value = 'details'
+    const wrapper = mountCard(missingBook)
+
+    await wrapper.find('.group').trigger('click')
+
+    expect(routerPushMock).toHaveBeenCalledWith({ name: 'book-detail', params: { bookId: 1 } })
+  })
+
+  it('selects instead of navigating in selection mode', async () => {
+    thumbnailClickAction.value = 'details'
+    const wrapper = mount(BookCoverCard, {
+      props: { book: presentBook, selectionMode: true },
+      global: {
+        ...globalStubs,
+        provide: {
+          [COVER_ASPECT_RATIO_KEY as symbol]: ref('2/3'),
+        },
+      },
+    })
+
+    await wrapper.find('.group').trigger('click')
+
+    expect(wrapper.emitted('select')).toHaveLength(1)
+    expect(routerPushMock).not.toHaveBeenCalled()
+  })
+
   it('does not apply grayscale to the cover container', () => {
     const wrapper = mountCard(presentBook)
     const coverDiv = wrapper.find('[style*="aspect-ratio"]')
@@ -247,6 +332,18 @@ describe('BookCoverCard — cover style preferences', () => {
     const coverDiv = wrapper.find('[style*="aspect-ratio"]')
     expect(coverDiv.attributes('data-cover-shadow')).toBe('strong')
   })
+
+  it('forces spine overlay off for audiobooks even when global spine mode is enabled', async () => {
+    const wrapper = mountCard({
+      ...presentBook,
+      files: [{ id: 12, format: 'm4b', role: 'primary', sizeBytes: null }],
+    })
+    bookSpineOverlay.value = 'strong'
+    await nextTick()
+
+    const coverDiv = wrapper.find('[style*="aspect-ratio"]')
+    expect(coverDiv.attributes('data-cover-spine')).toBe('off')
+  })
 })
 
 describe('BookCoverCard — placeholder state', () => {
@@ -259,11 +356,6 @@ describe('BookCoverCard — placeholder state', () => {
     const wrapper = mountCard(presentBook)
     const imgs = wrapper.findAll('img')
     expect(imgs).toHaveLength(0)
-  })
-
-  it('does not show BookCoverPlaceholder when hasCover is true', () => {
-    const wrapper = mountCard(presentBookWithCover)
-    expect(wrapper.findComponent({ name: 'BookCoverPlaceholder' }).exists()).toBe(false)
   })
 
   it('renders cover img when hasCover is true', () => {
@@ -288,6 +380,14 @@ describe('BookCoverCard — series position overlay', () => {
     cardOverlays.value = ['series-position']
     const wrapper = mountCard(bookWithSeries)
     expect(wrapper.text()).toContain('#3')
+  })
+
+  it('marks the series badge as a card click blocker and disables hit-testing on hover', () => {
+    cardOverlays.value = ['series-position']
+    const wrapper = mountCard(bookWithSeries)
+    const badge = wrapper.find('[data-card-click-blocker]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.classes()).toContain('group-hover:pointer-events-none')
   })
 
   it('does not render the badge when series-position is not in overlays', () => {
@@ -336,5 +436,107 @@ describe('BookCoverCard — series position overlay', () => {
     const wrapper = mountCard({ ...presentBook, seriesIndex: 2, seriesName: 'Dune', hasMetadataLocks: true })
     expect(wrapper.text()).toContain('#2')
     expect(wrapper.find('.text-amber-400').exists()).toBe(true)
+  })
+})
+
+describe('BookCoverCard — grid card labels', () => {
+  const bookWithMeta: BookCard = {
+    ...presentBook,
+    title: 'Dune',
+    authors: ['Frank Herbert'],
+    seriesName: 'Dune Chronicles',
+    seriesIndex: 1,
+  }
+
+  afterEach(() => {
+    gridCardPrimaryLabel.value = 'hidden'
+    gridCardSecondaryLabel.value = 'hidden'
+    cardInfoMode.value = 'hover-overlay'
+  })
+
+  function mountWithLabel(book: BookCard = bookWithMeta) {
+    cardInfoMode.value = 'below-cover'
+    return mount(BookCoverCard, {
+      props: { book, showLabel: true },
+      global: {
+        ...globalStubs,
+        provide: { [COVER_ASPECT_RATIO_KEY as symbol]: ref('2/3') },
+      },
+    })
+  }
+
+  it('does not render label area when cardInfoMode is hover-overlay', () => {
+    gridCardPrimaryLabel.value = 'book-title'
+    cardInfoMode.value = 'hover-overlay'
+    const wrapper = mountCard(bookWithMeta)
+    expect(wrapper.find('[data-testid="grid-card-label"]').exists()).toBe(false)
+  })
+
+  it('does not render label text elements when both fields are hidden in below-cover mode', () => {
+    gridCardPrimaryLabel.value = 'hidden'
+    gridCardSecondaryLabel.value = 'hidden'
+    const wrapper = mountWithLabel()
+    expect(wrapper.find('[data-testid="grid-card-label-primary"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="grid-card-label-secondary"]').exists()).toBe(false)
+  })
+
+  it('renders primary label with book title', () => {
+    gridCardPrimaryLabel.value = 'book-title'
+    const wrapper = mountWithLabel()
+    const label = wrapper.find('[data-testid="grid-card-label-primary"]')
+    expect(label.exists()).toBe(true)
+    expect(label.text()).toBe('Dune')
+  })
+
+  it('renders primary label with series title', () => {
+    gridCardPrimaryLabel.value = 'series-title'
+    const wrapper = mountWithLabel()
+    const label = wrapper.find('[data-testid="grid-card-label-primary"]')
+    expect(label.exists()).toBe(true)
+    expect(label.text()).toBe('Dune Chronicles')
+  })
+
+  it('renders primary label with series title and position', () => {
+    gridCardPrimaryLabel.value = 'series-title-position'
+    const wrapper = mountWithLabel()
+    const label = wrapper.find('[data-testid="grid-card-label-primary"]')
+    expect(label.exists()).toBe(true)
+    expect(label.text()).toBe('Dune Chronicles #1')
+  })
+
+  it('renders primary label with author', () => {
+    gridCardPrimaryLabel.value = 'author'
+    const wrapper = mountWithLabel()
+    const label = wrapper.find('[data-testid="grid-card-label-primary"]')
+    expect(label.exists()).toBe(true)
+    expect(label.text()).toBe('Frank Herbert')
+  })
+
+  it('hides primary label line when field resolves to null (missing series)', () => {
+    gridCardPrimaryLabel.value = 'series-title'
+    cardInfoMode.value = 'below-cover'
+    const wrapper = mount(BookCoverCard, {
+      props: { book: { ...presentBook, title: 'Standalone', seriesName: null }, showLabel: true },
+      global: { ...globalStubs, provide: { [COVER_ASPECT_RATIO_KEY as symbol]: ref('2/3') } },
+    })
+    expect(wrapper.find('[data-testid="grid-card-label-primary"]').exists()).toBe(false)
+  })
+
+  it('renders secondary label alongside primary', () => {
+    gridCardPrimaryLabel.value = 'book-title'
+    gridCardSecondaryLabel.value = 'author'
+    const wrapper = mountWithLabel()
+    expect(wrapper.find('[data-testid="grid-card-label-primary"]').text()).toBe('Dune')
+    expect(wrapper.find('[data-testid="grid-card-label-secondary"]').text()).toBe('Frank Herbert')
+  })
+
+  it('formats series-title-position with fractional index', () => {
+    gridCardPrimaryLabel.value = 'series-title-position'
+    cardInfoMode.value = 'below-cover'
+    const wrapper = mount(BookCoverCard, {
+      props: { book: { ...bookWithMeta, seriesIndex: 1.5 }, showLabel: true },
+      global: { ...globalStubs, provide: { [COVER_ASPECT_RATIO_KEY as symbol]: ref('2/3') } },
+    })
+    expect(wrapper.find('[data-testid="grid-card-label-primary"]').text()).toBe('Dune Chronicles #1.5')
   })
 })

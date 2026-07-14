@@ -13,7 +13,11 @@ const themeStore = useThemeStore()
 const backgroundClass = computed(() => BACKGROUND_OPTIONS.find((b) => b.id === themeStore.background)?.cssClass ?? '')
 
 const BOOK_ROUTE_NAMES = new Set(['book-detail'])
-const TABLE_VIEW_ROUTE_NAMES = new Set(['library', 'smartScope', 'collection', 'series', 'series-detail', 'authors'])
+
+// Grid views are kept alive so scroll position and virtual list state survive
+// round-trips to the book detail / metadata editor page.
+const GRID_VIEW_NAMES = ['HomeView', 'SmartScopeView', 'CollectionView', 'AuthorsView', 'SeriesView', 'SeriesDetailView', 'AuthorDetailView']
+
 const viewKey = computed(() => {
   const name = String(route.name)
   if (BOOK_ROUTE_NAMES.has(name)) return name
@@ -34,15 +38,9 @@ const viewKey = computed(() => {
       <div class="app-shell-scroll px-2 sm:px-4 pt-2 flex-1 overflow-y-auto overflow-x-hidden relative scroll-smooth bg-transparent">
         <router-view v-slot="{ Component }">
           <Transition name="page" mode="out-in">
-            <div
-              :key="viewKey"
-              :class="{
-                'h-full flex flex-col':
-                  viewKey === 'settings' || viewKey === 'tools' || BOOK_ROUTE_NAMES.has(viewKey) || TABLE_VIEW_ROUTE_NAMES.has(String(route.name)),
-              }"
-            >
-              <component :is="Component" />
-            </div>
+            <KeepAlive :include="GRID_VIEW_NAMES" :max="10">
+              <component :is="Component" :key="viewKey" />
+            </KeepAlive>
           </Transition>
         </router-view>
       </div>

@@ -5,6 +5,7 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import VueI18nPlugin from '@intlify/unplugin-vue-i18n/vite'
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:3000'
 const hmrHost = process.env.VITE_HMR_HOST
@@ -17,6 +18,9 @@ export default defineConfig({
     vue(),
     ...(enableVueDevTools ? [vueDevTools()] : []),
     tailwindcss(),
+    VueI18nPlugin({
+      include: [fileURLToPath(new URL('./src/locales/**', import.meta.url))],
+    }),
     VitePWA({
       registerType: 'prompt',
       injectRegister: null,
@@ -39,7 +43,6 @@ export default defineConfig({
         display: 'standalone',
         start_url: '/',
         scope: '/',
-        orientation: 'any',
         icons: [
           {
             src: '/pwa-64x64.png',
@@ -90,6 +93,7 @@ export default defineConfig({
       workbox: {
         cleanupOutdatedCaches: true,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+        globIgnores: ['**/assets/foliate/**'],
         navigateFallback: 'index.html',
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
@@ -240,6 +244,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     include: ['@tanstack/vue-table', '@tanstack/vue-virtual'],
+    exclude: ['@embedpdf/core', '@embedpdf/core/vue'],
   },
   server: {
     host: true,

@@ -10,6 +10,7 @@ export type MetadataField =
   | "publishedYear"
   | "language"
   | "pageCount"
+  | "communityRating"
   | "seriesName"
   | "seriesIndex"
   | "genres"
@@ -27,6 +28,7 @@ export const ALL_METADATA_FIELDS: MetadataField[] = [
   "publishedYear",
   "language",
   "pageCount",
+  "communityRating",
   "seriesName",
   "seriesIndex",
   "genres",
@@ -51,6 +53,7 @@ export type FieldPreferenceOverrides = Partial<Record<MetadataField, FieldPrefer
 export interface MetadataFetchOptions {
   genres: {
     mode: GenreMergeMode;
+    blocklist: string[];
   };
   saveProviderIds: boolean;
 }
@@ -108,6 +111,17 @@ export interface ComicVineProviderConfig {
   apiKey: string;
 }
 
+export interface KoboProviderConfig {
+  enabled: boolean;
+  country: string;
+  language: string;
+}
+
+export interface AladinProviderConfig {
+  enabled: boolean;
+  ttbKey: string;
+}
+
 export interface ProviderConfigurations {
   google: GoogleProviderConfig;
   amazon: AmazonProviderConfig;
@@ -117,7 +131,12 @@ export interface ProviderConfigurations {
   itunes: ITunesProviderConfig;
   audible: AudibleProviderConfig;
   audnexus: AudnexusProviderConfig;
+  librofm: SimpleProviderConfig;
   comicvine: ComicVineProviderConfig;
+  ranobedb: SimpleProviderConfig;
+  kobo: KoboProviderConfig;
+  lubimyczytac: SimpleProviderConfig;
+  aladin: AladinProviderConfig;
 }
 
 export interface ProviderStatus {
@@ -126,4 +145,13 @@ export interface ProviderStatus {
   configured: boolean;
   enabled: boolean;
   hint?: string;
+}
+
+export type ProviderConnectionTestStatus = "success" | "warning" | "fail";
+
+export interface ProviderConnectionTestResult {
+  key: MetadataProviderKey;
+  ok: boolean;
+  status: ProviderConnectionTestStatus;
+  message: string;
 }

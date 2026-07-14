@@ -1,3 +1,9 @@
+export interface AudNexusSeriesReference {
+  asin?: string;
+  name?: string;
+  position?: string | number;
+}
+
 export interface AudNexusBook {
   asin: string;
   // Historical field (older AudNexus payloads)
@@ -12,11 +18,8 @@ export interface AudNexusBook {
   runtimeLengthMin?: number;
   formatType?: string;
   description?: string;
-  seriesPrimary?: {
-    asin?: string;
-    name?: string;
-    position?: string | number;
-  };
+  seriesPrimary?: AudNexusSeriesReference;
+  seriesSecondary?: AudNexusSeriesReference;
   // Historical fields (older AudNexus payloads)
   seriesName?: string;
   seriesPart?: string | number;

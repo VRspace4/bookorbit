@@ -53,6 +53,10 @@ export class BrowseEntitiesDto {
   @IsOptional()
   @IsIn(['asc', 'desc'])
   sortOrder?: string;
+
+  @IsOptional()
+  @IsIn(['any', 'empty'])
+  bookCount?: string;
 }
 
 export class MergeEntitiesDto {

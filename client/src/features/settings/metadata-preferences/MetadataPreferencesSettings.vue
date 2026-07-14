@@ -5,7 +5,8 @@ import ProviderConfigPanel from './components/ProviderConfigPanel.vue'
 import { useProviderConfig } from './composables/useProviderConfig'
 import { useProviderThrottleRuntime } from './composables/useProviderThrottleRuntime'
 
-const { config, statuses, saving, fetchConfig, saveConfig } = useProviderConfig()
+const { config, statuses, saving, testingByKey, testResultsByKey, passingTestSignatureByKey, fetchConfig, saveConfig, testProvider } =
+  useProviderConfig()
 const { runtimeByKey, startPolling, stopPolling } = useProviderThrottleRuntime()
 
 onMounted(() => {
@@ -24,6 +25,10 @@ onUnmounted(() => {
     :statuses="statuses"
     :runtime-by-key="runtimeByKey"
     :saving="saving"
+    :testing-by-key="testingByKey"
+    :test-results-by-key="testResultsByKey"
+    :passing-test-signature-by-key="passingTestSignatureByKey"
     @save="saveConfig($event as Partial<ProviderConfigurations>)"
+    @test="testProvider"
   />
 </template>

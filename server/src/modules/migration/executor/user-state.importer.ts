@@ -1,7 +1,15 @@
-import { Injectable } from '@nestjs/common';
-import type { ReadStatus, ReadStatusSource } from '@bookorbit/types';
+import { createHash } from 'node:crypto';
 
-import type { SourceBook, SourceBookmark, SourceUserFileProgress } from '../adapters/source-adapter.types';
+import { Injectable } from '@nestjs/common';
+import { isAudioFormat, isComicFormat, type ReadStatus, type ReadStatusSource } from '@bookorbit/types';
+
+import type {
+  SourceBook,
+  SourceBookmark,
+  SourceReadingSession,
+  SourceUserBookStatus,
+  SourceUserFileProgress,
+} from '../adapters/source-adapter.types';
 import { MigrationRepository } from '../migration.repository';
 import { MigrationImportRepository } from './migration-import.repository';
 import type { PlannerResult } from '../planner/planner.types';
@@ -29,6 +37,68 @@ function hasMeaningfulProgressSignal(row: SourceUserFileProgress, percentage: nu
   return percentage > 0 || hasLocator || hasPageNumber || hasPosition;
 }
 
+function hasRatingColumn(row: SourceUserBookStatus): boolean {
+  return row.rating !== undefined;
+}
+
+function normalizeSourceRating(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  const rating = Math.round(value);
+  if (rating < 1) return null;
+  if (rating <= 5) return rating;
+  if (rating <= 10) return Math.ceil(rating / 2);
+  return null;
+}
+
+type UserBookStatusUpsert = {
+  userId: number;
+  bookId: number;
+  status: ReadStatus;
+  source: ReadStatusSource;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  updatedAt: Date;
+};
+
+type UserBookRatingUpsert = {
+  userId: number;
+  bookId: number;
+  rating: number;
+  updatedAt: Date;
+};
+
+type ReadingProgressUpsert = {
+  bookFileId: number;
+  userId: number;
+  percentage: number;
+  cfi: string | null;
+  pageNumber: number | null;
+  positionSeconds: number | null;
+  updatedAt: Date;
+};
+
+type AudiobookProgressUpsert = {
+  userId: number;
+  bookId: number;
+  percentage: number;
+  currentFileId: number;
+  positionSeconds: number;
+  updatedAt: Date;
+};
+
+type ReadingSessionUpsert = {
+  userId: number;
+  bookId: number;
+  bookFileId: number | null;
+  sessionId: string;
+  source: 'web';
+  startedAt: Date;
+  endedAt: Date;
+  durationSeconds: number;
+  progressDelta: number | null;
+  endProgress: number | null;
+};
+
 @Injectable()
 export class UserStateImporter {
   constructor(
@@ -46,6 +116,7 @@ export class UserStateImporter {
     const sourceFileToTargetFile = buildSourceFileTargetMap(planned, targetFilesByBookId);
 
     await this.importUserBookStatuses(runId, planned, sourceToTargetUser, sourceToTargetBook, ensureRunning);
+    await this.importUserBookRatings(runId, planned, sourceToTargetUser, sourceToTargetBook, ensureRunning);
     await this.importReadingProgress(
       runId,
       planned,
@@ -62,6 +133,15 @@ export class UserStateImporter {
       sourceToTargetBook,
       audiobookPrimaryFilesByBookId,
       sourceFileToTargetFile,
+      ensureRunning,
+    );
+    await this.importReadingSessions(
+      runId,
+      planned,
+      sourceToTargetUser,
+      sourceToTargetBook,
+      primaryFilesByBookId,
+      targetFilesByBookId,
       ensureRunning,
     );
     await this.importBookmarks(runId, planned, sourceToTargetUser, sourceToTargetBook, ensureRunning);
@@ -82,15 +162,7 @@ export class UserStateImporter {
       return;
     }
 
-    const batch: Array<{
-      userId: number;
-      bookId: number;
-      status: ReadStatus;
-      source: ReadStatusSource;
-      startedAt: Date | null;
-      finishedAt: Date | null;
-      updatedAt: Date;
-    }> = [];
+    const batch: UserBookStatusUpsert[] = [];
 
     for (const row of planned.execution.sourceData.userBookStatuses) {
       await ensureRunning();
@@ -113,12 +185,68 @@ export class UserStateImporter {
       });
       counters.imported += 1;
     }
+    const dedupedBatch = dedupeByKey(batch, (item) => `${item.userId}:${item.bookId}`, preferLatestByUpdatedAt);
 
     await this.importRepo.withTransaction(async (importRepo) => {
       await importRepo.clearUserBookStatuses([...userMap.values()], [...bookMap.values()]);
-      await importRepo.batchUpsertUserBookStatuses(batch);
+      await importRepo.batchUpsertUserBookStatuses(dedupedBatch);
     });
     await this.repo.setRunMetric(runId, 'user_state', 'user_book_status', counters);
+  }
+
+  private async importUserBookRatings(
+    runId: number,
+    planned: PlannerResult,
+    userMap: Map<string, number>,
+    bookMap: Map<string, number>,
+    ensureRunning: RunStateCheck,
+  ): Promise<void> {
+    const counters = emptyCounters();
+    if (!isDomainAvailable(planned, 'userBookStatuses')) {
+      await this.repo.setRunMetric(runId, 'user_state', 'user_book_rating', counters);
+      return;
+    }
+
+    const rows = planned.execution.sourceData.userBookStatuses.filter(hasRatingColumn);
+    if (rows.length === 0) {
+      await this.repo.setRunMetric(runId, 'user_state', 'user_book_rating', counters);
+      return;
+    }
+
+    const batch: UserBookRatingUpsert[] = [];
+
+    for (const row of rows) {
+      await ensureRunning();
+      counters.processed += 1;
+      const targetUserId = userMap.get(row.sourceUserId);
+      const targetBookId = bookMap.get(row.sourceBookId);
+      if (!targetUserId || !targetBookId) {
+        counters.unresolved += 1;
+        continue;
+      }
+
+      const rating = normalizeSourceRating(row.rating);
+      if (rating == null) {
+        counters.skipped += 1;
+        continue;
+      }
+
+      batch.push({
+        userId: targetUserId,
+        bookId: targetBookId,
+        rating,
+        updatedAt: toDate(row.updatedAt) ?? new Date(),
+      });
+      counters.imported += 1;
+    }
+
+    const dedupedBatch = dedupeByKey(batch, (item) => `${item.userId}:${item.bookId}`, preferLatestByUpdatedAt);
+
+    await this.importRepo.withTransaction(async (importRepo) => {
+      await importRepo.clearUserBookRatings([...userMap.values()], [...bookMap.values()]);
+      await importRepo.batchUpsertUserBookRatings(dedupedBatch);
+    });
+    await this.repo.setRunMetric(runId, 'user_state', 'user_book_rating', counters);
   }
 
   private async importReadingProgress(
@@ -136,15 +264,7 @@ export class UserStateImporter {
       return;
     }
 
-    const batch: Array<{
-      bookFileId: number;
-      userId: number;
-      percentage: number;
-      cfi: string | null;
-      pageNumber: number | null;
-      positionSeconds: number | null;
-      updatedAt: Date;
-    }> = [];
+    const batch: ReadingProgressUpsert[] = [];
 
     for (const row of planned.execution.sourceData.userFileProgress) {
       await ensureRunning();
@@ -185,10 +305,11 @@ export class UserStateImporter {
       });
       counters.imported += 1;
     }
+    const dedupedBatch = dedupeByKey(batch, (item) => `${item.bookFileId}:${item.userId}`, preferReadingProgressRow);
 
     await this.importRepo.withTransaction(async (importRepo) => {
       await importRepo.clearReadingProgress([...userMap.values()], [...primaryFilesByBookId.values(), ...sourceFileToTargetFile.values()]);
-      await importRepo.batchUpsertReadingProgress(batch);
+      await importRepo.batchUpsertReadingProgress(dedupedBatch);
     });
     await this.repo.setRunMetric(runId, 'user_state', 'reading_progress', counters);
   }
@@ -213,14 +334,7 @@ export class UserStateImporter {
       return targetBookId ? audiobookPrimaryFilesByBookId.has(targetBookId) : false;
     });
 
-    const batch: Array<{
-      userId: number;
-      bookId: number;
-      percentage: number;
-      currentFileId: number;
-      positionSeconds: number;
-      updatedAt: Date;
-    }> = [];
+    const batch: AudiobookProgressUpsert[] = [];
 
     for (const row of sourceAudioRows) {
       await ensureRunning();
@@ -258,11 +372,70 @@ export class UserStateImporter {
       counters.imported += 1;
     }
 
+    const dedupedBatch = dedupeByKey(batch, (item) => `${item.userId}:${item.bookId}`, preferLatestByUpdatedAt);
+
     await this.importRepo.withTransaction(async (importRepo) => {
       await importRepo.clearAudiobookProgress([...userMap.values()], [...audiobookPrimaryFilesByBookId.keys()]);
-      await importRepo.batchUpsertAudiobookProgress(batch);
+      await importRepo.batchUpsertAudiobookProgress(dedupedBatch);
     });
     await this.repo.setRunMetric(runId, 'user_state', 'audiobook_progress', counters);
+  }
+
+  private async importReadingSessions(
+    runId: number,
+    planned: PlannerResult,
+    userMap: Map<string, number>,
+    bookMap: Map<string, number>,
+    primaryFilesByBookId: Map<number, number>,
+    targetFilesByBookId: Map<number, Array<{ id: number; hash: string | null; absolutePath: string; format: string | null }>>,
+    ensureRunning: RunStateCheck,
+  ): Promise<void> {
+    const counters = emptyCounters();
+    const rows = planned.execution.sourceData.readingSessions;
+    if (!isDomainAvailable(planned, 'readingSessions') || !Array.isArray(rows)) {
+      await this.repo.setRunMetric(runId, 'user_state', 'reading_sessions', counters);
+      return;
+    }
+
+    const sourceType = planned.plan.snapshot?.sourceType ?? 'booklore';
+    const sessionIdPrefix = `${sourceType}:rs:`;
+    const batch: ReadingSessionUpsert[] = [];
+
+    for (const row of rows) {
+      await ensureRunning();
+      counters.processed += 1;
+
+      const targetUserId = userMap.get(row.sourceUserId);
+      const targetBookId = bookMap.get(row.sourceBookId);
+      if (!targetUserId || !targetBookId) {
+        counters.unresolved += 1;
+        continue;
+      }
+
+      const prepared = prepareReadingSessionRow(row, sourceType, targetUserId, targetBookId);
+      if (!prepared) {
+        counters.skipped += 1;
+        continue;
+      }
+
+      batch.push({
+        ...prepared,
+        bookFileId: resolveReadingSessionBookFileId(row.bookType, targetBookId, targetFilesByBookId, primaryFilesByBookId),
+      });
+      counters.imported += 1;
+    }
+
+    const dedupedBatch = dedupeByKey(batch, (item) => `${item.userId}:${item.sessionId}`, preferReadingSessionRow);
+
+    await this.importRepo.withTransaction(async (importRepo) => {
+      await importRepo.syncImportedReadingSessions({
+        items: dedupedBatch,
+        userIds: [...userMap.values()],
+        bookIds: [...bookMap.values()],
+        sessionIdPrefix,
+      });
+    });
+    await this.repo.setRunMetric(runId, 'user_state', 'reading_sessions', counters);
   }
 
   private async importBookmarks(
@@ -518,6 +691,140 @@ function nextImportedCollectionName(baseName: string, usedNames: Set<string>): s
   const fallback = `${base} (Booklore ${Date.now()})`;
   usedNames.add(fallback.toLowerCase());
   return fallback;
+}
+
+function dedupeByKey<T>(items: T[], toKey: (item: T) => string, pickPreferred: (current: T, candidate: T) => T): T[] {
+  const byKey = new Map<string, T>();
+  for (const item of items) {
+    const key = toKey(item);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, item);
+      continue;
+    }
+    byKey.set(key, pickPreferred(existing, item));
+  }
+  return [...byKey.values()];
+}
+
+function preferLatestByUpdatedAt<T extends { updatedAt: Date }>(current: T, candidate: T): T {
+  const currentTs = current.updatedAt.getTime();
+  const candidateTs = candidate.updatedAt.getTime();
+  if (candidateTs > currentTs) return candidate;
+  if (candidateTs < currentTs) return current;
+  return candidate;
+}
+
+function preferReadingProgressRow(current: ReadingProgressUpsert, candidate: ReadingProgressUpsert): ReadingProgressUpsert {
+  const currentTs = current.updatedAt.getTime();
+  const candidateTs = candidate.updatedAt.getTime();
+  if (candidateTs > currentTs) return candidate;
+  if (candidateTs < currentTs) return current;
+
+  const currentScore = readingProgressSignalScore(current);
+  const candidateScore = readingProgressSignalScore(candidate);
+  if (candidateScore > currentScore) return candidate;
+  if (candidateScore < currentScore) return current;
+  return candidate;
+}
+
+function readingProgressSignalScore(row: ReadingProgressUpsert): number {
+  let score = 0;
+  if ((row.cfi?.trim().length ?? 0) > 0) score += 8;
+  if (typeof row.pageNumber === 'number' && Number.isFinite(row.pageNumber) && row.pageNumber > 0) score += 2;
+  if (typeof row.positionSeconds === 'number' && Number.isFinite(row.positionSeconds) && row.positionSeconds > 0) score += 2;
+  if (row.percentage > 0) score += 1;
+  return score;
+}
+
+function prepareReadingSessionRow(
+  row: SourceReadingSession,
+  sourceType: string,
+  userId: number,
+  bookId: number,
+): Omit<ReadingSessionUpsert, 'bookFileId'> | null {
+  const startedAt = toDate(row.startedAt);
+  const endedAt = toDate(row.endedAt);
+  if (!startedAt || !endedAt) return null;
+  if (endedAt.getTime() < startedAt.getTime()) return null;
+
+  const wallClockSeconds = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
+  if (wallClockSeconds <= 0) return null;
+
+  const sourceDuration =
+    typeof row.durationSeconds === 'number' && Number.isFinite(row.durationSeconds) ? Math.max(0, Math.trunc(row.durationSeconds)) : wallClockSeconds;
+  const durationSeconds = Math.min(sourceDuration, wallClockSeconds);
+  if (durationSeconds < 10) return null;
+
+  return {
+    userId,
+    bookId,
+    sessionId: buildImportedReadingSessionId(sourceType, row.sourceSessionId),
+    source: 'web',
+    startedAt,
+    endedAt,
+    durationSeconds,
+    progressDelta: clampProgressDelta(row.progressDelta),
+    endProgress: sanitizeNullablePercent(row.endProgress),
+  };
+}
+
+function buildImportedReadingSessionId(sourceType: string, sourceSessionId: string): string {
+  const prefix = `${sourceType}:rs:`;
+  const raw = sourceSessionId.trim();
+  const candidate = `${prefix}${raw}`;
+  if (candidate.length <= 64) return candidate;
+  return `${prefix}${createHash('sha1').update(raw).digest('hex')}`;
+}
+
+function sanitizeNullablePercent(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.round(clampPercent(value) * 100) / 100;
+}
+
+function clampProgressDelta(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.round(Math.max(-100, Math.min(100, value)) * 100) / 100;
+}
+
+function preferReadingSessionRow(current: ReadingSessionUpsert, candidate: ReadingSessionUpsert): ReadingSessionUpsert {
+  const currentTs = current.endedAt.getTime();
+  const candidateTs = candidate.endedAt.getTime();
+  if (candidateTs > currentTs) return candidate;
+  if (candidateTs < currentTs) return current;
+  return candidate;
+}
+
+function resolveReadingSessionBookFileId(
+  bookType: string | null,
+  bookId: number,
+  targetFilesByBookId: Map<number, Array<{ id: number; format: string | null }>>,
+  primaryFilesByBookId: Map<number, number>,
+): number | null {
+  const files = targetFilesByBookId.get(bookId) ?? [];
+  if (files.length === 0) return null;
+
+  const primaryFileId = primaryFilesByBookId.get(bookId) ?? null;
+  if (!bookType?.trim()) {
+    if (files.length === 1) return files[0].id;
+    return primaryFileId;
+  }
+
+  const matches = files.filter((file) => isTargetFileForSourceBookType(file.format, bookType));
+  if (matches.length === 1) return matches[0].id;
+  if (primaryFileId && matches.some((file) => file.id === primaryFileId)) return primaryFileId;
+  return null;
+}
+
+function isTargetFileForSourceBookType(format: string | null, bookType: string): boolean {
+  if (!format) return false;
+  const normalizedFormat = format.toLowerCase();
+  const normalizedType = bookType.trim().toUpperCase();
+
+  if (normalizedType === 'AUDIOBOOK') return isAudioFormat(normalizedFormat);
+  if (normalizedType === 'CBX') return isComicFormat(normalizedFormat);
+
+  return normalizedFormat === normalizedType.toLowerCase();
 }
 
 function resolveBookmarkPositionSeconds(row: SourceBookmark, sourceBook: SourceBook | undefined): number | null {

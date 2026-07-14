@@ -1,4 +1,4 @@
-import type { BookMissingEvent, CoverRefreshedEvent, ScanProgressEvent } from '@bookorbit/types';
+import type { BookMissingEvent, BookTransferredEvent, CoverRefreshedEvent, ScanProgressEvent } from '@bookorbit/types';
 
 import { ScanGateway } from './scan.gateway';
 
@@ -216,5 +216,17 @@ describe('remaining emit methods', () => {
     expect(to).toHaveBeenCalledWith('library:3');
     expect(emit).toHaveBeenCalledWith('book:restored', { libraryId: 3, bookIds: [2, 4] });
     expect(emit).toHaveBeenCalledWith('book:moved', { libraryId: 3, bookIds: [2, 4] });
+  });
+
+  it('emits transferred book notifications to the source and destination library rooms', () => {
+    const { gateway } = makeGateway();
+    const { server, to, emit } = mockServer();
+    gateway['server'] = server as any;
+
+    const event: BookTransferredEvent = { fromLibraryId: 3, toLibraryId: 8, bookIds: [2, 4] };
+    gateway.emitBookTransferred(event);
+
+    expect(to).toHaveBeenCalledWith(['library:3', 'library:8']);
+    expect(emit).toHaveBeenCalledWith('book:transferred', event);
   });
 });

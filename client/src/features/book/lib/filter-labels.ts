@@ -1,4 +1,5 @@
 import type { Rule, RuleField, RuleOperator, SortField } from '@bookorbit/types'
+import { PROVIDER_SHORT_LABELS } from '@/lib/provider-colors'
 
 export const SORT_FIELD_LABELS: Record<SortField, string> = {
   author: 'Author',
@@ -7,6 +8,7 @@ export const SORT_FIELD_LABELS: Record<SortField, string> = {
   seriesIndex: 'Series #',
   addedAt: 'Date Added',
   updatedAt: 'Date Updated',
+  publishedDate: 'Published Date',
   publishedYear: 'Published Year',
   pageCount: 'Page Count',
   rating: 'Rating',
@@ -29,6 +31,7 @@ export const FIELD_LABELS: Record<RuleField, string> = {
   language: 'Language',
   series: 'Series',
   seriesIndex: 'Series Index',
+  publishedDate: 'Published Date',
   publishedYear: 'Published Year',
   pageCount: 'Page Count',
   author: 'Author',
@@ -42,12 +45,15 @@ export const FIELD_LABELS: Record<RuleField, string> = {
   finishedAt: 'Date Finished',
   fileAvailability: 'File Availability',
   rating: 'Rating',
+  communityRating: 'Community Rating',
   readProgress: 'Reading Progress',
   readStatus: 'Read Status',
   description: 'Description',
   isbn: 'ISBN',
   metadataScore: 'Metadata Score',
   cover: 'Cover',
+  lockStatus: 'Lock Status',
+  seriesStatus: 'Series Status',
 }
 
 export const OPERATOR_LABELS: Record<RuleOperator, string> = {
@@ -75,12 +81,36 @@ export const OPERATOR_LABELS: Record<RuleOperator, string> = {
   isUnread: 'is unread',
   isInProgress: 'is in progress',
   isFinished: 'is finished',
+  isLocked: 'is locked',
+  isUnlocked: 'is unlocked',
+  isUpNext: 'is up next',
 }
 
-const NO_VALUE_OPS: RuleOperator[] = ['isEmpty', 'isNotEmpty', 'isMissing', 'isPresent', 'isUnread', 'isInProgress', 'isFinished']
+const NO_VALUE_OPS: RuleOperator[] = [
+  'isEmpty',
+  'isNotEmpty',
+  'isMissing',
+  'isPresent',
+  'isUnread',
+  'isInProgress',
+  'isFinished',
+  'isLocked',
+  'isUnlocked',
+  'isUpNext',
+]
+
+function communityRatingProviderLabel(rule: Rule): string {
+  if (rule.field !== 'communityRating') return ''
+  const provider = rule.provider ?? 'any'
+  if (provider === 'any') return 'Any provider'
+  return PROVIDER_SHORT_LABELS[provider] ?? provider
+}
 
 export function ruleToParts(rule: Rule): { field: string; operator: string; value: string | null } {
-  const field = FIELD_LABELS[rule.field] ?? rule.field
+  const field =
+    rule.field === 'communityRating'
+      ? `${FIELD_LABELS[rule.field] ?? rule.field} (${communityRatingProviderLabel(rule)})`
+      : (FIELD_LABELS[rule.field] ?? rule.field)
   const operator = OPERATOR_LABELS[rule.operator] ?? rule.operator
   if (NO_VALUE_OPS.includes(rule.operator)) return { field, operator, value: null }
   if (rule.operator === 'withinLast') return { field, operator, value: `${rule.value} days` }

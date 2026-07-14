@@ -1,22 +1,30 @@
 <script setup lang="ts">
 import { computed, ref, onUnmounted } from 'vue'
-import { Loader2 } from 'lucide-vue-next'
+import { useI18n } from 'vue-i18n'
+import { Loader2 } from '@lucide/vue'
+import { useCoverVersions } from '../../composables/useCoverVersions'
+import BookCoverArtwork from '../BookCoverArtwork.vue'
 import BookCoverImage from '../BookCoverImage.vue'
-import BookCoverPlaceholder from '../BookCoverPlaceholder.vue'
 import BookCoverSurface from '../BookCoverSurface.vue'
 import { useRefreshingBooks } from '@/features/book/composables/useRefreshingBooks'
 
 const props = defineProps<{
   bookId: number
   title: string | null
+  version?: string | number | Date | null
   hasCover: boolean
+  isAudio: boolean
+  isComic: boolean
 }>()
 
 const emit = defineEmits<{ 'cover-click': [] }>()
+const { t } = useI18n()
 const { isRefreshing } = useRefreshingBooks()
 
 const seed = computed(() => props.title ?? String(props.bookId))
 const isRefreshingBook = computed(() => isRefreshing(props.bookId))
+const { coverUrl } = useCoverVersions()
+const thumbnailSrc = computed(() => coverUrl(props.bookId, 'thumbnail', props.version))
 const showPreview = ref(false)
 const previewPos = ref({ x: 0, y: 0 })
 let hoverTimer: ReturnType<typeof setTimeout> | null = null
@@ -49,6 +57,10 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
+function handleCoverClick() {
+  emit('cover-click')
+}
+
 const adjustedLeft = computed(() => {
   const previewWidth = 180
   if (previewPos.value.x + previewWidth > window.innerWidth - 8) {
@@ -67,15 +79,27 @@ const adjustedTop = computed(() => {
   <div class="relative" @mouseenter="handleMouseEnter" @mouseleave="handleMouseLeave">
     <BookCoverSurface
       size="mini"
+      :disable-spine="isAudio"
+      :is-comic="isComic"
       tabindex="0"
       role="button"
-      aria-label="View cover"
-      class="relative flex h-9 w-9 shrink-0 cursor-pointer overflow-hidden rounded-sm transition-opacity hover:opacity-80"
-      @click="emit('cover-click')"
+      :aria-label="t('book.table.cover.view')"
+      class="book-cover-surface--spine-fitted relative flex h-9 w-9 shrink-0 cursor-pointer overflow-hidden rounded-sm transition-opacity hover:opacity-80"
+      @click="handleCoverClick"
       @keydown="handleKeydown"
     >
-      <BookCoverImage v-if="hasCover" :book-id="bookId" type="thumbnail" class="h-full w-full object-cover" />
-      <BookCoverPlaceholder v-else :title="title" :author-line="null" :is-audio="false" :seed="seed" class="h-full w-full" />
+      <BookCoverArtwork
+        :src="thumbnailSrc"
+        :has-cover="hasCover"
+        :title="title"
+        :author-line="null"
+        :is-audio="isAudio"
+        :seed="seed"
+        :alt="title ?? ''"
+        frame-aspect-ratio="1/1"
+        :spine="!isAudio"
+        :is-comic="isComic"
+      />
       <div v-if="isRefreshingBook" class="absolute inset-0 flex items-center justify-center bg-black/50">
         <Loader2 :size="12" class="animate-spin text-white" />
       </div>
@@ -87,7 +111,7 @@ const adjustedTop = computed(() => {
         class="pointer-events-none fixed z-[200] rounded-lg border border-border bg-popover p-1.5 shadow-xl transition-opacity duration-150"
         :style="{ top: `${adjustedTop}px`, left: `${adjustedLeft}px` }"
       >
-        <BookCoverImage :book-id="bookId" type="cover" class="h-[240px] w-auto rounded-md object-contain" />
+        <BookCoverImage :book-id="bookId" type="cover" :version="version" class="h-[240px] w-auto rounded-md object-contain" />
       </div>
     </Teleport>
   </div>

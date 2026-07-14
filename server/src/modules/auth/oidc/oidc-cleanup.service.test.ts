@@ -20,40 +20,32 @@ describe('OidcCleanupService', () => {
     service = new OidcCleanupService(db as never);
   });
 
-  it('deletes expired/revoked sessions, expired states, and expired JTIs in parallel', async () => {
+  it('deletes expired/revoked sessions, expired states, and expired JTIs in parallel and returns counts', async () => {
     db._chain.returning
-      .mockResolvedValueOnce([{ id: 1 }, { id: 2 }]) // sessions
-      .mockResolvedValueOnce([{ state: 'abc' }]) // states
-      .mockResolvedValueOnce([]); // jtis
+      .mockResolvedValueOnce([{ id: 1 }, { id: 2 }])
+      .mockResolvedValueOnce([{ state: 'abc' }])
+      .mockResolvedValueOnce([]);
 
-    await service.runCleanup();
+    const result = await service.runCleanup();
 
     expect(db.delete).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ deletedSessions: 2, deletedStates: 1, deletedJtis: 0 });
   });
 
-  it('logs deletion counts on success', async () => {
+  it('returns correct counts for each deleted entity type', async () => {
     db._chain.returning
       .mockResolvedValueOnce([{ id: 1 }])
       .mockResolvedValueOnce([{ state: 'xyz' }])
       .mockResolvedValueOnce([{ jti: 'jti-1' }, { jti: 'jti-2' }]);
 
-    const logSpy = vi.spyOn(service['logger'], 'log').mockImplementation(() => undefined);
+    const result = await service.runCleanup();
 
-    await service.runCleanup();
-
-    const endLog = logSpy.mock.calls.find((args) => String(args[0]).includes('[end]'));
-    expect(endLog).toBeTruthy();
-    expect(String(endLog![0])).toMatch('deletedSessions=1');
-    expect(String(endLog![0])).toMatch('deletedStates=1');
-    expect(String(endLog![0])).toMatch('deletedJtis=2');
+    expect(result).toEqual({ deletedSessions: 1, deletedStates: 1, deletedJtis: 2 });
   });
 
-  it('logs error and does not throw when cleanup fails', async () => {
+  it('propagates errors to the caller', async () => {
     db._chain.returning.mockRejectedValueOnce(new Error('DB connection lost'));
 
-    const errorSpy = vi.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
-
-    await expect(service.runCleanup()).resolves.toBeUndefined();
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching('[fail]'));
+    await expect(service.runCleanup()).rejects.toThrow('DB connection lost');
   });
 });

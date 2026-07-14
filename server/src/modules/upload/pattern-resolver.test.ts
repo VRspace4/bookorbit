@@ -2,7 +2,9 @@ import {
   applyModifier,
   DEFAULT_DOWNLOAD_PATTERN,
   DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE,
+  DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER,
   EXAMPLE_PATTERN_METADATA,
+  MAX_PATH_SEGMENT_BYTES,
   replacePlaceholders,
   resolveDownloadFilename,
   resolveUploadPath,
@@ -392,6 +394,142 @@ describe('resolveDownloadFilename', () => {
   });
 });
 
+describe('cross-platform sanitization option', () => {
+  it('keeps legacy output unchanged when sanitization is disabled', () => {
+    expect(resolveUploadPath('{authors}/{title}', { ...FULL, authors: 'CON', title: 'Book: Volume 1?' }, 'epub')).toBe('CON/Book: Volume 1?.epub');
+  });
+
+  it('sanitizes invalid characters and reserved names in upload path tokens when enabled', () => {
+    expect(
+      resolveUploadPath('{authors}/{title}', { ...FULL, authors: 'CON', title: 'Book: Volume 1?' }, 'epub', { sanitizeForCrossPlatform: true }),
+    ).toBe('CON_/Book_ Volume 1_.epub');
+  });
+
+  it('supports dash replacement character when sanitization is enabled', () => {
+    expect(
+      resolveDownloadFilename('{title}', { ...FULL, title: 'Book: Volume 1?' }, 'epub', {
+        sanitizeForCrossPlatform: true,
+        replacementCharacter: '-',
+      }),
+    ).toBe('Book- Volume 1-.epub');
+  });
+
+  it('trims unsafe trailing dot/space and guards reserved names with extensions', () => {
+    expect(resolveDownloadFilename('{title}', { ...FULL, title: 'NUL.txt ' }, 'epub', { sanitizeForCrossPlatform: true })).toBe('NUL.txt_.epub');
+  });
+
+  it('replaces double-quote characters in token values', () => {
+    expect(resolveUploadPath('{title}', { ...FULL, title: 'He said "hello"' }, 'epub', { sanitizeForCrossPlatform: true })).toBe(
+      'He said _hello_.epub',
+    );
+  });
+
+  it('sanitizes disabled preserves double-quote in output', () => {
+    expect(resolveUploadPath('{title}', { ...FULL, title: '"Quotes"' }, 'epub')).toBe('"Quotes".epub');
+  });
+
+  it('sanitizes disabled preserves colon in output', () => {
+    expect(resolveUploadPath('{title}', { ...FULL, title: 'Bad Love: A Novel' }, 'epub')).toBe('Bad Love: A Novel.epub');
+  });
+
+  it('replaces all Windows-reserved chars in a single token value', () => {
+    const messy = 'A<B>C:D"E/F\\G|H?I*J';
+    const result = resolveDownloadFilename('{title}', { ...FULL, title: messy }, 'epub', { sanitizeForCrossPlatform: true });
+    expect(result).not.toMatch(/[<>:"/\\|?*]/);
+  });
+
+  it('replaces control characters (U+0001) in token values', () => {
+    const result = resolveDownloadFilename('{title}', { ...FULL, title: 'Evil\u0001Title' }, 'epub', { sanitizeForCrossPlatform: true });
+    expect(result).toBe('Evil_Title.epub');
+  });
+
+  it('uses replacement char when token value consists entirely of dots and spaces', () => {
+    const result = resolveDownloadFilename('{title}', { ...FULL, title: '.' }, 'epub', { sanitizeForCrossPlatform: true });
+    expect(result).toBe('_.epub');
+  });
+
+  it('strips trailing dots from token values', () => {
+    const result = resolveDownloadFilename('{title}', { ...FULL, title: 'Book Title...' }, 'epub', { sanitizeForCrossPlatform: true });
+    expect(result).toBe('Book Title.epub');
+  });
+
+  it('replaces forward slash within a token value (not treated as path separator)', () => {
+    const result = resolveUploadPath('{title}', { ...FULL, title: '24/7 Life' }, 'epub', { sanitizeForCrossPlatform: true });
+    expect(result).toBe('24_7 Life.epub');
+  });
+
+  it('sanitizes originalFilename token when used in a folder-only pattern', () => {
+    const result = resolveUploadPath('{authors}/', { ...FULL, authors: 'Author A', originalFilename: 'bad:file' }, 'epub', {
+      sanitizeForCrossPlatform: true,
+    });
+    expect(result).not.toContain(':');
+    expect(result).toContain('bad_file.epub');
+  });
+
+  it('extension token is unaffected by sanitization (no special chars in normal formats)', () => {
+    const result = resolveUploadPath('{title}.{extension}', { ...FULL, title: 'Normal Title', extension: 'epub' }, 'epub', {
+      sanitizeForCrossPlatform: true,
+    });
+    expect(result).toBe('Normal Title.epub');
+  });
+
+  it('multi-segment path preserves pattern slashes while sanitizing token values', () => {
+    const result = resolveUploadPath('{authors}/{title}', { ...FULL, authors: 'Author: A', title: 'Book "B"' }, 'epub', {
+      sanitizeForCrossPlatform: true,
+    });
+    expect(result).toContain('/');
+    expect(result).not.toMatch(/[:"]/);
+  });
+});
+
+describe('path segment byte limits', () => {
+  function expectSegmentsWithinLimit(path: string) {
+    for (const segment of path.split('/').filter(Boolean)) {
+      expect(Buffer.byteLength(segment, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+    }
+  }
+
+  it('truncates long generated upload path segments and preserves the file extension', () => {
+    const result = resolveUploadPath('{authors}/{title}', { ...FULL, authors: 'A'.repeat(300), title: 'B'.repeat(300) }, 'epub');
+
+    expect(result).not.toBeNull();
+    expectSegmentsWithinLimit(result!);
+    expect(result!.split('/')).toHaveLength(2);
+    expect(result!.endsWith('.epub')).toBe(true);
+    expect(result).toContain('~');
+  });
+
+  it('truncates download filenames before the filesystem segment limit', () => {
+    const result = resolveDownloadFilename('{title}', { ...FULL, title: 'Long Title '.repeat(40) }, 'epub');
+
+    expect(result).not.toBeNull();
+    expect(Buffer.byteLength(result!, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+    expect(result!.endsWith('.epub')).toBe(true);
+    expect(result).toContain('~');
+  });
+
+  it('does not split multibyte characters while truncating', () => {
+    const result = resolveDownloadFilename('{title}', { ...FULL, title: 'é'.repeat(200) }, 'epub');
+
+    expect(result).not.toBeNull();
+    expect(Buffer.byteLength(result!, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+    expect(result!.endsWith('.epub')).toBe(true);
+
+    const [stem] = result!.split('~');
+    expect([...stem].every((char) => char === 'é')).toBe(true);
+  });
+
+  it('uses a deterministic suffix so distinct long values do not collapse to the same filename', () => {
+    const prefix = 'Same prefix '.repeat(30);
+    const first = resolveDownloadFilename('{title}', { ...FULL, title: `${prefix}one` }, 'epub');
+    const second = resolveDownloadFilename('{title}', { ...FULL, title: `${prefix}two` }, 'epub');
+
+    expect(first).not.toBe(second);
+    expect(Buffer.byteLength(first!, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+    expect(Buffer.byteLength(second!, 'utf8')).toBeLessThanOrEqual(MAX_PATH_SEGMENT_BYTES);
+  });
+});
+
 // ── validatePattern ───────────────────────────────────────────────────────────
 
 describe('validatePattern', () => {
@@ -461,6 +599,12 @@ describe('DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE', () => {
     expect(resolveUploadPath(P, { title: 'Untitled', originalFilename: 'untitled', extension: 'epub' }, 'epub')).toBe('Unknown Author/Untitled.epub');
   });
 
+  it('no title: falls back to original filename', () => {
+    expect(resolveUploadPath(P, { authors: '', title: '', originalFilename: 'original-stem', extension: 'epub' }, 'epub')).toBe(
+      'Unknown Author/original-stem.epub',
+    );
+  });
+
   it('multiple authors: uses only the first', () => {
     expect(resolveUploadPath(P, MULTI_AUTHOR, 'epub')).toBe('Bruce Sterling/Sprawl/01. Neuromancer (1984).epub');
   });
@@ -475,6 +619,26 @@ describe('DEFAULT_UPLOAD_PATTERN_BOOK_PER_FILE', () => {
 
   it('different file extension is appended correctly', () => {
     expect(resolveUploadPath(P, PARTIAL, 'pdf')).toBe('Andy Weir/Project Hail Mary (2021).pdf');
+  });
+
+  it('passes validatePattern', () => {
+    expect(validatePattern(P)).toBe(true);
+  });
+});
+
+// ── DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER integration ───────────────────────
+
+describe('DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER', () => {
+  const P = DEFAULT_UPLOAD_PATTERN_BOOK_PER_FOLDER;
+
+  it('full metadata: author / series / index. title (year) / index. title (year)', () => {
+    expect(resolveUploadPath(P, FULL, 'epub')).toBe('William Gibson/Sprawl/01. Neuromancer (1984)/01. Neuromancer (1984).epub');
+  });
+
+  it('no title: falls back to original filename in folder and file segments', () => {
+    expect(resolveUploadPath(P, { authors: '', title: '', originalFilename: 'original-stem', extension: 'epub' }, 'epub')).toBe(
+      'Unknown Author/original-stem/original-stem.epub',
+    );
   });
 
   it('passes validatePattern', () => {

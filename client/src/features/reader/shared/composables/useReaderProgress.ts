@@ -1,9 +1,44 @@
-import { onUnmounted, ref, type Ref } from 'vue'
+import { onUnmounted, ref, unref, type MaybeRef, type Ref } from 'vue'
 import { api, getAccessToken } from '@/lib/api'
 import type { FoliateRenderer, RelocateDetail } from '../../epub/composables/useFoliate'
 import { readCachedReaderProgress, writeCachedReaderProgress } from '../lib/reader-progress-cache'
 
 export type FooterDisplayMode = 0 | 1 | 2
+
+export interface ReaderProgressOptions {
+  trackingEnabled?: MaybeRef<boolean>
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function normalizeString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+function normalizeFraction(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  return parsed === null ? null : clamp(parsed, 0, 1)
+}
+
+function normalizePercentage(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  return parsed === null ? null : clamp(parsed, 0, 100)
+}
+
+function normalizeNullablePercentage(value: unknown): number | null {
+  return normalizePercentage(value)
+}
+
+function normalizePageNumber(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  return parsed === null || parsed < 0 ? null : parsed
+}
 
 export function formatTimeRemaining(minutes: number): string {
   if (!Number.isFinite(minutes) || minutes < 0) return ''
@@ -15,11 +50,22 @@ export function formatTimeRemaining(minutes: number): string {
   return `${hours} hr ${remainder} min`
 }
 
-export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes: Ref<number>, initialFooterMode: FooterDisplayMode = 0) {
+export function useReaderProgress(
+  bookId: number,
+  fileId: number,
+  elapsedMinutes: Ref<number>,
+  initialFooterMode: FooterDisplayMode = 0,
+  options: ReaderProgressOptions = {},
+) {
   const cfi = ref<string | null>(null)
   const pageNumber = ref<number | null>(null)
   const positionSeconds = ref<number | null>(null)
   const percentage = ref(0)
+  const koboLocationSource = ref<string | null>(null)
+  const koboLocationType = ref<string | null>(null)
+  const koboLocationValue = ref<string | null>(null)
+  const koboContentSourceProgressPercent = ref<number | null>(null)
+  const koreaderProgress = ref<string | null>(null)
   const chapterTitle = ref('')
   const sectionIndex = ref(0)
   const totalSections = ref(0)
@@ -35,9 +81,11 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
   const footerMode = ref<FooterDisplayMode>(initialFooterMode)
   const ttsSectionIndex = ref<number | null>(null)
   const ttsWordIndex = ref<number | null>(null)
+  const trackingEnabled = options.trackingEnabled ?? true
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null
   let dirty = false
+  let lastValidPercentage = 0
 
   function currentSnapshot() {
     return {
@@ -47,6 +95,11 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
       positionSeconds: positionSeconds.value,
       ttsSectionIndex: ttsSectionIndex.value,
       ttsWordIndex: ttsWordIndex.value,
+      koboLocationSource: koboLocationSource.value,
+      koboLocationType: koboLocationType.value,
+      koboLocationValue: koboLocationValue.value,
+      koboContentSourceProgressPercent: koboContentSourceProgressPercent.value,
+      koreaderProgress: koreaderProgress.value,
     }
   }
 
@@ -57,15 +110,27 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     percentage?: number | null
     ttsSectionIndex?: number | null
     ttsWordIndex?: number | null
+    koboLocationSource?: string | null
+    koboLocationType?: string | null
+    koboLocationValue?: string | null
+    koboContentSourceProgressPercent?: number | null
+    koreaderProgress?: string | null
   }) {
-    cfi.value = data.cfi ?? null
-    pageNumber.value = data.pageNumber ?? null
-    positionSeconds.value = data.positionSeconds ?? null
-    percentage.value = typeof data.percentage === 'number' && Number.isFinite(data.percentage) ? data.percentage : 0
+    cfi.value = normalizeString(data.cfi)
+    pageNumber.value = normalizePageNumber(data.pageNumber)
+    positionSeconds.value = finiteNumber(data.positionSeconds)
+    const pct = normalizePercentage(data.percentage)
+    percentage.value = pct ?? 0
+    lastValidPercentage = percentage.value
     ttsSectionIndex.value =
       typeof data.ttsSectionIndex === 'number' && Number.isInteger(data.ttsSectionIndex) && data.ttsSectionIndex >= 0 ? data.ttsSectionIndex : null
     ttsWordIndex.value =
       typeof data.ttsWordIndex === 'number' && Number.isInteger(data.ttsWordIndex) && data.ttsWordIndex >= 0 ? data.ttsWordIndex : null
+    koboLocationSource.value = normalizeString(data.koboLocationSource)
+    koboLocationType.value = normalizeString(data.koboLocationType)
+    koboLocationValue.value = normalizeString(data.koboLocationValue)
+    koboContentSourceProgressPercent.value = normalizeNullablePercentage(data.koboContentSourceProgressPercent)
+    koreaderProgress.value = normalizeString(data.koreaderProgress)
   }
 
   function getTtsPosition(): { sectionIndex: number; wordIndex: number } | null {
@@ -73,9 +138,9 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     return { sectionIndex: ttsSectionIndex.value, wordIndex: ttsWordIndex.value }
   }
 
-  function updateTtsPosition(sectionIndex: number, wordIndex: number) {
-    if (!Number.isInteger(sectionIndex) || sectionIndex < 0 || !Number.isInteger(wordIndex) || wordIndex < 0) return
-    ttsSectionIndex.value = sectionIndex
+  function updateTtsPosition(sectionIndexValue: number, wordIndex: number) {
+    if (!Number.isInteger(sectionIndexValue) || sectionIndexValue < 0 || !Number.isInteger(wordIndex) || wordIndex < 0) return
+    ttsSectionIndex.value = sectionIndexValue
     ttsWordIndex.value = wordIndex
     cacheCurrentProgress()
     scheduleSave()
@@ -86,6 +151,7 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
   }
 
   function scheduleSave() {
+    if (!unref(trackingEnabled)) return
     dirty = true
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = setTimeout(() => {
@@ -118,7 +184,7 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
       clearTimeout(saveTimer)
       saveTimer = null
     }
-    if (!dirty) return
+    if (!dirty || !unref(trackingEnabled)) return
     dirty = false
     cacheCurrentProgress()
     const body = JSON.stringify(currentSnapshot())
@@ -137,7 +203,15 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     flushKeepalive()
   })
 
+  function updatePercentage(value: unknown, fallback = lastValidPercentage): number {
+    const normalized = normalizePercentage(value) ?? fallback
+    percentage.value = normalized
+    lastValidPercentage = normalized
+    return normalized
+  }
+
   async function load() {
+    if (!unref(trackingEnabled)) return
     const cached = readCachedReaderProgress(fileId)
     const res = await api(`/api/v1/books/files/${fileId}/progress`)
     if (!res.ok) {
@@ -153,6 +227,7 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
 
   /** Fetch the latest server progress and apply it (used before TTS play). */
   async function refreshFromServer() {
+    if (!unref(trackingEnabled)) return
     const res = await api(`/api/v1/books/files/${fileId}/progress`)
     if (!res.ok) return
     const data = await res.json()
@@ -161,10 +236,21 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     dirty = false
   }
 
-  function onRelocate(detail: RelocateDetail, options?: { persist?: boolean }) {
-    cfi.value = detail?.cfi ?? null
-    fraction.value = detail?.fraction ?? 0
-    percentage.value = fraction.value * 100
+  function onRelocate(detail: RelocateDetail, relocateOptions?: { persist?: boolean }) {
+    cfi.value = normalizeString(detail?.cfi)
+    const relocatedFraction = normalizeFraction(detail?.fraction)
+    if (relocatedFraction !== null) {
+      fraction.value = relocatedFraction
+      updatePercentage(relocatedFraction * 100)
+    }
+    koboLocationSource.value = normalizeString(detail?.source)
+    koboLocationValue.value = normalizeString(detail?.koboLocationValue)
+    koboLocationType.value = koboLocationValue.value ? (normalizeString(detail?.koboLocationType) ?? 'KoboSpan') : null
+    koboContentSourceProgressPercent.value = normalizeNullablePercentage(detail?.contentSourceProgressPercent)
+    koreaderProgress.value = normalizeString(detail?.koreaderProgress)
+    const hasSaveableLocation =
+      relocatedFraction !== null || cfi.value !== null || koboLocationValue.value !== null || koreaderProgress.value !== null
+
     chapterTitle.value = detail?.tocItem?.label ?? ''
     sectionIndex.value = detail?.section?.current ?? detail?.index ?? 0
     totalSections.value = detail?.section?.total ?? detail?.total ?? 0
@@ -176,17 +262,25 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     timeSection.value = detail?.time?.section ?? 0
     timeTotal.value = detail?.time?.total ?? 0
 
-    if (options?.persist === false) return
+    if (relocateOptions?.persist === false) return
+    if (!unref(trackingEnabled) || !hasSaveableLocation) return
     cacheCurrentProgress()
     scheduleSave()
   }
 
   async function save() {
+    if (!unref(trackingEnabled)) return
+    const safePercentage = updatePercentage(percentage.value)
     cacheCurrentProgress()
     await api(`/api/v1/books/files/${fileId}/progress`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(currentSnapshot()),
+      body: JSON.stringify({
+        ...currentSnapshot(),
+        pageNumber: normalizePageNumber(pageNumber.value),
+        percentage: safePercentage,
+        koboContentSourceProgressPercent: normalizeNullablePercentage(koboContentSourceProgressPercent.value),
+      }),
     })
   }
 
@@ -310,6 +404,11 @@ export function useReaderProgress(bookId: number, fileId: number, elapsedMinutes
     pageNumber,
     positionSeconds,
     percentage,
+    koboLocationSource,
+    koboLocationType,
+    koboLocationValue,
+    koboContentSourceProgressPercent,
+    koreaderProgress,
     chapterTitle,
     sectionIndex,
     totalSections,

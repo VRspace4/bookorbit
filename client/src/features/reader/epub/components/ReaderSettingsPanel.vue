@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { BookOpen, LayoutGrid, Moon, Palette, ScrollText, Sun, Type } from 'lucide-vue-next'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { BookOpen, LayoutGrid, Moon, Palette, ScrollText, Sun, Type } from '@lucide/vue'
 import type { ReaderState } from '../composables/useReaderState'
 import type { useCustomFonts } from '../composables/useCustomFonts'
 import { themes } from '../constants/themes'
 import { BUILTIN_READER_FONT_OPTIONS } from '@/features/reader/shared/constants/font-options'
 import { formatFontFamilyLabel } from '@/features/reader/shared/lib/font-display'
 
+const { t } = useI18n()
+
 const props = defineProps<{
   state: ReaderState
   customFonts?: ReturnType<typeof useCustomFonts>
+  isFixedLayout?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -27,11 +31,13 @@ const scrollMemory = ref<Record<Tab, number>>({
   layout: 0,
 })
 
-const tabs: { id: Tab; icon: typeof Palette; label: string }[] = [
-  { id: 'appearance', icon: Palette, label: 'Appearance' },
-  { id: 'text', icon: Type, label: 'Text' },
-  { id: 'layout', icon: LayoutGrid, label: 'Layout' },
-]
+const allTabs = computed<{ id: Tab; icon: typeof Palette; label: string }[]>(() => [
+  { id: 'appearance', icon: Palette, label: t('reader.settings.tabs.appearance') },
+  { id: 'text', icon: Type, label: t('reader.settings.tabs.text') },
+  { id: 'layout', icon: LayoutGrid, label: t('reader.settings.tabs.layout') },
+])
+
+const tabs = computed(() => (props.isFixedLayout ? allTabs.value.filter((tab) => tab.id !== 'text') : allTabs.value))
 
 const stepperButtonClass = 'size-8 rounded-lg border border-border text-lg font-light text-foreground transition-colors hover:bg-muted'
 const stepperGroupClass = 'flex min-w-[11rem] items-center justify-end gap-2'
@@ -105,6 +111,15 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => props.isFixedLayout,
+  (fixed) => {
+    if (fixed && activeTab.value === 'text') {
+      activeTab.value = 'layout'
+    }
+  },
+)
+
 function selectCustomFont(familyName: string) {
   if (!props.customFonts) return
   const cssFamilyName = props.customFonts.getCssFamilyForDisplay(familyName)
@@ -114,6 +129,14 @@ function selectCustomFont(familyName: string) {
 function isCustomFontSelected(familyName: string): boolean {
   if (!props.customFonts) return false
   return props.customFonts.isFontFamilySelected(familyName, props.state.fontFamily)
+}
+
+function setFixedLayoutSpreadAuto() {
+  emit('update', { fixedLayoutSpread: 'auto' })
+}
+
+function setFixedLayoutSpreadNone() {
+  emit('update', { fixedLayoutSpread: 'none' })
 }
 </script>
 
@@ -147,7 +170,7 @@ function isCustomFontSelected(familyName: string): boolean {
       <template v-if="activeTab === 'appearance'">
         <div class="space-y-6">
           <div>
-            <p class="mb-2 text-[13px] font-medium text-foreground/90">Mode</p>
+            <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.settings.appearance.mode') }}</p>
             <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
               <button
                 class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
@@ -159,7 +182,7 @@ function isCustomFontSelected(familyName: string): boolean {
                 @click="emit('update', { isDark: false })"
               >
                 <Sun :size="15" />
-                <span>Light</span>
+                <span>{{ t('reader.settings.appearance.light') }}</span>
               </button>
               <button
                 class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
@@ -171,7 +194,7 @@ function isCustomFontSelected(familyName: string): boolean {
                 @click="emit('update', { isDark: true })"
               >
                 <Moon :size="15" />
-                <span>Dark</span>
+                <span>{{ t('reader.settings.appearance.dark') }}</span>
               </button>
             </div>
           </div>
@@ -179,7 +202,7 @@ function isCustomFontSelected(familyName: string): boolean {
           <div class="h-px bg-border/70" />
 
           <div>
-            <p class="mb-2 text-[13px] font-medium text-foreground/90">Color theme</p>
+            <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.settings.appearance.colorTheme') }}</p>
             <div class="grid grid-cols-6 gap-2">
               <button
                 v-for="theme in themes"
@@ -201,12 +224,12 @@ function isCustomFontSelected(familyName: string): boolean {
         </div>
       </template>
 
-      <template v-if="activeTab === 'text'">
+      <template v-if="activeTab === 'text' && !isFixedLayout">
         <div class="space-y-6">
           <div class="flex items-center justify-between gap-4">
             <div class="space-y-1 pr-3">
-              <p class="text-sm font-medium leading-tight">Font size</p>
-              <p class="text-xs leading-tight text-muted-foreground">Range: 10-32px</p>
+              <p class="text-sm font-medium leading-tight">{{ t('reader.settings.text.fontSize') }}</p>
+              <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.text.fontSizeRange') }}</p>
             </div>
             <div :class="stepperGroupClass">
               <button :class="stepperButtonClass" @click="step('fontSize', -1, 10, 32)">−</button>
@@ -217,8 +240,8 @@ function isCustomFontSelected(familyName: string): boolean {
 
           <div class="flex items-center justify-between gap-4">
             <div class="space-y-1 pr-3">
-              <p class="text-sm font-medium leading-tight">Line height</p>
-              <p class="text-xs leading-tight text-muted-foreground">Range: 0.8-3.0</p>
+              <p class="text-sm font-medium leading-tight">{{ t('reader.settings.text.lineHeight') }}</p>
+              <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.text.lineHeightRange') }}</p>
             </div>
             <div :class="stepperGroupClass">
               <button :class="stepperButtonClass" @click="step('lineHeight', -0.1, 0.8, 3, 1)">−</button>
@@ -231,11 +254,11 @@ function isCustomFontSelected(familyName: string): boolean {
 
           <div class="space-y-3">
             <div class="space-y-1">
-              <p class="text-sm font-medium leading-tight">Font family</p>
-              <p class="text-xs leading-tight text-muted-foreground">Choose built-in or uploaded fonts for body text.</p>
+              <p class="text-sm font-medium leading-tight">{{ t('reader.settings.text.fontFamily') }}</p>
+              <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.text.fontFamilyDescription') }}</p>
             </div>
             <div class="space-y-2">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Built-in</p>
+              <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{{ t('reader.settings.text.builtIn') }}</p>
               <div class="flex flex-wrap gap-2">
                 <button
                   v-for="font in BUILTIN_READER_FONT_OPTIONS"
@@ -257,7 +280,7 @@ function isCustomFontSelected(familyName: string): boolean {
             <template v-if="customFonts && customFonts.families.value.length > 0">
               <div class="h-px bg-border/70" />
               <div class="space-y-2">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Your fonts</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{{ t('reader.settings.text.yourFonts') }}</p>
                 <div class="flex flex-wrap gap-2">
                   <button
                     v-for="family in customFonts.families.value"
@@ -282,116 +305,153 @@ function isCustomFontSelected(familyName: string): boolean {
 
       <template v-if="activeTab === 'layout'">
         <div class="space-y-6">
-          <div class="space-y-3">
-            <div class="space-y-1">
-              <p class="text-sm font-medium leading-tight">Reading flow</p>
-              <p class="text-xs leading-tight text-muted-foreground">Switch between paged and continuous scrolling.</p>
-            </div>
-            <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-              <button
-                class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
-                :class="
-                  state.flow === 'paginated'
-                    ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                "
-                @click="emit('update', { flow: 'paginated' })"
-              >
-                <BookOpen :size="15" />
-                <span>Paginated</span>
-              </button>
-              <button
-                class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
-                :class="
-                  state.flow === 'scrolled'
-                    ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                "
-                @click="emit('update', { flow: 'scrolled' })"
-              >
-                <ScrollText :size="15" />
-                <span>Scrolled</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="h-px bg-border/70" />
-
-          <div class="space-y-4">
-            <div class="flex items-center justify-between gap-4">
-              <div class="space-y-1 pr-3">
-                <p class="text-sm font-medium leading-tight">Max columns</p>
-                <p class="text-xs leading-tight text-muted-foreground">Range: 1-10</p>
+          <template v-if="isFixedLayout">
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.pageSpreads') }}</p>
+                <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.pageSpreadsDescription') }}</p>
               </div>
-              <div :class="stepperGroupClass">
-                <button :class="stepperButtonClass" @click="step('maxColumnCount', -1, 1, 10)">−</button>
-                <span :class="stepperValueClass">{{ state.maxColumnCount }}</span>
-                <button :class="stepperButtonClass" @click="step('maxColumnCount', 1, 1, 10)">+</button>
+              <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
+                <button
+                  class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
+                  :class="
+                    state.fixedLayoutSpread === 'auto'
+                      ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
+                  "
+                  @click="setFixedLayoutSpreadAuto"
+                >
+                  <LayoutGrid :size="15" />
+                  <span>{{ t('reader.settings.layout.bookDefault') }}</span>
+                </button>
+                <button
+                  class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
+                  :class="
+                    state.fixedLayoutSpread === 'none'
+                      ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
+                  "
+                  @click="setFixedLayoutSpreadNone"
+                >
+                  <BookOpen :size="15" />
+                  <span>{{ t('reader.settings.layout.singlePage') }}</span>
+                </button>
               </div>
             </div>
+          </template>
 
-            <div class="flex items-center justify-between gap-4">
-              <div class="space-y-1 pr-3">
-                <p class="text-sm font-medium leading-tight">Column gap</p>
-                <p class="text-xs leading-tight text-muted-foreground">Range: 0-50%</p>
+          <template v-else>
+            <div class="space-y-3">
+              <div class="space-y-1">
+                <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.readingFlow') }}</p>
+                <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.readingFlowDescription') }}</p>
               </div>
-              <div :class="stepperGroupClass">
-                <button :class="stepperButtonClass" @click="step('gap', -0.01, 0, 0.5, 2)">−</button>
-                <span :class="stepperValueClass">{{ formatGap(state.gap) }}</span>
-                <button :class="stepperButtonClass" @click="step('gap', 0.01, 0, 0.5, 2)">+</button>
+              <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
+                <button
+                  class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
+                  :class="
+                    state.flow === 'paginated'
+                      ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
+                  "
+                  @click="emit('update', { flow: 'paginated' })"
+                >
+                  <BookOpen :size="15" />
+                  <span>{{ t('reader.settings.layout.paginated') }}</span>
+                </button>
+                <button
+                  class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
+                  :class="
+                    state.flow === 'scrolled'
+                      ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
+                  "
+                  @click="emit('update', { flow: 'scrolled' })"
+                >
+                  <ScrollText :size="15" />
+                  <span>{{ t('reader.settings.layout.scrolled') }}</span>
+                </button>
               </div>
             </div>
 
-            <div class="flex items-center justify-between gap-4">
-              <div class="space-y-1 pr-3">
-                <p class="text-sm font-medium leading-tight">Max width</p>
-                <p class="text-xs leading-tight text-muted-foreground">Range: 400-1600</p>
+            <div class="h-px bg-border/70" />
+
+            <div class="space-y-4">
+              <div class="flex items-center justify-between gap-4">
+                <div class="space-y-1 pr-3">
+                  <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.textColumns') }}</p>
+                  <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.textColumnsRange') }}</p>
+                </div>
+                <div :class="stepperGroupClass">
+                  <button :class="stepperButtonClass" @click="step('maxColumnCount', -1, 1, 10)">−</button>
+                  <span :class="stepperValueClass">{{ state.maxColumnCount }}</span>
+                  <button :class="stepperButtonClass" @click="step('maxColumnCount', 1, 1, 10)">+</button>
+                </div>
               </div>
-              <div :class="stepperGroupClass">
-                <button :class="stepperButtonClass" @click="step('maxInlineSize', -40, 400, 1600)">−</button>
-                <span :class="stepperValueClass">{{ state.maxInlineSize }}px</span>
-                <button :class="stepperButtonClass" @click="step('maxInlineSize', 40, 400, 1600)">+</button>
+
+              <div class="flex items-center justify-between gap-4">
+                <div class="space-y-1 pr-3">
+                  <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.columnGap') }}</p>
+                  <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.columnGapRange') }}</p>
+                </div>
+                <div :class="stepperGroupClass">
+                  <button :class="stepperButtonClass" @click="step('gap', -0.01, 0, 0.5, 2)">−</button>
+                  <span :class="stepperValueClass">{{ formatGap(state.gap) }}</span>
+                  <button :class="stepperButtonClass" @click="step('gap', 0.01, 0, 0.5, 2)">+</button>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between gap-4">
+                <div class="space-y-1 pr-3">
+                  <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.maxWidth') }}</p>
+                  <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.maxWidthRange') }}</p>
+                </div>
+                <div :class="stepperGroupClass">
+                  <button :class="stepperButtonClass" @click="step('maxInlineSize', -40, 400, 1600)">−</button>
+                  <span :class="stepperValueClass">{{ state.maxInlineSize }}px</span>
+                  <button :class="stepperButtonClass" @click="step('maxInlineSize', 40, 400, 1600)">+</button>
+                </div>
               </div>
             </div>
-          </div>
 
-          <div class="h-px bg-border/70" />
+            <div class="h-px bg-border/70" />
 
-          <div class="space-y-4">
-            <div class="flex items-center justify-between gap-4">
-              <div class="space-y-1 pr-3">
-                <p class="text-sm font-medium leading-tight">Justify text</p>
-                <p class="text-xs leading-tight text-muted-foreground">Enable full-width paragraph alignment.</p>
+            <div class="space-y-4">
+              <div class="flex items-center justify-between gap-4">
+                <div class="space-y-1 pr-3">
+                  <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.justifyText') }}</p>
+                  <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.justifyTextDescription') }}</p>
+                </div>
+                <button
+                  class="relative h-6 w-11 shrink-0 rounded-full transition-colors"
+                  :class="state.justify ? 'bg-primary' : 'bg-muted'"
+                  @click="emit('update', { justify: !state.justify })"
+                >
+                  <div
+                    class="absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                    :class="state.justify ? 'translate-x-6' : 'translate-x-1'"
+                  />
+                </button>
               </div>
-              <button
-                class="relative h-6 w-11 shrink-0 rounded-full transition-colors"
-                :class="state.justify ? 'bg-primary' : 'bg-muted'"
-                @click="emit('update', { justify: !state.justify })"
-              >
-                <div
-                  class="absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
-                  :class="state.justify ? 'translate-x-6' : 'translate-x-1'"
-                />
-              </button>
-            </div>
 
-            <div class="flex items-center justify-between gap-4">
-              <div class="space-y-1 pr-3">
-                <p class="text-sm font-medium leading-tight">Hyphenation</p>
-                <p class="text-xs leading-tight text-muted-foreground">Enable automatic word-break hyphenation.</p>
+              <div class="flex items-center justify-between gap-4">
+                <div class="space-y-1 pr-3">
+                  <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.hyphenation') }}</p>
+                  <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.hyphenationDescription') }}</p>
+                </div>
+                <button
+                  class="relative h-6 w-11 shrink-0 rounded-full transition-colors"
+                  :class="state.hyphenate ? 'bg-primary' : 'bg-muted'"
+                  @click="emit('update', { hyphenate: !state.hyphenate })"
+                >
+                  <div
+                    class="absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                    :class="state.hyphenate ? 'translate-x-6' : 'translate-x-1'"
+                  />
+                </button>
               </div>
-              <button
-                class="relative h-6 w-11 shrink-0 rounded-full transition-colors"
-                :class="state.hyphenate ? 'bg-primary' : 'bg-muted'"
-                @click="emit('update', { hyphenate: !state.hyphenate })"
-              >
-                <div
-                  class="absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
-                  :class="state.hyphenate ? 'translate-x-6' : 'translate-x-1'"
-                />
-              </button>
             </div>
-          </div>
+          </template>
         </div>
       </template>
     </div>

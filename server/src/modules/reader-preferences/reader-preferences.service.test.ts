@@ -5,6 +5,7 @@ import type { RequestUser } from '../../common/types/request-user';
 import { BookService } from '../book/book.service';
 import { ReaderPreferencesRepository } from './reader-preferences.repository';
 import { ReaderPreferencesService } from './reader-preferences.service';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 function makeUser(overrides?: Partial<RequestUser>): RequestUser {
   return {
@@ -21,6 +22,8 @@ function makeUser(overrides?: Partial<RequestUser>): RequestUser {
     provisioningMethod: 'local',
     permissions: [],
     ...overrides,
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 }
 
@@ -97,6 +100,18 @@ describe('ReaderPreferencesService', () => {
     await service.upsertPreference(user, 10, { zoomMode: 'custom', customScale: 1.4 });
 
     expect(mockRepo.upsertPreference).toHaveBeenCalledWith(4, 10, { zoomMode: 'custom', customScale: 1.4 });
+  });
+
+  it('accepts new PDF layout choices and normalizes legacy wrapped mode', async () => {
+    const user = makeUser({ id: 4 });
+
+    await service.upsertPreference(user, 10, { scrollMode: 'wrapped', spread: 'auto', zoomMode: 'automatic' });
+
+    expect(mockRepo.upsertPreference).toHaveBeenCalledWith(4, 10, {
+      scrollMode: 'vertical',
+      spread: 'auto',
+      zoomMode: 'automatic',
+    });
   });
 
   it('maps cbz file format to cbx group and validates against comics settings', async () => {
@@ -211,6 +226,7 @@ describe('ReaderPreferencesService', () => {
       ttsSkipForwardSeconds: 30,
       ttsSentenceHighlightColor: '#4f6f7d',
       ttsWordHighlightColor: '#0f4f5f',
+      fixedLayoutSpread: 'auto' as const,
     };
 
     it('accepts valid footerDisplayMode values (0, 1, 2) in full epub defaults', async () => {
@@ -236,11 +252,28 @@ describe('ReaderPreferencesService', () => {
       expect(mockRepo.upsertPreference).toHaveBeenCalledWith(7, 20, { footerDisplayMode: 1 });
     });
 
+    it('accepts partial epub per-book settings with fixedLayoutSpread', async () => {
+      const user = makeUser();
+      mockBookService.verifyFileAccess.mockResolvedValueOnce({ format: 'epub' });
+
+      await service.upsertPreference(user, 22, { fixedLayoutSpread: 'none' });
+
+      expect(mockRepo.upsertPreference).toHaveBeenCalledWith(7, 22, { fixedLayoutSpread: 'none' });
+    });
+
     it('rejects partial epub per-book settings with invalid footerDisplayMode', async () => {
       const user = makeUser();
       mockBookService.verifyFileAccess.mockResolvedValueOnce({ format: 'epub' });
 
       await expect(service.upsertPreference(user, 21, { footerDisplayMode: 5 })).rejects.toThrow(BadRequestException);
+      expect(mockRepo.upsertPreference).not.toHaveBeenCalled();
+    });
+
+    it('rejects partial epub per-book settings with invalid fixedLayoutSpread', async () => {
+      const user = makeUser();
+      mockBookService.verifyFileAccess.mockResolvedValueOnce({ format: 'epub' });
+
+      await expect(service.upsertPreference(user, 23, { fixedLayoutSpread: 'two-page' })).rejects.toThrow(BadRequestException);
       expect(mockRepo.upsertPreference).not.toHaveBeenCalled();
     });
 
@@ -322,6 +355,13 @@ describe('ReaderPreferencesService', () => {
           }),
         }),
       );
+    });
+
+    it('requires fixedLayoutSpread when saving full epub defaults', async () => {
+      const withoutSpread = { ...validEpubDefaults };
+      delete (withoutSpread as Record<string, unknown>).fixedLayoutSpread;
+
+      await expect(service.upsertDefault(1, 'epub', withoutSpread)).rejects.toThrow(BadRequestException);
     });
   });
 });

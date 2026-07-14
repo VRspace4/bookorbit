@@ -2,7 +2,6 @@ import { computed, ref } from 'vue'
 import { watchDebounced } from '@vueuse/core'
 import { storage } from '@/services/storage'
 import { cloneTableLayout, validateTableLayout, type SortSpec, type TableLayoutState, type TableViewType } from '@bookorbit/types'
-import type { ColumnId } from './useTableColumns'
 
 /**
  * Column presets: reusable column layouts only.
@@ -31,10 +30,22 @@ function presetsStorageKey(viewType: TableViewType): string {
   return `bookorbit:tablePresets:${viewType}`
 }
 
-function getBuiltInPresets(allColumnIds: ColumnId[]): TablePreset[] {
+function getBuiltInPresets(allColumnIds: string[]): TablePreset[] {
   const defaultVisible = ['cover', 'title', 'authors', 'seriesName', 'seriesIndex', 'publishedYear', 'rating', 'readStatus', 'format', 'actions']
   const compactVisible = ['cover', 'title', 'authors', 'rating', 'readStatus', 'actions']
-  const metadataVisible = ['cover', 'title', 'authors', 'subtitle', 'publisher', 'language', 'publishedYear', 'pageCount', 'format', 'actions']
+  const metadataVisible = [
+    'cover',
+    'title',
+    'authors',
+    'subtitle',
+    'publisher',
+    'language',
+    'publishedDate',
+    'publishedYear',
+    'pageCount',
+    'format',
+    'actions',
+  ]
 
   const buildLayout = (visibleIds: string[]): TableLayoutState => ({
     columnOrder: allColumnIds,
@@ -64,7 +75,7 @@ function getBuiltInPresets(allColumnIds: ColumnId[]): TablePreset[] {
   ]
 }
 
-function isValidPreset(p: unknown, knownIds: ColumnId[]): p is TablePreset {
+function isValidPreset(p: unknown, knownIds: string[]): p is TablePreset {
   if (typeof p !== 'object' || p === null) return false
   const obj = p as Record<string, unknown>
   if (typeof obj.id !== 'string' || typeof obj.name !== 'string' || validateTableLayout(obj.layout, knownIds) === null) return false
@@ -80,13 +91,13 @@ function isValidSort(value: unknown): value is SortSpec[] {
   )
 }
 
-function loadCustomPresets(viewType: TableViewType, knownIds: ColumnId[]): TablePreset[] {
+function loadCustomPresets(viewType: TableViewType, knownIds: string[]): TablePreset[] {
   const raw = storage.get<unknown[]>(presetsStorageKey(viewType), [])
   if (!Array.isArray(raw)) return []
   return raw.filter((preset): preset is TablePreset => isValidPreset(preset, knownIds))
 }
 
-export function useTablePresets(viewType: TableViewType, allColumnIds: ColumnId[]) {
+export function useTablePresets(viewType: TableViewType, allColumnIds: string[]) {
   const customPresets = ref<TablePreset[]>(loadCustomPresets(viewType, allColumnIds))
 
   watchDebounced(customPresets, (value) => storage.set(presetsStorageKey(viewType), value), { deep: true, debounce: 500 })

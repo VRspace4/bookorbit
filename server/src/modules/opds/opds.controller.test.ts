@@ -52,11 +52,15 @@ function makeController() {
   const config = {
     get: vi.fn().mockReturnValue('/books'),
   } as never;
+  const bookService = {
+    resolveDownloadFilename: vi.fn().mockResolvedValue('BadTitle - Author.epub'),
+  } as never;
 
   return {
-    controller: new OpdsController(opdsService, opdsBookService, config),
+    controller: new OpdsController(opdsService, opdsBookService, config, bookService),
     opdsService,
     opdsBookService,
+    bookService,
   };
 }
 
@@ -104,8 +108,8 @@ describe('OpdsController', () => {
     expect(opdsBookService.getAccessibleLibraries).toHaveBeenCalledWith(8, false);
     expect(opdsBookService.getUserCollections).toHaveBeenCalledWith(8);
     expect(opdsBookService.getUserSmartScopes).toHaveBeenCalledWith(8);
-    expect(opdsBookService.getDistinctAuthors).toHaveBeenCalledWith(8, false);
-    expect(opdsBookService.getDistinctSeries).toHaveBeenCalledWith(8, false);
+    expect(opdsBookService.getDistinctAuthors).toHaveBeenCalledWith(8, false, undefined);
+    expect(opdsBookService.getDistinctSeries).toHaveBeenCalledWith(8, false, undefined);
     expect(opdsService.generateSeriesNavigation).toHaveBeenCalledWith([{ name: 'Dune', bookCount: 2 }]);
   });
 
@@ -130,16 +134,73 @@ describe('OpdsController', () => {
         q: 'arrakis',
       },
       true,
+      undefined,
     );
     expect(opdsService.generateAcquisitionFeed).toHaveBeenCalledWith(
       'Search: arrakis',
-      'urn:bookorbit:catalog',
+      'urn:bookorbit:catalog:author:Frank%20Herbert:collectionId:11:libraryId:2:q:arrakis:series:Dune:smartScopeId:15',
       [{ id: 1 }],
       1,
       1,
       100,
       expect.stringContaining('/api/v1/opds/catalog?'),
       'token',
+    );
+  });
+
+  it('catalog generates unique feed ids per filter context', async () => {
+    const user = { userId: 5, isSuperuser: false, sortOrder: 'recent', coverToken: 'tok' } as never;
+
+    const noFilters = makeController();
+    await noFilters.controller.catalog(user, 1, 50, undefined, undefined, undefined, undefined, undefined, undefined, makeReply());
+    expect(noFilters.opdsService.generateAcquisitionFeed).toHaveBeenCalledWith(
+      expect.anything(),
+      'urn:bookorbit:catalog',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    const libraryOnly = makeController();
+    await libraryOnly.controller.catalog(user, 1, 50, '1', undefined, undefined, undefined, undefined, undefined, makeReply());
+    expect(libraryOnly.opdsService.generateAcquisitionFeed).toHaveBeenCalledWith(
+      expect.anything(),
+      'urn:bookorbit:catalog:libraryId:1',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    const searchOnly = makeController();
+    await searchOnly.controller.catalog(user, 1, 50, undefined, undefined, undefined, undefined, undefined, 'dune', makeReply());
+    expect(searchOnly.opdsService.generateAcquisitionFeed).toHaveBeenCalledWith(
+      expect.anything(),
+      'urn:bookorbit:catalog:q:dune',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    const multiFilter = makeController();
+    await multiFilter.controller.catalog(user, 1, 50, '2', undefined, undefined, 'Frank Herbert', undefined, undefined, makeReply());
+    expect(multiFilter.opdsService.generateAcquisitionFeed).toHaveBeenCalledWith(
+      expect.anything(),
+      'urn:bookorbit:catalog:author:Frank%20Herbert:libraryId:2',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
     );
   });
 
@@ -163,8 +224,8 @@ describe('OpdsController', () => {
     await controller.recent(user, 0, 1000, makeReply());
     await controller.surprise(user, makeReply());
 
-    expect(opdsBookService.getRecentBooksPage).toHaveBeenCalledWith(12, 1, 100, false);
-    expect(opdsBookService.getRandomBooks).toHaveBeenCalledWith(12, 25, false);
+    expect(opdsBookService.getRecentBooksPage).toHaveBeenCalledWith(12, 1, 100, false, undefined);
+    expect(opdsBookService.getRandomBooks).toHaveBeenCalledWith(12, 25, false, undefined);
     expect(opdsService.generateAcquisitionFeed).toHaveBeenCalledWith(
       'Random Books',
       'urn:bookorbit:surprise',
@@ -198,7 +259,7 @@ describe('OpdsController', () => {
 
     await controller.cover(42, { userId: 7, isSuperuser: false } as never, reply);
 
-    expect(opdsBookService.validateBookAccess).toHaveBeenCalledWith(42, 7, false);
+    expect(opdsBookService.validateBookAccess).toHaveBeenCalledWith(42, 7, false, undefined);
     expect(reply.header).toHaveBeenCalledWith('Cross-Origin-Resource-Policy', 'cross-origin');
     expect(mockCreateReadStream).toHaveBeenCalledWith('/books/covers/42/cover_custom.png');
     expect(reply.header).toHaveBeenCalledWith('ETag', '"1234"');
@@ -281,7 +342,10 @@ describe('OpdsController', () => {
 
     await controller.download(99, 0, { userId: 2, isSuperuser: false } as never, reply);
 
-    expect(reply.header).toHaveBeenCalledWith('Content-Disposition', 'attachment; filename="BadTitle - Author.epub"');
+    expect(reply.header).toHaveBeenCalledWith(
+      'Content-Disposition',
+      'attachment; filename="BadTitle - Author.epub"; filename*=UTF-8\'\'BadTitle%20-%20Author.epub',
+    );
     expect(reply.header).toHaveBeenCalledWith('Content-Length', 12345);
     expect(reply.type).toHaveBeenCalledWith('application/epub+zip');
     expect(reply.send).toHaveBeenCalledWith(stream);

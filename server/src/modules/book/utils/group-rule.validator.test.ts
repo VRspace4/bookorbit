@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 
-import { FIELD_OPERATORS, RULE_OPERATORS, type RuleField, type RuleOperator } from '@bookorbit/types';
+import { COMMUNITY_RATING_PROVIDER_KEYS, FIELD_OPERATORS, RULE_OPERATORS, type RuleField, type RuleOperator } from '@bookorbit/types';
 
 import { validateGroupRule, groupRuleSchema } from './group-rule.validator';
 
@@ -22,6 +22,9 @@ function validRuleValue(operator: RuleOperator): { value?: unknown; valueTo?: un
     case 'isUnread':
     case 'isInProgress':
     case 'isFinished':
+    case 'isLocked':
+    case 'isUnlocked':
+    case 'isUpNext':
       return {};
     case 'contains':
     case 'notContains':
@@ -158,6 +161,56 @@ describe('validateGroupRule', () => {
       rules: [{ type: 'rule', field: 'publishedYear', operator: 'between', value: 2000, valueTo: 2020 }],
     };
     expect(validateGroupRule(rule)).toBeDefined();
+  });
+
+  it('accepts a community rating rule with an explicit provider', () => {
+    const rule = {
+      type: 'group',
+      join: 'AND',
+      rules: [{ type: 'rule', field: 'communityRating', operator: 'gte', value: 4.5, provider: COMMUNITY_RATING_PROVIDER_KEYS[0] }],
+    };
+
+    expect(validateGroupRule(rule)).toEqual(rule);
+  });
+
+  it('accepts a community rating rule with any provider', () => {
+    const rule = {
+      type: 'group',
+      join: 'AND',
+      rules: [{ type: 'rule', field: 'communityRating', operator: 'gte', value: 4.5, provider: 'any' }],
+    };
+
+    expect(validateGroupRule(rule)).toEqual(rule);
+  });
+
+  it('accepts a community rating rule without provider for backwards compatibility', () => {
+    const rule = {
+      type: 'group',
+      join: 'AND',
+      rules: [{ type: 'rule', field: 'communityRating', operator: 'gte', value: 4.5 }],
+    };
+
+    expect(validateGroupRule(rule)).toEqual(rule);
+  });
+
+  it('rejects provider on non-community-rating rules', () => {
+    const rule = {
+      type: 'group',
+      join: 'AND',
+      rules: [{ type: 'rule', field: 'rating', operator: 'gte', value: 4, provider: 'amazon' }],
+    };
+
+    expect(() => validateGroupRule(rule)).toThrow(BadRequestException);
+  });
+
+  it('rejects providers that do not expose community ratings', () => {
+    const rule = {
+      type: 'group',
+      join: 'AND',
+      rules: [{ type: 'rule', field: 'communityRating', operator: 'gte', value: 4.5, provider: 'kobo' }],
+    };
+
+    expect(() => validateGroupRule(rule)).toThrow(BadRequestException);
   });
 
   it('accepts array values for includesAny operators', () => {

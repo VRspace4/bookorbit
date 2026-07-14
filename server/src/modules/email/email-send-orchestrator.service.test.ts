@@ -12,10 +12,12 @@ import { EmailSendLogService } from './email-send-log.service';
 import { EmailTransportService } from './email-transport.service';
 import { EmailBookAccessService } from './email-book-access.service';
 import { NotificationService } from '../notification/notification.service';
+import { BookService } from '../book/book.service';
 import type { RequestUser } from '../../common/types/request-user';
 import type { SendBookDto } from './dto/send-book.dto';
 import * as fs from 'fs';
 import { KINDLE_CONVERT_SUBJECT } from './email-send.constants';
+import { EMPTY_CONTENT_FILTER_RULES } from '@bookorbit/types';
 
 vi.mock('fs');
 
@@ -28,6 +30,7 @@ describe('EmailSendOrchestrator', () => {
   let sendLogService: EmailSendLogService;
   let transportService: EmailTransportService;
   let bookAccessService: EmailBookAccessService;
+  let bookService: BookService;
   let templateService: EmailTemplateService;
 
   const mockUser: RequestUser = {
@@ -43,6 +46,8 @@ describe('EmailSendOrchestrator', () => {
     provisioningMethod: 'manual',
     isSuperuser: false,
     permissions: [],
+
+    contentFilters: EMPTY_CONTENT_FILTER_RULES,
   };
 
   const mockRecipient = {
@@ -68,6 +73,12 @@ describe('EmailSendOrchestrator', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EmailSendOrchestrator,
+        {
+          provide: BookService,
+          useValue: {
+            resolveSelectionToIds: vi.fn().mockImplementation((dto: SendBookDto) => Promise.resolve(dto.bookIds ?? [])),
+          },
+        },
         {
           provide: EmailProviderResolver,
           useValue: { resolve: vi.fn().mockResolvedValue(mockProvider) },
@@ -134,6 +145,7 @@ describe('EmailSendOrchestrator', () => {
     sendLogService = module.get<EmailSendLogService>(EmailSendLogService);
     transportService = module.get<EmailTransportService>(EmailTransportService);
     bookAccessService = module.get<EmailBookAccessService>(EmailBookAccessService);
+    bookService = module.get<BookService>(BookService);
     templateService = module.get<EmailTemplateService>(EmailTemplateService);
 
     (fs.createReadStream as vi.Mock).mockReturnValue('mock-stream');
@@ -149,6 +161,20 @@ describe('EmailSendOrchestrator', () => {
       expect(sendLogService.create).toHaveBeenCalled();
       expect(bookAccessService.assertUserCanAccessBooks).toHaveBeenCalledWith([1], mockUser);
       expect(recipientService.getOwnedByIds).toHaveBeenCalledWith([10], mockUser);
+    });
+
+    it('should resolve query selections and queue every matching book', async () => {
+      const dto: SendBookDto = { query: { libraryId: 5, q: 'dune' }, recipientIds: [10], providerId: 300 };
+      (bookService.resolveSelectionToIds as vi.Mock).mockResolvedValue([1, 2, 2]);
+
+      const result = await orchestrator.send(dto, mockUser);
+
+      expect(result.queued).toBe(2);
+      expect(bookService.resolveSelectionToIds).toHaveBeenCalledWith(dto, mockUser);
+      expect(bookAccessService.assertUserCanAccessBooks).toHaveBeenCalledWith([1, 2], mockUser);
+      expect(sendLogService.create).toHaveBeenCalledTimes(2);
+      expect(sendLogService.create).toHaveBeenNthCalledWith(1, expect.objectContaining({ bookId: 1 }));
+      expect(sendLogService.create).toHaveBeenNthCalledWith(2, expect.objectContaining({ bookId: 2 }));
     });
 
     it('should expand groups and queue emails', async () => {

@@ -1,26 +1,30 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { access as fsAccess } from 'fs/promises';
-import { basename, dirname, extname, join } from 'path';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
+import { access as fsAccess, stat } from 'fs/promises';
+import { basename, dirname, extname, join, relative } from 'path';
 import { Readable } from 'stream';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { formatSeriesIndex } from '../../common/utils/series-index-format.utils';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
-import { libraries, libraryFolders } from '../../db/schema';
+import { books, bookFiles, libraries, libraryFolders } from '../../db/schema';
 import type { RequestUser } from '../../common/types/request-user';
 import { AppSettingsService } from '../app-settings/app-settings.service';
 import { LibraryService } from '../library/library.service';
 import { UploadValidatorService } from './upload-validator.service';
 import { UploadStorageService } from './upload-storage.service';
 import { UploadProcessorService } from './upload-processor.service';
+import { FileRenameService } from '../file-write/file-rename.service';
 import { resolveDownloadFilename, resolveUploadPath } from '@bookorbit/types';
-import type { UploadResult } from '@bookorbit/types';
+import type { AddBookFileResult, UploadResult } from '@bookorbit/types';
 import { extractEpubMetadata } from '../metadata/lib/epub';
 import { extractCbzMetadata, extractCbrMetadata, extractCb7Metadata } from '../metadata/lib/cbz-metadata';
 import { parseMobiFile } from '../metadata/lib/mobi-parser';
 import { parsePdfFile, type PdfParseWarning } from '../metadata/lib/pdf-parser';
+import { computeFileHash } from '../scanner/lib/hash';
 
 type Db = NodePgDatabase<typeof schema>;
 
@@ -35,7 +39,16 @@ export class UploadService {
     private readonly validator: UploadValidatorService,
     private readonly storage: UploadStorageService,
     private readonly processor: UploadProcessorService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  private resolveFileRenameService(): FileRenameService | null {
+    try {
+      return this.moduleRef.get(FileRenameService, { strict: false });
+    } catch {
+      return null;
+    }
+  }
 
   async upload(libraryId: number, folderId: number | undefined, rawFilename: string, fileStream: Readable, user: RequestUser): Promise<UploadResult> {
     const event = 'upload.book';
@@ -68,9 +81,21 @@ export class UploadService {
       shouldCleanupDestination = true;
       await this.storage.moveToPath(tempPath, absolutePath);
 
-      const { bookId } = await this.processor.createBookRecord(libraryId, folder.id, bookFolderPath, absolutePath, relPath, format, sizeBytes);
+      const { bookId, created } = await this.processor.createBookRecord(
+        libraryId,
+        folder.id,
+        bookFolderPath,
+        absolutePath,
+        relPath,
+        format,
+        sizeBytes,
+      );
 
-      this.processor.extractMetadataAsync(bookId, absolutePath, format);
+      if (created) {
+        this.processor.processNewBookImportAsync(bookId, libraryId, absolutePath, format);
+      } else {
+        this.processor.extractMetadataAsync(bookId, absolutePath, format);
+      }
 
       this.logger.log(
         `[${event}] [end] libraryId=${libraryId} userId=${user.id} folderId=${folder.id} bookId=${bookId} format=${format} sizeBytes=${sizeBytes} durationMs=${Date.now() - startedAt} - upload completed`,
@@ -89,6 +114,177 @@ export class UploadService {
     }
   }
 
+  async addFileToBook(bookId: number, rawFilename: string, fileStream: Readable, user: RequestUser): Promise<AddBookFileResult> {
+    const event = 'book.add_file';
+    const startedAt = Date.now();
+    this.logger.log(
+      `[${event}] [start] bookId=${bookId} userId=${user.id} rawFilename="${sanitizeLogValue(rawFilename)}" - add file to book started`,
+    );
+
+    const [bookRow] = await this.db
+      .select({
+        id: books.id,
+        folderPath: books.folderPath,
+        libraryId: books.libraryId,
+        libraryFolderId: books.libraryFolderId,
+        primaryFileId: books.primaryFileId,
+        status: books.status,
+        allowedFormats: libraries.allowedFormats,
+        organizationMode: libraries.organizationMode,
+        libraryFolderPath: libraryFolders.path,
+      })
+      .from(books)
+      .innerJoin(libraries, eq(books.libraryId, libraries.id))
+      .innerJoin(libraryFolders, eq(books.libraryFolderId, libraryFolders.id))
+      .where(eq(books.id, bookId))
+      .limit(1);
+
+    if (!bookRow) throw new NotFoundException(`Book ${bookId} not found`);
+
+    await this.libraryService.verifyUserAccess(user.id, bookRow.libraryId, user.isSuperuser);
+
+    if (bookRow.organizationMode === 'book_per_file') {
+      throw new BadRequestException('Cannot add files to a book in a single-file library. Upload a new book instead.');
+    }
+
+    const filename = this.validator.sanitizeFilename(rawFilename);
+    const format = this.validator.validateFormat(filename, bookRow.allowedFormats);
+
+    const { tempPath, sizeBytes } = await this.storage.streamToTemp(fileStream);
+
+    if (sizeBytes === 0) {
+      await this.storage.cleanup(tempPath);
+      throw new BadRequestException('File must not be empty');
+    }
+
+    let destination: string | null = null;
+    let shouldCleanupDestination = false;
+
+    try {
+      const fileHash = await computeFileHash(tempPath);
+
+      const [existingWithHash] = await this.db
+        .select({ id: bookFiles.id })
+        .from(bookFiles)
+        .where(and(eq(bookFiles.bookId, bookId), eq(bookFiles.fileHash, fileHash)))
+        .limit(1);
+
+      if (existingWithHash) {
+        throw new ConflictException('This file is already attached to this book');
+      }
+
+      destination = join(bookRow.folderPath, filename);
+
+      if (await this.destinationExists(destination)) {
+        throw new ConflictException(`A file named "${filename}" already exists in this book's folder`);
+      }
+
+      shouldCleanupDestination = true;
+      await this.storage.moveToPath(tempPath, destination);
+      // File is on disk. Do not delete it on any subsequent failure — the scanner
+      // will reconcile any orphan. This also prevents the catch block from deleting
+      // a file that a concurrent upload may have written to the same path.
+      shouldCleanupDestination = false;
+
+      const fileStat = await stat(destination, { bigint: true });
+      const ino = fileStat.ino;
+      const relPath = relative(bookRow.libraryFolderPath, destination);
+
+      const [inserted] = await this.db
+        .insert(bookFiles)
+        .values({
+          bookId,
+          libraryFolderId: bookRow.libraryFolderId,
+          absolutePath: destination,
+          relPath,
+          ino,
+          sizeBytes,
+          mtime: fileStat.mtime,
+          fileHash,
+          format,
+          role: 'content',
+        })
+        .returning({
+          id: bookFiles.id,
+          format: bookFiles.format,
+          role: bookFiles.role,
+          sizeBytes: bookFiles.sizeBytes,
+          absolutePath: bookFiles.absolutePath,
+          createdAt: bookFiles.createdAt,
+          durationSeconds: bookFiles.durationSeconds,
+        });
+
+      if (!inserted) throw new Error('Failed to insert book file record');
+
+      let finalStatus = bookRow.status;
+      const needsPrimaryPromotion = bookRow.primaryFileId === null;
+      const needsStatusUpdate = bookRow.status === 'missing';
+
+      if (needsPrimaryPromotion || needsStatusUpdate) {
+        await this.db
+          .update(books)
+          .set({
+            ...(needsPrimaryPromotion ? { primaryFileId: inserted.id } : {}),
+            ...(needsStatusUpdate ? { status: 'present' } : {}),
+            updatedAt: new Date(),
+          })
+          .where(eq(books.id, bookId));
+
+        if (needsStatusUpdate) finalStatus = 'present';
+      }
+
+      this.processor.extractAudioDurationAsync(bookId, destination, format);
+
+      this.logger.log(
+        `[${event}] [end] bookId=${bookId} userId=${user.id} fileId=${inserted.id} format=${format} sizeBytes=${sizeBytes} durationMs=${Date.now() - startedAt} - add file to book completed`,
+      );
+
+      return {
+        id: inserted.id,
+        format: inserted.format,
+        role: needsPrimaryPromotion ? 'primary' : inserted.role,
+        sizeBytes: inserted.sizeBytes,
+        absolutePath: inserted.absolutePath,
+        createdAt: inserted.createdAt.toISOString(),
+        filename: basename(destination),
+        durationSeconds: inserted.durationSeconds,
+        bookStatus: finalStatus,
+      };
+    } catch (err) {
+      const errorClass = err instanceof Error ? err.name : 'Error';
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      this.logger.warn(
+        `[${event}] [fail] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - add file to book failed`,
+      );
+      await Promise.allSettled([
+        this.storage.cleanup(tempPath),
+        shouldCleanupDestination && destination ? this.storage.cleanup(destination) : Promise.resolve(),
+      ]);
+      throw err;
+    }
+  }
+
+  async renameBookFiles(bookId: number, user: RequestUser): Promise<void> {
+    const event = 'book.rename_files';
+    const startedAt = Date.now();
+    this.logger.log(`[${event}] [start] bookId=${bookId} userId=${user.id} - rename book files started`);
+
+    const [bookRow] = await this.db.select({ id: books.id, libraryId: books.libraryId }).from(books).where(eq(books.id, bookId)).limit(1);
+
+    if (!bookRow) throw new NotFoundException(`Book ${bookId} not found`);
+
+    await this.libraryService.verifyUserAccess(user.id, bookRow.libraryId, user.isSuperuser);
+
+    const fileRenameService = this.resolveFileRenameService();
+    if (!fileRenameService) {
+      throw new ServiceUnavailableException('File rename service is not available');
+    }
+
+    await fileRenameService.performRename(bookId, user.id, true, false);
+
+    this.logger.log(`[${event}] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} - rename book files completed`);
+  }
+
   private async resolveDestination(
     library: { fileNamingPattern?: string | null; organizationMode?: string | null },
     libraryFolderPath: string,
@@ -101,12 +297,13 @@ export class UploadService {
       (library.organizationMode === 'book_per_folder'
         ? await this.appSettings.getUploadPatternBookPerFolder()
         : await this.appSettings.getUploadPattern());
+    const sanitizeForCrossPlatform = await this.appSettings.isCrossPlatformPathSanitizationEnabled();
 
     if (pattern) {
       const stem = basename(filename, extname(filename));
       const tokens = await this.buildPatternTokens(tempPath, format, stem);
       if (library.organizationMode === 'book_per_file') {
-        const resolvedFilename = resolveDownloadFilename(pattern, tokens, format);
+        const resolvedFilename = resolveDownloadFilename(pattern, tokens, format, { sanitizeForCrossPlatform });
         if (resolvedFilename) {
           const absolutePath = join(libraryFolderPath, resolvedFilename);
           return {
@@ -116,7 +313,7 @@ export class UploadService {
           };
         }
       } else {
-        const resolved = resolveUploadPath(pattern, tokens, format);
+        const resolved = resolveUploadPath(pattern, tokens, format, { sanitizeForCrossPlatform });
 
         if (resolved) {
           const absolutePath = join(libraryFolderPath, resolved);
@@ -203,12 +400,8 @@ export class UploadService {
       if (parsed.isbn13) base['isbn'] = parsed.isbn13;
       if (parsed.publishedYear) base['year'] = String(parsed.publishedYear);
       if (parsed.seriesName) base['series'] = parsed.seriesName;
-      if (parsed.seriesIndex != null) {
-        const whole = Math.floor(parsed.seriesIndex);
-        const fraction = parsed.seriesIndex - whole;
-        const padded = String(whole).padStart(2, '0');
-        base['seriesIndex'] = fraction > 0 ? `${padded}.${String(fraction).split('.')[1]}` : padded;
-      }
+      const seriesIndex = formatSeriesIndex(parsed.seriesIndex ?? null);
+      if (seriesIndex) base['seriesIndex'] = seriesIndex;
       if (parsed.authors.length > 0) {
         base['authors'] = parsed.authors.map((a) => a.name).join(', ');
       }

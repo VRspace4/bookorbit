@@ -41,10 +41,10 @@ describe('SettingsHeader', () => {
     vi.clearAllMocks()
   })
 
-  describe('tabs always visible to all users', () => {
-    it('shows Appearance tab', () => {
+  describe('tab visibility', () => {
+    it('shows Display tab', () => {
       const labels = getTabLabels(mountHeader())
-      expect(labels).toContain('Appearance')
+      expect(labels).toContain('Display')
     })
 
     it('shows Reader tab', () => {
@@ -57,28 +57,65 @@ describe('SettingsHeader', () => {
       expect(labels).toContain('Account')
     })
 
-    it('shows Integrations tab for all users (Hardcover has no permission gate)', () => {
+    it('hides integration tabs when user has no integration permissions', () => {
       const labels = getTabLabels(mountHeader())
+      expect(labels).not.toContain('Integrations')
+      expect(labels).not.toContain('Kobo')
+      expect(labels).not.toContain('KOReader')
+      expect(labels).not.toContain('Hardcover')
+    })
+
+    it('shows Kobo tab for users with kobo_sync', () => {
+      const labels = getTabLabels(mountHeader({ perms: ['kobo_sync'] }))
+      expect(labels).toContain('Kobo')
+      expect(labels).not.toContain('Integrations')
+    })
+
+    it('shows KOReader tab for users with koreader_sync', () => {
+      const labels = getTabLabels(mountHeader({ perms: ['koreader_sync'] }))
+      expect(labels).toContain('KOReader')
+      expect(labels).not.toContain('Integrations')
+    })
+
+    it('shows Integrations tab for users with hardcover_sync', () => {
+      const labels = getTabLabels(mountHeader({ perms: ['hardcover_sync'] }))
       expect(labels).toContain('Integrations')
+      expect(labels).not.toContain('Hardcover')
+    })
+
+    it('shows Integrations tab for users with readwise_sync', () => {
+      const labels = getTabLabels(mountHeader({ perms: ['readwise_sync'] }))
+      expect(labels).toContain('Integrations')
+      expect(labels).not.toContain('Readwise')
+    })
+
+    it('hides Integrations tab when user lacks integration permissions', () => {
+      const labels = getTabLabels(mountHeader())
+      expect(labels).not.toContain('Integrations')
+    })
+
+    it('shows Integrations tab for superusers', () => {
+      const labels = getTabLabels(mountHeader({ su: true }))
+      expect(labels).toContain('Kobo')
+      expect(labels).toContain('KOReader')
+      expect(labels).toContain('Integrations')
+      expect(labels).not.toContain('Hardcover')
+      expect(labels).not.toContain('Readwise')
+      expect(labels).not.toContain('StoryGraph')
+    })
+
+    it('places integration tabs after OPDS', () => {
+      const labels = getTabLabels(mountHeader({ su: true }))
+      expect(labels.slice(labels.indexOf('OPDS'), labels.indexOf('Admin'))).toEqual(['OPDS', 'Kobo', 'KOReader', 'Integrations'])
+    })
+
+    it('places Integrations after KOReader', () => {
+      const labels = getTabLabels(mountHeader({ su: true }))
+      expect(labels.indexOf('Integrations')).toBe(labels.indexOf('KOReader') + 1)
     })
   })
 
   describe('tabs removed from top-level navigation', () => {
-    it('does not show a standalone Kobo tab', () => {
-      const labels = getTabLabels(mountHeader({ su: true }))
-      expect(labels).not.toContain('Kobo')
-    })
-
-    it('does not show a standalone KOReader tab', () => {
-      const labels = getTabLabels(mountHeader({ su: true }))
-      expect(labels).not.toContain('KOReader')
-    })
-
-    it('does not show a standalone Hardcover tab', () => {
-      const labels = getTabLabels(mountHeader({ su: true }))
-      expect(labels).not.toContain('Hardcover')
-    })
-
     it('does not show a standalone Users tab', () => {
       const labels = getTabLabels(mountHeader({ su: true }))
       expect(labels).not.toContain('Users')
@@ -131,7 +168,12 @@ describe('SettingsHeader', () => {
       expect(labels).toContain('Admin')
     })
 
-    it('hides Admin tab when user has neither manage_users nor manage_app_settings', () => {
+    it('shows Admin tab for user with view_user_activity', () => {
+      const labels = getTabLabels(mountHeader({ perms: ['view_user_activity'] }))
+      expect(labels).toContain('Admin')
+    })
+
+    it('hides Admin tab without an administrative permission', () => {
       const labels = getTabLabels(mountHeader({ perms: ['kobo_sync'] }))
       expect(labels).not.toContain('Admin')
     })
@@ -199,8 +241,8 @@ describe('SettingsHeader', () => {
   describe('active state', () => {
     it('active tab has border-primary class when route matches', () => {
       const wrapper = mountHeader({ routeName: 'settings-appearance' })
-      const appearanceBtn = wrapper.findAll('button').find((b) => b.text() === 'Appearance')
-      expect(appearanceBtn?.classes()).toContain('border-primary')
+      const displayBtn = wrapper.findAll('button').find((b) => b.text() === 'Display')
+      expect(displayBtn?.classes()).toContain('border-primary')
     })
 
     it('inactive tabs have border-transparent class', () => {
@@ -209,8 +251,20 @@ describe('SettingsHeader', () => {
       expect(readerBtn?.classes()).toContain('border-transparent')
     })
 
-    it('integrations tab is active when route is settings-integrations', () => {
-      const wrapper = mountHeader({ routeName: 'settings-integrations' })
+    it('kobo tab is active when route is settings-kobo', () => {
+      const wrapper = mountHeader({ routeName: 'settings-kobo', perms: ['kobo_sync'] })
+      const btn = wrapper.findAll('button').find((b) => b.text() === 'Kobo')
+      expect(btn?.classes()).toContain('border-primary')
+    })
+
+    it('KOReader tab is active when route is settings-koreader', () => {
+      const wrapper = mountHeader({ routeName: 'settings-koreader', perms: ['koreader_sync'] })
+      const btn = wrapper.findAll('button').find((b) => b.text() === 'KOReader')
+      expect(btn?.classes()).toContain('border-primary')
+    })
+
+    it('Integrations tab is active when route is settings-integrations', () => {
+      const wrapper = mountHeader({ routeName: 'settings-integrations', perms: ['storygraph_sync'] })
       const btn = wrapper.findAll('button').find((b) => b.text() === 'Integrations')
       expect(btn?.classes()).toContain('border-primary')
     })

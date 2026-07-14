@@ -1,5 +1,6 @@
 vi.mock('fs/promises', () => ({
   mkdir: vi.fn(),
+  readFile: vi.fn(),
   writeFile: vi.fn(),
   readdir: vi.fn().mockResolvedValue([]),
   rm: vi.fn(),
@@ -62,12 +63,17 @@ vi.mock('./extractors/audio.extractor', () => ({
   extractAudioMetadata: vi.fn().mockImplementation(() =>
     Promise.resolve({
       title: null,
+      subtitle: null,
       authors: [],
       narrators: [],
       publisher: null,
       publishedYear: null,
       description: null,
       language: null,
+      seriesName: null,
+      seriesIndex: null,
+      genres: [],
+      audibleId: null,
       durationSeconds: null,
       chapters: [],
       coverBytes: null,
@@ -76,10 +82,10 @@ vi.mock('./extractors/audio.extractor', () => ({
   parseAudioDuration: vi.fn().mockImplementation(() => Promise.resolve(null)),
 }));
 
-import { mkdir, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises';
 import { Logger } from '@nestjs/common';
 
-import { authors, bookAuthors, bookGenres, bookMetadata, bookTags, genres, tags } from '../../db/schema';
+import { authors, bookAuthors, bookGenres, bookMetadata, books, bookTags, genres, tags } from '../../db/schema';
 import { generateThumbnail, imageExt } from './lib/cover';
 import { extractEpubCover } from './lib/cover-epub';
 import { extractEpubMetadata } from './lib/epub';
@@ -91,6 +97,7 @@ import { METADATA_AUTHORS_REPLACED } from './metadata-events.service';
 import { MetadataService } from './metadata.service';
 
 const mockMkdir = mkdir as MockedFunction<typeof mkdir>;
+const mockReadFile = readFile as MockedFunction<typeof readFile>;
 const mockWriteFile = writeFile as MockedFunction<typeof writeFile>;
 const mockReaddir = readdir as MockedFunction<typeof readdir>;
 const mockRm = rm as MockedFunction<typeof rm>;
@@ -112,7 +119,12 @@ const makeDb = () => {
   const deleteBuilder = { where: deleteWhere };
 
   const selectLimit = vi.fn().mockResolvedValue([]);
-  const selectWhere = vi.fn().mockReturnValue({ limit: selectLimit });
+  const selectWhereResult = {
+    limit: selectLimit,
+    then: (onFulfilled: (value: unknown[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+      Promise.resolve([]).then(onFulfilled, onRejected),
+  };
+  const selectWhere = vi.fn().mockReturnValue(selectWhereResult);
   const selectFrom = vi.fn().mockReturnValue({ where: selectWhere });
 
   const insertReturning = vi.fn().mockResolvedValue([]);
@@ -127,6 +139,7 @@ const makeDb = () => {
     delete: vi.fn().mockReturnValue(deleteBuilder),
     select: vi.fn().mockReturnValue({ from: selectFrom }),
     insert: vi.fn().mockReturnValue({ values: insertValues }),
+    execute: vi.fn().mockResolvedValue({ rowCount: 0, rows: [] }),
   };
   const transaction = vi.fn().mockImplementation(async (callback: (tx: typeof db) => Promise<unknown>) => callback(db));
   db.transaction = transaction;
@@ -153,6 +166,7 @@ describe('MetadataService', () => {
     embedder.embedBook.mockResolvedValue(undefined);
 
     mockMkdir.mockResolvedValue(undefined);
+    mockReadFile.mockResolvedValue('');
     mockWriteFile.mockResolvedValue(undefined);
     mockReaddir.mockResolvedValue([]);
     mockRm.mockResolvedValue(undefined);
@@ -165,12 +179,17 @@ describe('MetadataService', () => {
     mockExtractEpubCover.mockResolvedValue(null);
     mockExtractAudioMetadata.mockResolvedValue({
       title: null,
+      subtitle: null,
       authors: [],
       narrators: [],
       publisher: null,
       publishedYear: null,
       description: null,
       language: null,
+      seriesName: null,
+      seriesIndex: null,
+      genres: [],
+      audibleId: null,
       durationSeconds: null,
       chapters: [],
       coverBytes: null,
@@ -237,6 +256,61 @@ describe('MetadataService', () => {
     expect(mockWriteFile).toHaveBeenCalledWith('/books/covers/11/cover_extracted.png', Buffer.from('image-bytes'));
   });
 
+  it('saveExtractedCoverBytes removes stale custom files unless the DB owns a custom cover', async () => {
+    const { db } = makeDb();
+    const service = makeService(db);
+    mockReaddir.mockResolvedValue(['cover_custom.jpg', 'cover_extracted.png', 'thumbnail.jpg']);
+
+    await service.saveExtractedCoverBytes(12, Buffer.from('image-bytes'));
+
+    expect(mockRm).toHaveBeenCalledWith('/books/covers/12/cover_custom.jpg', { force: true });
+    expect(mockRm).toHaveBeenCalledWith('/books/covers/12/cover_extracted.png', { force: true });
+    expect(mockWriteFile).toHaveBeenCalledWith('/books/covers/12/thumbnail.jpg', Buffer.from('thumbnail-bytes'));
+    expect(db.update).toHaveBeenCalledWith(books);
+  });
+
+  it('refreshCoverForBook preserves a DB-owned custom cover while refreshing extracted fallback', async () => {
+    const { db, selectLimit } = makeDb();
+    const service = makeService(db);
+    selectLimit.mockResolvedValue([{ coverSource: 'custom' }]);
+    mockReaddir.mockResolvedValue(['cover_custom.jpg', 'cover_extracted.png', 'thumbnail.jpg']);
+    mockExtractEpubMetadata.mockResolvedValueOnce({
+      title: 'Refreshable book',
+      subtitle: null,
+      description: null,
+      isbn10: null,
+      isbn13: null,
+      publisher: null,
+      publishedYear: null,
+      language: null,
+      seriesName: null,
+      seriesIndex: null,
+      authors: [],
+      genres: [],
+      tags: [],
+      rating: null,
+      pageCount: null,
+      googleBooksId: null,
+      goodreadsId: null,
+      amazonId: null,
+      hardcoverId: null,
+      hardcoverEditionId: null,
+      openLibraryId: null,
+      ranobedbId: null,
+      itunesId: null,
+      coverBuffer: null,
+    });
+    mockExtractEpubCover.mockResolvedValueOnce(Buffer.from('image-bytes'));
+
+    await expect(service.refreshCoverForBook(13, '/book.epub', 'epub')).resolves.toBe(true);
+
+    expect(mockRm).not.toHaveBeenCalledWith('/books/covers/13/cover_custom.jpg', { force: true });
+    expect(mockRm).toHaveBeenCalledWith('/books/covers/13/cover_extracted.png', { force: true });
+    expect(mockWriteFile).toHaveBeenCalledWith('/books/covers/13/cover_extracted.png', Buffer.from('image-bytes'));
+    expect(mockWriteFile).not.toHaveBeenCalledWith('/books/covers/13/thumbnail.jpg', expect.any(Buffer));
+    expect(db.update).not.toHaveBeenCalledWith(books);
+  });
+
   it('downloadAndSaveCover no-ops on empty payloads and network failures', async () => {
     const { db } = makeDb();
     const service = makeService(db);
@@ -287,6 +361,33 @@ describe('MetadataService', () => {
     expect(db.update).not.toHaveBeenCalled();
   });
 
+  it('extractAndSaveIfAvailable(opf) persists standalone sidecar OPF metadata', async () => {
+    const { db, updateSet } = makeDb();
+    const service = makeService(db);
+    const replaceAuthorsSpy = vi.spyOn(service, 'replaceAuthors').mockResolvedValue(undefined);
+
+    mockReadFile.mockResolvedValue(`
+      <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+          <dc:title>Sidecar Title</dc:title>
+          <dc:creator opf:role="aut">Sidecar Author</dc:creator>
+          <dc:identifier opf:scheme="GOOGLE">google-sidecar</dc:identifier>
+        </metadata>
+      </package>
+    `);
+
+    await expect(service.extractAndSaveIfAvailable(55, '/books/metadata.opf', 'opf')).resolves.toBe(true);
+
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Sidecar Title',
+        googleBooksId: 'google-sidecar',
+        updatedAt: expect.any(Date),
+      }),
+    );
+    expect(replaceAuthorsSpy).toHaveBeenCalledWith(55, [{ name: 'Sidecar Author', sortName: null }]);
+  });
+
   it('refreshCoverForBook returns false and avoids db writes when extractor reports no cover', async () => {
     const { db } = makeDb();
     const service = makeService(db);
@@ -330,6 +431,7 @@ describe('MetadataService', () => {
       amazonId: null,
       hardcoverId: null,
       openLibraryId: null,
+      ranobedbId: null,
       itunesId: null,
       coverBuffer: null,
     });
@@ -383,6 +485,7 @@ describe('MetadataService', () => {
       amazonId: null,
       hardcoverId: null,
       openLibraryId: null,
+      ranobedbId: null,
       itunesId: null,
       coverBuffer: null,
     });
@@ -430,6 +533,7 @@ describe('MetadataService', () => {
         amazonId: null,
         hardcoverId: null,
         openLibraryId: null,
+        ranobedbId: null,
         itunesId: null,
         coverBuffer: null,
       });
@@ -454,10 +558,10 @@ describe('MetadataService', () => {
       description: 'Description',
       isbn10: '1234567890',
       isbn13: '9781234567897',
-      publisher: 'Publisher',
+      publisher: '  Publisher\t Name  ',
       publishedYear: null,
       language: 'en',
-      seriesName: 'Series',
+      seriesName: 'Series   Name',
       seriesIndex: 2,
       authors: [{ name: 'Author A', sortName: null }],
       genres: ['Fantasy'],
@@ -468,7 +572,9 @@ describe('MetadataService', () => {
       goodreadsId: 'goodreads-1',
       amazonId: 'amazon-1',
       hardcoverId: 'hardcover-1',
+      hardcoverEditionId: '8941973',
       openLibraryId: 'open-library-1',
+      ranobedbId: 'ranobe-1',
       itunesId: 'itunes-1',
       coverBuffer: Buffer.from('jpeg-bytes'),
     });
@@ -490,13 +596,17 @@ describe('MetadataService', () => {
         publishedYear: 1999,
         subtitle: 'Subtitle',
         description: 'Description',
+        publisher: 'Publisher Name',
         pageCount: 321,
+        seriesName: 'Series Name',
         rating: 5,
         googleBooksId: 'google-1',
         goodreadsId: 'goodreads-1',
         amazonId: 'amazon-1',
         hardcoverId: 'hardcover-1',
+        hardcoverEditionId: '8941973',
         openLibraryId: 'open-library-1',
+        ranobedbId: 'ranobe-1',
         itunesId: 'itunes-1',
         updatedAt: expect.any(Date),
       }),
@@ -552,6 +662,81 @@ describe('MetadataService', () => {
     expect(updateSet).toHaveBeenCalledWith(expect.objectContaining({ publishedYear: null }));
   });
 
+  it('extractAndSave(audio) persists expanded audiobook metadata through lock filtering', async () => {
+    const { db, updateSet } = makeDb();
+    const narratorService = {
+      replaceForBook: vi.fn().mockResolvedValue(undefined),
+    };
+    const lockService = {
+      isFieldLocked: vi.fn().mockResolvedValue(false),
+      filterAutomatedBookUpdate: vi.fn().mockImplementation((_bookId: number, dto: unknown) => Promise.resolve({ dto, skippedFields: [] })),
+    };
+    const service = makeService(db, undefined, {
+      narratorService,
+      bookMetadataLockService: lockService,
+    });
+    const replaceAuthorsSpy = vi.spyOn(service, 'replaceAuthors').mockResolvedValue(undefined);
+    const replaceGenresSpy = vi.spyOn(service, 'replaceGenres').mockResolvedValue(undefined);
+
+    mockExtractAudioMetadata.mockResolvedValueOnce({
+      title: 'Audio Title',
+      subtitle: 'Audio Subtitle',
+      authors: [{ name: 'Audio Author', sortName: null }],
+      narrators: ['Audio Narrator'],
+      publisher: 'Audio   Publisher',
+      publishedYear: 2024,
+      description: 'Audio Description',
+      language: 'eng',
+      seriesName: 'Audio\tSeries',
+      seriesIndex: 2,
+      genres: ['Fantasy', 'Adventure'],
+      audibleId: 'B0AUDIBLE',
+      librofmId: '9781234567890',
+      durationSeconds: 1234,
+      chapters: [{ title: 'Chapter 1', startMs: 0 }],
+      coverBytes: null,
+    });
+
+    await service.extractAndSave(41, '/tmp/audio.m4b', 'm4b');
+
+    expect(lockService.filterAutomatedBookUpdate).toHaveBeenCalledWith(
+      41,
+      expect.objectContaining({
+        title: 'Audio Title',
+        subtitle: 'Audio Subtitle',
+        seriesName: 'Audio Series',
+        seriesIndex: 2,
+        genres: ['Fantasy', 'Adventure'],
+        audibleId: 'B0AUDIBLE',
+        librofmId: '9781234567890',
+        audioMetadata: expect.objectContaining({
+          narrators: ['Audio Narrator'],
+          durationSeconds: 1234,
+          chapters: [{ title: 'Chapter 1', startMs: 0 }],
+        }),
+      }),
+    );
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Audio Title',
+        subtitle: 'Audio Subtitle',
+        publisher: 'Audio Publisher',
+        publishedYear: 2024,
+        language: 'eng',
+        seriesName: 'Audio Series',
+        seriesIndex: 2,
+        audibleId: 'B0AUDIBLE',
+        librofmId: '9781234567890',
+        durationSeconds: 1234,
+        chapters: [{ title: 'Chapter 1', startMs: 0 }],
+        updatedAt: expect.any(Date),
+      }),
+    );
+    expect(replaceAuthorsSpy).toHaveBeenCalledWith(41, [{ name: 'Audio Author', sortName: null }]);
+    expect(replaceGenresSpy).toHaveBeenCalledWith(41, ['Fantasy', 'Adventure']);
+    expect(narratorService.replaceForBook).toHaveBeenCalledWith(41, ['Audio Narrator']);
+  });
+
   it('replaceAuthors normalizes names and deduplicates case-insensitively before db writes', async () => {
     const { db, deleteWhere, transaction } = makeDb();
     const service = makeService(db);
@@ -565,7 +750,7 @@ describe('MetadataService', () => {
             insertedAuthors.push(...rows);
             return {
               onConflictDoNothing: () => ({
-                returning: () => Promise.resolve([{ id: 81, name: 'Alice' }]),
+                returning: () => Promise.resolve([{ id: 81, name: 'Alice Smith' }]),
               }),
             };
           },
@@ -583,28 +768,28 @@ describe('MetadataService', () => {
     });
 
     await service.replaceAuthors(5, [
-      { name: '  Alice  ', sortName: '   ' },
-      { name: 'alice', sortName: 'ignored duplicate' },
+      { name: '  Alice\t\n Smith  ', sortName: '  Smith,\nAlice  ' },
+      { name: 'alice smith', sortName: 'ignored duplicate' },
       { name: '   ', sortName: null },
     ]);
 
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(db.delete).toHaveBeenCalledWith(bookAuthors);
     expect(deleteWhere).toHaveBeenCalledTimes(1);
-    expect(db.select).not.toHaveBeenCalled();
-    expect(insertedAuthors).toEqual([{ name: 'Alice', sortName: null }]);
+    expect(db.select).toHaveBeenCalledTimes(1);
+    expect(insertedAuthors).toEqual([{ name: 'Alice Smith', sortName: 'Smith, Alice' }]);
     expect(insertedBookAuthors).toEqual([{ bookId: 5, authorId: 81, displayOrder: 0 }]);
   });
 
-  it('replaceAuthors reuses existing authors and only inserts join rows', async () => {
-    const { db } = makeDb();
+  it('replaceAuthors canonicalizes a legacy whitespace variant before linking it', async () => {
+    const { db, updateSet, updateWhere } = makeDb();
     const service = makeService(db);
     const insertedAuthors: Array<{ name: string; sortName: string | null }> = [];
     const insertedBookAuthors: Array<{ bookId: number; authorId: number; displayOrder: number }> = [];
 
     db.select.mockImplementation(() => ({
       from: () => ({
-        where: () => Promise.resolve([{ id: 9, name: 'Known Author' }]),
+        where: () => Promise.resolve([{ id: 9, name: 'Known  Author', normalizedName: 'known author' }]),
       }),
     }));
     db.insert.mockImplementation((table: unknown) => {
@@ -633,8 +818,53 @@ describe('MetadataService', () => {
 
     await service.replaceAuthors(6, [{ name: 'Known Author', sortName: null }]);
 
-    expect(insertedAuthors).toEqual([{ name: 'Known Author', sortName: null }]);
+    expect(insertedAuthors).toEqual([]);
+    expect(db.update).toHaveBeenCalledWith(authors);
+    expect(updateSet).toHaveBeenCalledWith({ name: 'Known Author' });
+    expect(updateWhere).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(2);
     expect(insertedBookAuthors).toEqual([{ bookId: 6, authorId: 9, displayOrder: 0 }]);
+  });
+
+  it('replaceAuthors prefers an existing clean author row over a legacy whitespace variant', async () => {
+    const { db, updateSet } = makeDb();
+    const service = makeService(db);
+    const insertedBookAuthors: Array<{ bookId: number; authorId: number; displayOrder: number }> = [];
+
+    db.select.mockImplementation(() => ({
+      from: () => ({
+        where: () =>
+          Promise.resolve([
+            { id: 9, name: 'Known  Author', normalizedName: 'known author' },
+            { id: 10, name: 'Known Author', normalizedName: 'known author' },
+          ]),
+      }),
+    }));
+    db.insert.mockImplementation((table: unknown) => {
+      if (table === authors) {
+        return {
+          values: () => ({
+            onConflictDoNothing: () => ({
+              returning: () => Promise.resolve([]),
+            }),
+          }),
+        };
+      }
+      if (table === bookAuthors) {
+        return {
+          values: (rows: Array<{ bookId: number; authorId: number; displayOrder: number }>) => {
+            insertedBookAuthors.push(...rows);
+            return { onConflictDoNothing: () => Promise.resolve(undefined) };
+          },
+        };
+      }
+      throw new Error('unexpected table in insert');
+    });
+
+    await service.replaceAuthors(6, [{ name: 'Known Author', sortName: null }]);
+
+    expect(updateSet).not.toHaveBeenCalledWith({ name: 'Known Author' });
+    expect(insertedBookAuthors).toEqual([{ bookId: 6, authorId: 10, displayOrder: 0 }]);
   });
 
   it('replaceAuthors emits author replaced event with linked author ids', async () => {
@@ -644,9 +874,7 @@ describe('MetadataService', () => {
 
     db.select.mockImplementation(() => ({
       from: () => ({
-        where: () => ({
-          limit: () => Promise.resolve([]),
-        }),
+        where: () => Promise.resolve([]),
       }),
     }));
     db.insert.mockImplementation((table: unknown) => {
@@ -759,9 +987,11 @@ describe('MetadataService', () => {
       isFieldLocked: vi.fn().mockResolvedValue(false),
       filterAutomatedBookUpdate: vi.fn().mockResolvedValue({
         dto: {
+          audibleId: 'B0SIDE',
+          librofmId: '9780987654321',
           audioMetadata: {
-            chapters: [{ title: 'Chapter 1', start: 0, end: 10 }],
-            narrators: [{ name: 'Narrator A', sortName: null }],
+            chapters: [{ title: 'Chapter 1', startMs: 0 }],
+            narrators: ['Narrator A'],
           },
         },
         skippedFields: [],
@@ -774,25 +1004,54 @@ describe('MetadataService', () => {
 
     mockExtractAudioMetadata.mockResolvedValueOnce({
       title: null,
+      subtitle: null,
       authors: [],
-      narrators: [{ name: 'Narrator A', sortName: null }],
+      narrators: ['Narrator A'],
       publisher: null,
       publishedYear: null,
       description: null,
       language: null,
+      seriesName: null,
+      seriesIndex: null,
+      genres: [],
+      audibleId: 'B0SIDE',
+      librofmId: '9780987654321',
       durationSeconds: null,
-      chapters: [{ title: 'Chapter 1', start: 0, end: 10 }],
+      chapters: [{ title: 'Chapter 1', startMs: 0 }],
       coverBytes: null,
     });
     await service.extractAudioChaptersAndNarrators(70, '/tmp/audio.m4b', 'm4b');
 
+    expect(lockService.filterAutomatedBookUpdate).toHaveBeenCalledWith(
+      70,
+      expect.objectContaining({
+        audibleId: 'B0SIDE',
+        librofmId: '9780987654321',
+        audioMetadata: expect.objectContaining({
+          chapters: [{ title: 'Chapter 1', startMs: 0 }],
+          narrators: ['Narrator A'],
+        }),
+      }),
+    );
     expect(updateSet).toHaveBeenCalledWith(
       expect.objectContaining({
-        chapters: [{ title: 'Chapter 1', start: 0, end: 10 }],
+        audibleId: 'B0SIDE',
         updatedAt: expect.any(Date),
       }),
     );
-    expect(narratorService.replaceForBook).toHaveBeenCalledWith(70, [{ name: 'Narrator A', sortName: null }]);
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        librofmId: '9780987654321',
+        updatedAt: expect.any(Date),
+      }),
+    );
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chapters: [{ title: 'Chapter 1', startMs: 0 }],
+        updatedAt: expect.any(Date),
+      }),
+    );
+    expect(narratorService.replaceForBook).toHaveBeenCalledWith(70, ['Narrator A']);
 
     await expect(service.extractAudioChaptersAndNarrators(71, '/tmp/audio.unknown', 'unknown')).resolves.toBeUndefined();
 
@@ -808,6 +1067,27 @@ describe('MetadataService', () => {
     await service.extractAudioFileDuration(99, '/tmp/book.m4b');
 
     expect(updateSet).toHaveBeenCalledWith({ durationSeconds: 4321 });
+  });
+
+  it('extractAndAggregateAudioDuration writes the per-file duration before re-aggregating the total', async () => {
+    const { db } = makeDb();
+    const service = makeService(db);
+
+    const callOrder: string[] = [];
+    const extractSpy = vi.spyOn(service, 'extractAudioFileDuration').mockImplementation(() => {
+      callOrder.push('extract');
+      return Promise.resolve();
+    });
+    const aggregateSpy = vi.spyOn(service, 'aggregateAudioDuration').mockImplementation(() => {
+      callOrder.push('aggregate');
+      return Promise.resolve();
+    });
+
+    await service.extractAndAggregateAudioDuration(55, '/tmp/book.m4b');
+
+    expect(extractSpy).toHaveBeenCalledWith(55, '/tmp/book.m4b');
+    expect(aggregateSpy).toHaveBeenCalledWith(55);
+    expect(callOrder).toEqual(['extract', 'aggregate']);
   });
 
   it('replaceNarrators and upsertComicMetadata delegate to collaborators', async () => {

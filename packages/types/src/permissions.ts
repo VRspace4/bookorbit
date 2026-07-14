@@ -9,6 +9,9 @@ export enum Permission {
   // Devices & Access
   KoboSync = "kobo_sync",
   KoreaderSync = "koreader_sync",
+  HardcoverSync = "hardcover_sync",
+  ReadwiseSync = "readwise_sync",
+  StorygraphSync = "storygraph_sync",
   OpdsAccess = "opds_access",
   BookDockAccess = "book_dock_access",
 
@@ -19,8 +22,10 @@ export enum Permission {
   // Administration
   ManageLibraries = "manage_libraries",
   ManageMetadataConfig = "manage_metadata_config",
+  ManageIcons = "manage_icons",
   ManageAppSettings = "manage_app_settings",
   ManageUsers = "manage_users",
+  ViewUserActivity = "view_user_activity",
   ViewAuditLog = "view_audit_log",
 
   // Notifications
@@ -35,14 +40,19 @@ export const PERMISSION_LABELS: Record<Permission, string> = {
   [Permission.DemoRestricted]: "Demo restricted",
   [Permission.KoboSync]: "Kobo sync",
   [Permission.KoreaderSync]: "KOReader sync",
+  [Permission.HardcoverSync]: "Hardcover sync",
+  [Permission.ReadwiseSync]: "Readwise sync",
+  [Permission.StorygraphSync]: "StoryGraph sync",
   [Permission.OpdsAccess]: "OPDS access",
   [Permission.BookDockAccess]: "Book Dock",
   [Permission.EmailSend]: "Send by email",
   [Permission.ManageEmail]: "Manage email",
   [Permission.ManageLibraries]: "Manage libraries",
   [Permission.ManageMetadataConfig]: "Metadata config",
+  [Permission.ManageIcons]: "Manage icons",
   [Permission.ManageAppSettings]: "App settings",
   [Permission.ManageUsers]: "Manage users",
+  [Permission.ViewUserActivity]: "View user activity",
   [Permission.ViewAuditLog]: "View audit log",
   [Permission.NotificationAccess]: "Notifications",
 };

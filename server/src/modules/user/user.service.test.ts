@@ -42,21 +42,31 @@ describe('UserService', () => {
     findLibraryIdsByUserId: vi.fn(),
     replaceViewerLibraries: vi.fn(),
     findExistingLibraryIds: vi.fn(),
+    findSettingsById: vi.fn(),
+  };
+  const contentFilterRepo = {
+    findByUserIdWithNames: vi.fn(),
+    replaceFilters: vi.fn(),
   };
 
   const config = { get: vi.fn() };
+  const appSettingsService = {
+    getDefaultLibraryAccessLibraryIds: vi.fn(),
+  };
 
   let service: UserService;
 
   beforeEach(() => {
     vi.resetAllMocks();
-    service = new UserService(userRepo as any, config as any);
+    service = new UserService(userRepo as any, config as any, contentFilterRepo as any, appSettingsService as any);
 
     mockHash.mockResolvedValue('hashed-secret');
     mockRandomBytes.mockReturnValue(Buffer.from('abcd', 'hex'));
     config.get.mockReturnValue('https://app.example.com');
+    appSettingsService.getDefaultLibraryAccessLibraryIds.mockResolvedValue([]);
 
     userRepo.create.mockResolvedValue({ id: 10, username: 'newuser', name: 'New User' });
+    userRepo.createOidcUser.mockResolvedValue({ id: 11, username: 'oidcuser', name: 'OIDC User' });
     userRepo.findByEmail.mockResolvedValue(null);
     userRepo.generateResetToken.mockResolvedValue('reset-token');
     userRepo.findExistingLibraryIds.mockImplementation((ids: number[]) => Promise.resolve(ids));
@@ -130,6 +140,29 @@ describe('UserService', () => {
     expect(userRepo.setPermissions).toHaveBeenCalledWith(10, [Permission.LibraryDownload, Permission.KoboSync]);
     expect(userRepo.assignViewerLibraries).toHaveBeenCalledWith(10, [3, 5]);
     expect(result).toEqual({ id: 10, username: 'newuser', name: 'New User', resetUrl: 'https://app.example.com/reset-password?token=reset-token' });
+  });
+
+  it('createUser applies default library access when libraries are omitted', async () => {
+    userRepo.findByUsername.mockResolvedValue(null);
+    appSettingsService.getDefaultLibraryAccessLibraryIds.mockResolvedValue([2, 4]);
+
+    await service.createUser({
+      username: 'newuser',
+      name: 'New User',
+      email: 'x@y.com',
+      permissionNames: [],
+    } as any);
+
+    expect(userRepo.assignViewerLibraries).toHaveBeenCalledWith(10, [2, 4]);
+  });
+
+  it('createOidcUser applies default library access', async () => {
+    appSettingsService.getDefaultLibraryAccessLibraryIds.mockResolvedValue([6, 8]);
+
+    await service.createOidcUser({ username: 'oidc', name: 'OIDC', email: 'oidc@example.com', oidcSubject: 'sub', oidcIssuer: 'iss' });
+
+    expect(userRepo.createOidcUser).toHaveBeenCalled();
+    expect(userRepo.assignViewerLibraries).toHaveBeenCalledWith(11, [6, 8]);
   });
 
   it('createUser rejects unknown library IDs', async () => {
@@ -246,6 +279,24 @@ describe('UserService', () => {
     expect(userRepo.update).toHaveBeenCalledWith(5, { settings });
   });
 
+  it('caches an explicit achievement preference when settings are updated', async () => {
+    userRepo.update.mockResolvedValue({ id: 5, settings: { achievementPreferences: { enabled: false } } });
+
+    await service.updateMySettings(5, { settings: { achievementPreferences: { enabled: false } } });
+
+    await expect(service.isAchievementEnabled(5)).resolves.toBe(false);
+    expect(userRepo.findSettingsById).not.toHaveBeenCalled();
+  });
+
+  it('defaults achievements to enabled and caches the targeted settings lookup', async () => {
+    userRepo.findSettingsById.mockResolvedValue({});
+
+    await expect(service.isAchievementEnabled(5)).resolves.toBe(true);
+    await expect(service.isAchievementEnabled(5)).resolves.toBe(true);
+
+    expect(userRepo.findSettingsById).toHaveBeenCalledTimes(1);
+  });
+
   it('updateReaderStorageMode updates syncReaderPreferences setting', async () => {
     userRepo.update.mockResolvedValue({ id: 3, settings: { syncReaderPreferences: true } });
 
@@ -267,6 +318,23 @@ describe('UserService', () => {
     userRepo.update.mockResolvedValue(null);
 
     await expect(service.updateReaderStorageMode(99, true)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('updateThemeStorageMode updates syncThemePreferences when enabling sync', async () => {
+    userRepo.update.mockResolvedValue({ id: 3, settings: { syncThemePreferences: true } });
+
+    const result = await service.updateThemeStorageMode(3, true);
+
+    expect(userRepo.update).toHaveBeenCalledWith(3, { settings: { syncThemePreferences: true } });
+    expect(result).toMatchObject({ id: 3 });
+  });
+
+  it('updateThemeStorageMode updates syncThemePreferences when disabling sync', async () => {
+    userRepo.update.mockResolvedValue({ id: 3, settings: { syncThemePreferences: false } });
+
+    await service.updateThemeStorageMode(3, false);
+
+    expect(userRepo.update).toHaveBeenCalledWith(3, { settings: { syncThemePreferences: false } });
   });
 
   it('deleteUser blocks deleting your own account', async () => {
@@ -404,6 +472,85 @@ describe('UserService', () => {
     expect(userRepo.replaceViewerLibraries).toHaveBeenCalledWith(2, [3, 7]);
   });
 
+  it('getContentFilters throws when the target user does not exist', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue(null);
+
+    await expect(service.getContentFilters(5, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('getContentFilters allows reading your own filters', async () => {
+    const filters = {
+      includeTags: [{ id: 1, name: 'Sci-Fi' }],
+      excludeTags: [],
+      includeGenres: [],
+      excludeGenres: [{ id: 2, name: 'Horror' }],
+    };
+    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
+    contentFilterRepo.findByUserIdWithNames.mockResolvedValue(filters);
+
+    await expect(service.getContentFilters(5, reqUser({ id: 5 }))).resolves.toEqual(filters);
+    expect(contentFilterRepo.findByUserIdWithNames).toHaveBeenCalledWith(5);
+  });
+
+  it('getContentFilters blocks non-superusers from reading another user filters', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
+
+    await expect(service.getContentFilters(5, reqUser({ id: 1, isSuperuser: false }))).rejects.toBeInstanceOf(ForbiddenException);
+    expect(contentFilterRepo.findByUserIdWithNames).not.toHaveBeenCalled();
+  });
+
+  it('getContentFilters allows superusers to read another user filters', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
+    contentFilterRepo.findByUserIdWithNames.mockResolvedValue({
+      includeTags: [],
+      excludeTags: [],
+      includeGenres: [],
+      excludeGenres: [],
+    });
+
+    await expect(service.getContentFilters(5, reqUser({ id: 1, isSuperuser: true }))).resolves.toEqual({
+      includeTags: [],
+      excludeTags: [],
+      includeGenres: [],
+      excludeGenres: [],
+    });
+  });
+
+  it('setContentFilters throws when the target user does not exist', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue(null);
+
+    await expect(service.setContentFilters(5, {} as any, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('setContentFilters blocks non-superusers from updating filters', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
+
+    await expect(service.setContentFilters(5, {} as any, reqUser({ isSuperuser: false }))).rejects.toBeInstanceOf(ForbiddenException);
+    expect(contentFilterRepo.replaceFilters).not.toHaveBeenCalled();
+  });
+
+  it('setContentFilters rejects administrator targets', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: true });
+
+    await expect(service.setContentFilters(5, {} as any, reqUser({ isSuperuser: true }))).rejects.toBeInstanceOf(BadRequestException);
+    expect(contentFilterRepo.replaceFilters).not.toHaveBeenCalled();
+  });
+
+  it('setContentFilters fills missing arrays before replacing filters', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({ id: 5, isSuperuser: false });
+
+    await expect(
+      service.setContentFilters(5, { includeTagIds: [1], excludeGenreIds: [3] } as any, reqUser({ isSuperuser: true })),
+    ).resolves.toBeUndefined();
+
+    expect(contentFilterRepo.replaceFilters).toHaveBeenCalledWith(5, {
+      includeTagIds: [1],
+      excludeTagIds: [],
+      includeGenreIds: [],
+      excludeGenreIds: [3],
+    });
+  });
+
   it('adminResetPassword forbids non-superuser reset of superuser account', async () => {
     userRepo.findByIdWithPermissions.mockResolvedValue({ id: 2, isSuperuser: true, provisioningMethod: 'local' });
 
@@ -457,12 +604,20 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
     replaceViewerLibraries: vi.fn(),
     findExistingLibraryIds: vi.fn(),
   };
+  const contentFilterRepo = {
+    findByUserIdWithNames: vi.fn(),
+    replaceFilters: vi.fn(),
+  };
   const config = { get: vi.fn() };
+  const appSettingsService = {
+    getDefaultLibraryAccessLibraryIds: vi.fn(),
+  };
 
   beforeEach(() => {
     vi.resetAllMocks();
     config.get.mockReturnValue('http://localhost:5173');
-    service = new UserService(userRepo as any, config as any);
+    appSettingsService.getDefaultLibraryAccessLibraryIds.mockResolvedValue([]);
+    service = new UserService(userRepo as any, config as any, contentFilterRepo as any, appSettingsService as any);
   });
 
   it('throws NotFoundException when user does not exist', async () => {
@@ -478,7 +633,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: true, libraries: {}, collections: {} },
+        seriesCollapsePreferences: { global: true, libraries: {}, collections: {}, smartScopes: {} },
       },
     });
   });
@@ -495,7 +650,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: true, libraries: { '3': true }, collections: { '7': false } },
+        seriesCollapsePreferences: { global: true, libraries: { '3': true }, collections: { '7': false }, smartScopes: {} },
       },
     });
   });
@@ -512,7 +667,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: false, libraries: { '1': true, '2': false }, collections: {} },
+        seriesCollapsePreferences: { global: false, libraries: { '1': true, '2': false }, collections: {}, smartScopes: {} },
       },
     });
   });
@@ -529,7 +684,7 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
 
     expect(userRepo.update).toHaveBeenCalledWith(1, {
       settings: {
-        seriesCollapsePreferences: { global: true, libraries: {}, collections: { '5': false, '9': true } },
+        seriesCollapsePreferences: { global: true, libraries: {}, collections: { '5': false, '9': true }, smartScopes: {} },
       },
     });
   });
@@ -552,5 +707,22 @@ describe('UserService.updateSeriesCollapsePreferences', () => {
         }),
       }),
     );
+  });
+
+  it('merges smart scope overrides and removes null entries', async () => {
+    userRepo.findByIdWithPermissions.mockResolvedValue({
+      id: 1,
+      settings: {
+        seriesCollapsePreferences: { global: false, libraries: {}, collections: {}, smartScopes: { '3': false, '8': true } },
+      },
+    });
+
+    await service.updateSeriesCollapsePreferences(1, { smartScopes: { '3': true, '8': null } });
+
+    expect(userRepo.update).toHaveBeenCalledWith(1, {
+      settings: {
+        seriesCollapsePreferences: { global: false, libraries: {}, collections: {}, smartScopes: { '3': true } },
+      },
+    });
   });
 });

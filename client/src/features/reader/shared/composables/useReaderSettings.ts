@@ -14,12 +14,14 @@ import {
   CBX_READER_DEFAULTS,
   EPUB_DEVICE_SETTING_KEYS,
   EPUB_READER_DEFAULTS,
+  PDF_READER_DEFAULTS,
   READER_DEVICE_FORM_FACTORS,
   type CbxReaderSettings,
   type EpubDeviceSettings,
   type EpubReaderDefaultsStorageV2,
   type EpubReaderSettings,
   type EpubSharedSettings,
+  type PdfReaderSettings,
   type ReaderFormatGroup,
   type ReaderSettings,
   type ThemeHighlightColors,
@@ -59,6 +61,74 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+function isNumberInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return Number.isInteger(value) && isNumberInRange(value, min, max)
+}
+
+function sanitizeEpubPartialSettings(settings: unknown): Partial<EpubReaderSettings> | null {
+  if (!isRecord(settings)) return null
+
+  const out: Partial<EpubReaderSettings> = {}
+
+  if (typeof settings.theme === 'string') out.theme = settings.theme as EpubReaderSettings['theme']
+  if (settings.fontFamily === null || typeof settings.fontFamily === 'string') out.fontFamily = settings.fontFamily as string | null
+  if (isNumberInRange(settings.fontSize, 8, 48)) out.fontSize = settings.fontSize
+  if (isNumberInRange(settings.lineHeight, 1, 3)) out.lineHeight = settings.lineHeight
+  if (isIntegerInRange(settings.maxColumnCount, 1, 3)) out.maxColumnCount = settings.maxColumnCount
+  if (isNumberInRange(settings.gap, 0, 0.5)) out.gap = settings.gap
+  if (isIntegerInRange(settings.maxInlineSize, 400, 1600)) out.maxInlineSize = settings.maxInlineSize
+  if (isIntegerInRange(settings.maxBlockSize, 600, 2400)) out.maxBlockSize = settings.maxBlockSize
+  if (typeof settings.justify === 'boolean') out.justify = settings.justify
+  if (typeof settings.hyphenate === 'boolean') out.hyphenate = settings.hyphenate
+  if (settings.flow === 'paginated' || settings.flow === 'scrolled') out.flow = settings.flow
+  if (typeof settings.overrideBookFormatting === 'boolean') out.overrideBookFormatting = settings.overrideBookFormatting
+  if (settings.footerDisplayMode === 0 || settings.footerDisplayMode === 1 || settings.footerDisplayMode === 2) {
+    out.footerDisplayMode = settings.footerDisplayMode
+  }
+  if (settings.fixedLayoutSpread === 'auto' || settings.fixedLayoutSpread === 'none') {
+    out.fixedLayoutSpread = settings.fixedLayoutSpread
+  }
+
+  // Preserve TTS keys when present (local feature)
+  for (const key of [
+    'ttsProvider', 'ttsVoice', 'ttsRate', 'ttsPitch', 'ttsVolume',
+    'ttsGcpChirp3Voice', 'ttsAzureVoice', 'ttsXaiVoice', 'ttsKokoroVoice', 'ttsGpt4oMiniVoice',
+    'ttsSkipBackSeconds', 'ttsSkipForwardSeconds', 'themeHighlightColors',
+    'ttsSentenceHighlightColor', 'ttsWordHighlightColor',
+  ] as const) {
+    if (key in settings) {
+      ;(out as Record<string, unknown>)[key] = (settings as Record<string, unknown>)[key]
+    }
+  }
+
+  return out
+}
+
+function sanitizePdfPartialSettings(settings: unknown): Partial<PdfReaderSettings> | null {
+  if (!isRecord(settings)) return null
+  const out: Partial<PdfReaderSettings> = {}
+  if (settings.scrollMode === 'vertical' || settings.scrollMode === 'horizontal' || settings.scrollMode === 'page') {
+    out.scrollMode = settings.scrollMode
+  }
+  if (settings.spread === 'none' || settings.spread === 'odd' || settings.spread === 'even' || settings.spread === 'auto') {
+    out.spread = settings.spread
+  }
+  if (settings.zoomMode === 'fit-width' || settings.zoomMode === 'fit-page' || settings.zoomMode === 'automatic' || settings.zoomMode === 'custom') {
+    out.zoomMode = settings.zoomMode
+  }
+  if (isNumberInRange(settings.customScale, 0.25, 4)) out.customScale = settings.customScale
+  if (settings.rotation === 0 || settings.rotation === 90 || settings.rotation === 180 || settings.rotation === 270) {
+    out.rotation = settings.rotation
+  }
+  return out
+}
+
+
+
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
@@ -83,6 +153,7 @@ export const EPUB_GLOBAL_SETTING_KEYS = [
   'themeHighlightColors',
   'ttsSentenceHighlightColor',
   'ttsWordHighlightColor',
+  'fixedLayoutSpread',
 ] as const satisfies readonly (keyof EpubReaderSettings)[]
 
 export function isReaderSyncEnabled(user: { settings?: { syncReaderPreferences?: boolean } } | null | undefined): boolean {
@@ -170,18 +241,34 @@ function sanitizeCbxPartialSettings(settings: unknown): Partial<CbxReaderSetting
 }
 
 function sanitizeBookDelta(group: ReaderFormatGroup, raw: unknown): Partial<ReaderSettings> | null {
+  if (group === 'epub') return sanitizeEpubPartialSettings(raw) as Partial<ReaderSettings> | null
+  if (group === 'pdf') return sanitizePdfPartialSettings(raw) as Partial<ReaderSettings> | null
   if (group !== 'cbx') return isRecord(raw) ? (raw as Partial<ReaderSettings>) : null
   const sanitized = sanitizeCbxPartialSettings(raw)
   return sanitized as Partial<ReaderSettings> | null
 }
 
 function sanitizeDefaultSettings(group: ReaderFormatGroup, raw: unknown): ReaderSettings | null {
+  if (group === 'epub') {
+    if (!isRecord(raw)) return null
+    const migrated = migrateLegacyThemeHighlightColors(raw as unknown as EpubReaderSettings)
+    const partial = sanitizeEpubPartialSettings(migrated) ?? {}
+    return {
+      ...EPUB_READER_DEFAULTS,
+      ...migrated,
+      ...partial,
+    } as ReaderSettings
+  }
+  if (group === 'pdf') {
+    const sanitized = sanitizePdfPartialSettings(raw)
+    if (!sanitized) return null
+    return {
+      ...PDF_READER_DEFAULTS,
+      ...sanitized,
+    } as ReaderSettings
+  }
   if (group !== 'cbx') {
     if (!isRecord(raw)) return null
-    if (group === 'epub') {
-      const migrated = migrateLegacyThemeHighlightColors(raw as unknown as EpubReaderSettings)
-      return migrated as ReaderSettings
-    }
     return raw as unknown as ReaderSettings
   }
 

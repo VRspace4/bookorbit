@@ -48,6 +48,20 @@ describe('Book metadata fetch config DTO validation', () => {
     expect((await errorsFor(UpdateBookMetadataFetchConfigDto, badField)).length).toBeGreaterThan(0);
   });
 
+  it('rejects incomplete global and preview condition payloads', async () => {
+    const incomplete = {
+      enabled: true,
+      triggerOnImport: true,
+      conditions: {
+        scoreThreshold: { enabled: true, threshold: 50 },
+        missingFields: { enabled: true, fields: ['description'] },
+      },
+    };
+
+    expect((await errorsFor(UpdateBookMetadataFetchConfigDto, incomplete)).length).toBeGreaterThan(0);
+    expect((await errorsFor(PreviewCountDto, { conditions: incomplete.conditions })).length).toBeGreaterThan(0);
+  });
+
   it('PreviewCountDto requires nested conditions and validates optional library id', async () => {
     const valid = {
       conditions: {
@@ -69,6 +83,15 @@ describe('Book metadata fetch config DTO validation', () => {
       (
         await errorsFor(UpdateLibraryBookMetadataFetchConfigDto, {
           conditions: {
+            scoreThreshold: { threshold: 45 },
+          },
+        })
+      ).length,
+    ).toBe(0);
+    expect(
+      (
+        await errorsFor(UpdateLibraryBookMetadataFetchConfigDto, {
+          conditions: {
             scoreThreshold: { enabled: true, threshold: 45 },
             missingFields: { enabled: true, fields: ['publisher'] },
             neverFetched: { enabled: false },
@@ -76,5 +99,35 @@ describe('Book metadata fetch config DTO validation', () => {
         })
       ).length,
     ).toBe(0);
+  });
+
+  it('UpdateLibraryBookMetadataFetchConfigDto validates provided partial override fields', async () => {
+    expect(
+      (
+        await errorsFor(UpdateLibraryBookMetadataFetchConfigDto, {
+          conditions: {
+            scoreThreshold: { threshold: 101 },
+          },
+        })
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(
+      (
+        await errorsFor(UpdateLibraryBookMetadataFetchConfigDto, {
+          conditions: {
+            missingFields: { fields: ['not_a_field'] },
+          },
+        })
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(
+      (
+        await errorsFor(UpdateLibraryBookMetadataFetchConfigDto, {
+          conditions: {
+            scoreThreshold: true,
+          },
+        })
+      ).length,
+    ).toBeGreaterThan(0);
   });
 });

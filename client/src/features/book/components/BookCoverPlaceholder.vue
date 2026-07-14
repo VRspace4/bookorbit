@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { getActivePinia, storeToRefs } from 'pinia'
 import { bookCoverPalette } from '../lib/book-cover'
+import { useThemeStore } from '@/stores/theme'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   title: string | null
@@ -9,7 +14,15 @@ const props = defineProps<{
   seed: string
 }>()
 
-const p = computed(() => bookCoverPalette(props.seed))
+const activePinia = getActivePinia()
+const themeRefs = activePinia ? storeToRefs(useThemeStore(activePinia)) : null
+
+const p = computed(() =>
+  bookCoverPalette(props.seed, {
+    accent: themeRefs?.accent.value,
+    isDark: themeRefs?.theme.value === 'dark',
+  }),
+)
 
 // Portrait for ebook (200×300), square for audiobook (300×300).
 // The container background uses the same palette, so any letterboxing from
@@ -33,7 +46,7 @@ const fsize = computed(() => {
 const lh = computed(() => Math.round(fsize.value * 1.25))
 
 const lines = computed(() => {
-  const text = (props.title ?? 'Untitled').trim()
+  const text = (props.title ?? t('book.untitled')).trim()
   // Use 0.60 factor (vs raw 0.55) to better account for bold/heavy font width.
   const cpl = Math.max(4, Math.floor((vb.value.w - 28) / (fsize.value * 0.6)))
   const words = text.split(/\s+/).filter(Boolean)

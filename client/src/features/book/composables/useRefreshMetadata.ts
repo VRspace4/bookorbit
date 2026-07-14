@@ -1,39 +1,12 @@
 import { ref } from 'vue'
 import { api } from '@/lib/api'
-import type { BookDetail, ComicMetadataFields } from '@bookorbit/types'
+import type { BookDetail, BookMetadataRefreshPreviewFields, BookMetadataRefreshPreviewResponse } from '@bookorbit/types'
 import { useCoverVersions } from './useCoverVersions'
 import { useRefreshingBooks } from './useRefreshingBooks'
 import { toast } from 'vue-sonner'
 
-export interface MetadataRefreshPreview {
-  title?: string | null
-  subtitle?: string | null
-  description?: string | null
-  authors?: string[]
-  genres?: string[]
-  publisher?: string | null
-  publishedYear?: number | null
-  language?: string | null
-  pageCount?: number | null
-  seriesName?: string | null
-  seriesIndex?: number | null
-  coverUrl?: string
-  googleBooksId?: string | null
-  goodreadsId?: string | null
-  amazonId?: string | null
-  hardcoverId?: string | null
-  openLibraryId?: string | null
-  itunesId?: string | null
-  audibleId?: string | null
-  comicvineId?: string | null
-  audioMetadata?: {
-    narrators?: string[]
-    durationSeconds?: number | null
-    abridged?: boolean | null
-    chapters?: { title: string; startMs: number; durationMs?: number | null }[]
-  }
-  comicMetadata?: ComicMetadataFields
-}
+export type MetadataRefreshPreview = BookMetadataRefreshPreviewFields
+export type MetadataRefreshPreviewResult = BookMetadataRefreshPreviewResponse
 
 export function useRefreshMetadata() {
   const refreshing = ref(false)
@@ -60,8 +33,8 @@ export function useRefreshMetadata() {
     return callRefresh<BookDetail>(bookId, false)
   }
 
-  async function previewRefresh(bookId: number): Promise<MetadataRefreshPreview | null> {
-    return callRefresh<MetadataRefreshPreview>(bookId, true)
+  async function previewRefresh(bookId: number): Promise<MetadataRefreshPreviewResult | null> {
+    return callRefresh<MetadataRefreshPreviewResult>(bookId, true)
   }
 
   async function refreshWithFeedback(bookId: number): Promise<BookDetail | null> {

@@ -1,5 +1,9 @@
 import type { MockedFunction } from 'vitest';
 
+vi.mock('fs/promises', () => ({
+  readFile: vi.fn(),
+}));
+
 vi.mock('../lib/epub', () => ({
   extractEpubMetadata: vi.fn(),
 }));
@@ -56,6 +60,7 @@ vi.mock('../../../common/comic-format-detect', () => ({
 }));
 
 import { extractEpubCover } from '../lib/cover-epub';
+import { readFile } from 'fs/promises';
 import { extractFb2Cover } from '../lib/cover-fb2';
 import { extractCbrCover } from '../lib/cover-cbr';
 import { extractCbzCover } from '../lib/cover-cbz';
@@ -71,9 +76,11 @@ import { ComicFormatExtractor } from './comic-format.extractor';
 import { EpubFormatExtractor } from './epub-format.extractor';
 import { Fb2FormatExtractor } from './fb2-format.extractor';
 import { MobiFormatExtractor } from './mobi-format.extractor';
+import { OpfFormatExtractor } from './opf-format.extractor';
 import { PdfFormatExtractor } from './pdf-format.extractor';
 import { detectComicContainerFormat } from '../../../common/comic-format-detect';
 
+const mockReadFile = readFile as MockedFunction<typeof readFile>;
 const mockExtractEpubMetadata = extractEpubMetadata as MockedFunction<typeof extractEpubMetadata>;
 const mockExtractEpubCover = extractEpubCover as MockedFunction<typeof extractEpubCover>;
 const mockParseFb2File = parseFb2File as MockedFunction<typeof parseFb2File>;
@@ -123,7 +130,9 @@ describe('metadata format extractors', () => {
       goodreadsId: '234248',
       amazonId: 'B00B7NPRY8',
       hardcoverId: null,
+      hardcoverEditionId: '8941973',
       openLibraryId: 'OL7353617M',
+      ranobedbId: 'ranobe-1',
       itunesId: null,
     });
     mockExtractEpubCover.mockResolvedValue(Buffer.from('cover'));
@@ -139,7 +148,9 @@ describe('metadata format extractors', () => {
         googleBooksId: 'abc123',
         goodreadsId: '234248',
         amazonId: 'B00B7NPRY8',
+        hardcoverEditionId: '8941973',
         openLibraryId: 'OL7353617M',
+        ranobedbId: 'ranobe-1',
       }),
     );
   });
@@ -165,7 +176,9 @@ describe('metadata format extractors', () => {
       goodreadsId: null,
       amazonId: null,
       hardcoverId: null,
+      hardcoverEditionId: null,
       openLibraryId: null,
+      ranobedbId: null,
       itunesId: null,
     });
     mockExtractEpubCover.mockRejectedValue(new Error('cover unavailable'));
@@ -178,6 +191,95 @@ describe('metadata format extractors', () => {
         cover: null,
       }),
     );
+  });
+
+  it('opf extractor parses standalone sidecar OPF metadata', async () => {
+    mockReadFile.mockResolvedValue(`
+      <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+          <dc:title>Sidecar Title</dc:title>
+          <dc:creator opf:role="aut" opf:file-as="Author, Sidecar">Sidecar Author</dc:creator>
+          <dc:identifier opf:scheme="ISBN">9780441013593</dc:identifier>
+          <dc:identifier opf:scheme="GOOGLE">google-sidecar</dc:identifier>
+          <dc:subject>Science Fiction</dc:subject>
+          <dc:publisher>Ace</dc:publisher>
+          <dc:date>1965-08-01</dc:date>
+          <dc:language>en</dc:language>
+          <meta name="calibre:series" content="Dune Chronicles" />
+          <meta name="calibre:series_index" content="1" />
+          <meta name="bookorbit:tags" content="Classic, Imported" />
+          <meta name="bookorbit:page_count" content="412" />
+          <meta name="bookorbit:rating" content="9" />
+        </metadata>
+      </package>
+    `);
+
+    await expect(new OpfFormatExtractor().extract('/books/metadata.opf')).resolves.toEqual(
+      expect.objectContaining({
+        title: 'Sidecar Title',
+        isbn13: '9780441013593',
+        authors: [{ name: 'Sidecar Author', sortName: 'Author, Sidecar' }],
+        genres: ['Science Fiction'],
+        tags: ['Classic', 'Imported'],
+        rating: 9,
+        pageCount: 412,
+        googleBooksId: 'google-sidecar',
+        cover: null,
+      }),
+    );
+    expect(mockReadFile).toHaveBeenCalledWith('/books/metadata.opf', 'utf8');
+  });
+
+  it('opf extractor returns null for sidecars without usable metadata', async () => {
+    mockReadFile.mockResolvedValue('<package><metadata></metadata></package>');
+
+    await expect(new OpfFormatExtractor().extract('/books/empty.opf')).resolves.toBeNull();
+  });
+
+  it('opf extractor resolves guide cover href relative to the OPF directory and passes buffer as cover', async () => {
+    const coverBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    mockReadFile
+      .mockResolvedValueOnce(
+        `
+        <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+            <dc:title>Cover Test</dc:title>
+          </metadata>
+          <guide>
+            <reference type="cover" title="Cover" href="cover.jpg"/>
+          </guide>
+        </package>
+      ` as any,
+      )
+      .mockResolvedValueOnce(coverBytes as any);
+
+    const result = await new OpfFormatExtractor().extract('/books/metadata.opf');
+
+    expect(result?.cover).toEqual(coverBytes);
+    expect(mockReadFile).toHaveBeenNthCalledWith(1, '/books/metadata.opf', 'utf8');
+    expect(mockReadFile).toHaveBeenNthCalledWith(2, '/books/cover.jpg');
+  });
+
+  it('opf extractor returns null cover when the guide cover image file cannot be read', async () => {
+    mockReadFile
+      .mockResolvedValueOnce(
+        `
+        <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+            <dc:title>Missing Cover</dc:title>
+          </metadata>
+          <guide>
+            <reference type="cover" href="missing.jpg"/>
+          </guide>
+        </package>
+      ` as any,
+      )
+      .mockRejectedValueOnce(Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }));
+
+    const result = await new OpfFormatExtractor().extract('/books/metadata.opf');
+
+    expect(result?.cover).toBeNull();
+    expect(result?.title).toBe('Missing Cover');
   });
 
   it('fb2 extractor maps parsed metadata and nulls cover when extraction fails', async () => {
@@ -229,6 +331,7 @@ describe('metadata format extractors', () => {
       authors: [{ name: 'Writer', sortName: null }],
       genres: ['Comics'],
       tags: ['Superhero'],
+      ranobedbId: 'comic-ranobe',
       comicMetadata: { issueNumber: '55', volumeName: 'Batman' },
     });
     mockExtractCbrCover.mockResolvedValue(null);
@@ -237,6 +340,7 @@ describe('metadata format extractors', () => {
       expect.objectContaining({
         title: 'Batman',
         genres: ['Comics'],
+        ranobedbId: 'comic-ranobe',
         comicMetadata: { issueNumber: '55', volumeName: 'Batman' },
       }),
     );
@@ -314,7 +418,9 @@ describe('metadata format extractors', () => {
       goodreadsId: null,
       amazonId: null,
       hardcoverId: null,
+      hardcoverEditionId: null,
       openLibraryId: null,
+      ranobedbId: null,
       itunesId: null,
       coverBuffer: null,
       pageCount: 320,
@@ -342,11 +448,17 @@ describe('metadata format extractors', () => {
   it('audio extractor maps core metadata, narrators, duration, and chapters', async () => {
     mockExtractAudioMetadata.mockResolvedValue({
       title: 'Project Hail Mary',
+      subtitle: 'A Novel',
       description: 'Audiobook',
       publisher: 'Random House',
       publishedYear: 2021,
       language: 'en',
+      seriesName: 'Project Hail Mary',
+      seriesIndex: 1,
       authors: [{ name: 'Andy Weir', sortName: null }],
+      genres: ['Science Fiction'],
+      audibleId: 'B08G9PRS1K',
+      librofmId: '9781234567890',
       narrators: ['Ray Porter'],
       durationSeconds: 3600,
       chapters: [{ title: 'Chapter 1', startMs: 0 }],
@@ -356,6 +468,12 @@ describe('metadata format extractors', () => {
     await expect(new AudioFormatExtractor().extract('/books/hail-mary.m4b')).resolves.toEqual(
       expect.objectContaining({
         title: 'Project Hail Mary',
+        subtitle: 'A Novel',
+        seriesName: 'Project Hail Mary',
+        seriesIndex: 1,
+        genres: ['Science Fiction'],
+        audibleId: 'B08G9PRS1K',
+        librofmId: '9781234567890',
         narrators: ['Ray Porter'],
         durationSeconds: 3600,
         chapters: [{ title: 'Chapter 1', startMs: 0 }],

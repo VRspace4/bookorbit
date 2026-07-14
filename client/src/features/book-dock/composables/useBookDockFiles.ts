@@ -23,6 +23,7 @@ export function useBookDockFiles() {
   const selectedIds = ref<Set<number>>(new Set())
   const selectAll = ref(false)
   const excludedIds = ref<Set<number>>(new Set())
+  const lastToggledId = ref<number | null>(null)
   let fetchReqSeq = 0
 
   const pageCount = computed(() => Math.ceil(total.value / filters.limit) || 1)
@@ -85,14 +86,35 @@ export function useBookDockFiles() {
     fetchFiles()
   }
 
-  function toggleSelect(id: number) {
+  function setSelected(id: number, selected: boolean) {
     if (selectAll.value) {
-      if (excludedIds.value.has(id)) excludedIds.value.delete(id)
+      if (selected) excludedIds.value.delete(id)
       else excludedIds.value.add(id)
     } else {
-      if (selectedIds.value.has(id)) selectedIds.value.delete(id)
-      else selectedIds.value.add(id)
+      if (selected) selectedIds.value.add(id)
+      else selectedIds.value.delete(id)
     }
+  }
+
+  function toggleSelect(id: number, options: { range?: boolean } = {}) {
+    const willBeSelected = !isSelected(id)
+
+    if (options.range && lastToggledId.value !== null && lastToggledId.value !== id) {
+      const anchorIdx = items.value.findIndex((f) => f.id === lastToggledId.value)
+      const targetIdx = items.value.findIndex((f) => f.id === id)
+      if (anchorIdx !== -1 && targetIdx !== -1) {
+        const [start, end] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx]
+        for (let i = start; i <= end; i++) {
+          const item = items.value[i]
+          if (item) setSelected(item.id, willBeSelected)
+        }
+        lastToggledId.value = id
+        return
+      }
+    }
+
+    setSelected(id, willBeSelected)
+    lastToggledId.value = id
   }
 
   function toggleSelectAll() {
@@ -111,6 +133,7 @@ export function useBookDockFiles() {
     selectAll.value = false
     selectedIds.value.clear()
     excludedIds.value.clear()
+    lastToggledId.value = null
   }
 
   function isSelected(id: number): boolean {

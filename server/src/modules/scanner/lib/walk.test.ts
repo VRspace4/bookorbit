@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile, chmod } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-import { findBookCandidates, buildSingleBookCandidate, findLooseFileCandidates, clampIno, BookCandidate } from './walk';
+import { findBookCandidates, buildSingleBookCandidate, findLooseFileCandidates, BookCandidate } from './walk';
 
 let suiteRoot: string;
 let root: string;
@@ -87,11 +87,36 @@ describe('root-level primary files', () => {
     expect(paths).toContain(join(root, 'book2.pdf'));
   });
 
-  it('root-level candidate contains only the primary file', async () => {
+  it('root-level candidate contains only the primary file when no sidecars share its stem', async () => {
     await file('book.epub');
     const { candidates } = await findBookCandidates(root);
     expect(candidates[0].files).toHaveLength(1);
     expect(candidates[0].files[0].absolutePath).toBe(join(root, 'book.epub'));
+  });
+
+  it('root-level candidate includes sidecar files that share its stem', async () => {
+    await file('book.epub');
+    await file('book.opf');
+    await file('book.jpg');
+
+    const { candidates } = await findBookCandidates(root);
+    expect(candidates).toHaveLength(1);
+    const paths = candidates[0].files.map((f) => f.absolutePath).sort();
+    expect(paths).toEqual([join(root, 'book.epub'), join(root, 'book.jpg'), join(root, 'book.opf')]);
+  });
+
+  it('root-level: each primary pulls in only sidecars with its own stem', async () => {
+    await file('A.epub');
+    await file('A.opf');
+    await file('B.epub');
+    await file('B.jpg');
+    await file('orphan.txt');
+
+    const { candidates } = await findBookCandidates(root);
+    expect(candidates).toHaveLength(2);
+    const byPrimary = new Map(candidates.map((c) => [c.folderPath, c.files.map((f) => f.absolutePath).sort()]));
+    expect(byPrimary.get(join(root, 'A.epub'))).toEqual([join(root, 'A.epub'), join(root, 'A.opf')]);
+    expect(byPrimary.get(join(root, 'B.epub'))).toEqual([join(root, 'B.epub'), join(root, 'B.jpg')]);
   });
 });
 
@@ -353,15 +378,16 @@ describe('disc folder flattening', () => {
     expect(candidates[0].files).toHaveLength(3);
   });
 
-  it('flattens Disc, Disk, Part, Side patterns', async () => {
+  it('flattens Disc, Disk, Part, Pt, Side patterns', async () => {
     await file('MultiDisc/Disc 1/track-01.mp3');
     await file('MultiDisc/Disk 2/track-02.mp3');
     await file('MultiDisc/Part 3/track-03.mp3');
-    await file('MultiDisc/Side A/track-04.mp3');
+    await file('MultiDisc/Pt 04/track-04.mp3');
+    await file('MultiDisc/Side A/track-05.mp3');
 
     const { candidates } = await findBookCandidates(root);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0].files).toHaveLength(4);
+    expect(candidates[0].files).toHaveLength(5);
   });
 
   it('does NOT flatten directories that do not match the disc pattern', async () => {
@@ -711,11 +737,11 @@ describe('findLooseFileCandidates — FileStat fields', () => {
     expect(candidates[0].files[0].mtime).toBeInstanceOf(Date);
   });
 
-  it('candidate file has a numeric inode', async () => {
+  it('candidate file has a bigint inode', async () => {
     await file('book.epub');
 
     const { candidates } = await findLooseFileCandidates(root);
-    expect(typeof candidates[0].files[0].ino).toBe('number');
+    expect(typeof candidates[0].files[0].ino).toBe('bigint');
   });
 });
 
@@ -923,48 +949,5 @@ describe('incremental scan — findLooseFileCandidates', () => {
     // Author/ dir is unchanged - no candidates
     expect(second.candidates).toHaveLength(0);
     expect(second.unchangedDirs.size).toBeGreaterThan(0);
-  });
-});
-
-// ── clampIno ─────────────────────────────────────────────────────────────────
-
-describe('clampIno', () => {
-  it('passes through zero unchanged', () => {
-    expect(clampIno(0n)).toBe(0);
-  });
-
-  it('passes through typical small filesystem inodes', () => {
-    expect(clampIno(1n)).toBe(1);
-    expect(clampIno(12345n)).toBe(12345);
-    expect(clampIno(1000000n)).toBe(1000000);
-  });
-
-  it('passes through the maximum safe JS integer', () => {
-    expect(clampIno(BigInt(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
-  });
-
-  it('does not clamp values at the PostgreSQL bigint maximum', () => {
-    // 2^63 - 1: largest value PostgreSQL bigint can store
-    const pgMax = 9223372036854775807n;
-    expect(clampIno(pgMax)).not.toBe(0);
-    expect(clampIno(pgMax)).toBeGreaterThan(0);
-  });
-
-  it('clamps values one above the PostgreSQL bigint maximum to 0', () => {
-    expect(clampIno(9223372036854775808n)).toBe(0);
-  });
-
-  it('clamps the exact MergerFS inode from the bug report to 0', () => {
-    // 17237992710316634000 is the unsigned 64-bit inode reported in the MergerFS issue
-    expect(clampIno(17237992710316634000n)).toBe(0);
-  });
-
-  it('clamps the maximum unsigned 64-bit inode (2^64 - 1) to 0', () => {
-    expect(clampIno(18446744073709551615n)).toBe(0);
-  });
-
-  it('returns a number type', () => {
-    expect(typeof clampIno(1n)).toBe('number');
-    expect(typeof clampIno(17237992710316634000n)).toBe('number');
   });
 });

@@ -1,14 +1,22 @@
 vi.mock('fs/promises', () => ({
   readdir: vi.fn(),
   lstat: vi.fn(),
+  mkdir: vi.fn(),
+  realpath: vi.fn(),
 }));
 
-import { readdir, lstat } from 'fs/promises';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { readdir, lstat, mkdir } from 'fs/promises';
 
 import { PathService } from './path.service';
 
 const readdirMock = vi.mocked(readdir);
 const lstatMock = vi.mocked(lstat);
+const mkdirMock = vi.mocked(mkdir);
+
+function dirStat() {
+  return { isSymbolicLink: () => false, isDirectory: () => true } as never;
+}
 
 function entry(name: string, options: { directory?: boolean; symbolicLink?: boolean } = {}) {
   return {
@@ -19,10 +27,23 @@ function entry(name: string, options: { directory?: boolean; symbolicLink?: bool
 }
 
 describe('PathService', () => {
-  const service = new PathService();
+  const pathPolicy = {
+    getBrowseRoot: vi.fn(() => '/books'),
+    resolveBrowsePath: vi.fn((path?: string) => Promise.resolve(path || '/books')),
+    assertWithinBrowseRoot: vi.fn((path: string) => Promise.resolve(path)),
+  };
+  let service: PathService;
 
   beforeEach(() => {
     vi.resetAllMocks();
+    pathPolicy.getBrowseRoot.mockReturnValue('/books');
+    pathPolicy.resolveBrowsePath.mockImplementation((path?: string) => Promise.resolve(path || '/books'));
+    pathPolicy.assertWithinBrowseRoot.mockImplementation((path: string) => Promise.resolve(path));
+    service = new PathService(pathPolicy as never);
+  });
+
+  it('returns the configured browse root in config', () => {
+    expect(service.getConfig()).toEqual({ root: '/books' });
   });
 
   it('returns empty for blocked system paths', async () => {
@@ -30,6 +51,16 @@ describe('PathService', () => {
     await expect(service.listDirectories('/sys/class')).resolves.toEqual([]);
 
     expect(readdirMock).not.toHaveBeenCalled();
+  });
+
+  it('uses the configured browse root when listing without a path', async () => {
+    lstatMock.mockResolvedValue({ isSymbolicLink: () => false, isDirectory: () => true } as never);
+    readdirMock.mockResolvedValue([] as never);
+
+    await expect(service.listDirectories()).resolves.toEqual([]);
+
+    expect(pathPolicy.resolveBrowsePath).toHaveBeenCalledWith(undefined);
+    expect(lstatMock).toHaveBeenCalledWith('/books');
   });
 
   it('rejects symlinked root paths', async () => {
@@ -91,5 +122,91 @@ describe('PathService', () => {
     readdirMock.mockRejectedValue(new Error('missing'));
 
     await expect(service.listDirectories('/does/not/exist')).resolves.toEqual([]);
+  });
+
+  describe('createDirectory', () => {
+    it('creates a folder under an accessible parent and returns its name and path', async () => {
+      lstatMock.mockResolvedValue(dirStat());
+      mkdirMock.mockResolvedValue(undefined as never);
+
+      await expect(service.createDirectory('/tmp/books', 'scifi')).resolves.toEqual({
+        name: 'scifi',
+        path: '/tmp/books/scifi',
+      });
+      expect(mkdirMock).toHaveBeenCalledWith('/tmp/books/scifi');
+    });
+
+    it('trims the folder name before creating', async () => {
+      lstatMock.mockResolvedValue(dirStat());
+      mkdirMock.mockResolvedValue(undefined as never);
+
+      await expect(service.createDirectory('/tmp/books', '  scifi  ')).resolves.toEqual({
+        name: 'scifi',
+        path: '/tmp/books/scifi',
+      });
+      expect(mkdirMock).toHaveBeenCalledWith('/tmp/books/scifi');
+    });
+
+    it('rejects blocked parent paths without touching the filesystem', async () => {
+      await expect(service.createDirectory('/etc', 'evil')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(lstatMock).not.toHaveBeenCalled();
+      expect(mkdirMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects parent paths outside the configured browse root', async () => {
+      pathPolicy.resolveBrowsePath.mockRejectedValue(new ForbiddenException('outside root'));
+
+      await expect(service.createDirectory('/tmp/books', 'scifi')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(lstatMock).not.toHaveBeenCalled();
+      expect(mkdirMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a symlinked parent', async () => {
+      lstatMock.mockResolvedValue({ isSymbolicLink: () => true, isDirectory: () => false } as never);
+
+      await expect(service.createDirectory('/tmp/link', 'scifi')).rejects.toBeInstanceOf(ForbiddenException);
+      expect(mkdirMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a parent that is not a directory', async () => {
+      lstatMock.mockResolvedValue({ isSymbolicLink: () => false, isDirectory: () => false } as never);
+
+      await expect(service.createDirectory('/tmp/file.txt', 'scifi')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mkdirMock).not.toHaveBeenCalled();
+    });
+
+    it.each(['', '   ', '..', '.', '.hidden', 'a/b', 'a\\b'])('rejects unsafe folder name %j before any filesystem access', async (name) => {
+      await expect(service.createDirectory('/tmp/books', name)).rejects.toBeInstanceOf(BadRequestException);
+      expect(lstatMock).not.toHaveBeenCalled();
+      expect(mkdirMock).not.toHaveBeenCalled();
+    });
+
+    it('maps EEXIST to a conflict', async () => {
+      lstatMock.mockResolvedValue(dirStat());
+      mkdirMock.mockRejectedValue(Object.assign(new Error('exists'), { code: 'EEXIST' }));
+
+      await expect(service.createDirectory('/tmp/books', 'scifi')).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('maps EACCES to forbidden', async () => {
+      lstatMock.mockResolvedValue(dirStat());
+      mkdirMock.mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }));
+
+      await expect(service.createDirectory('/tmp/books', 'scifi')).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('maps EROFS to a bad request', async () => {
+      lstatMock.mockResolvedValue(dirStat());
+      mkdirMock.mockRejectedValue(Object.assign(new Error('read-only'), { code: 'EROFS' }));
+
+      await expect(service.createDirectory('/tmp/books', 'scifi')).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('maps a missing parent (ENOENT) to a bad request', async () => {
+      lstatMock.mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+
+      await expect(service.createDirectory('/tmp/gone', 'scifi')).rejects.toBeInstanceOf(BadRequestException);
+      expect(mkdirMock).not.toHaveBeenCalled();
+    });
   });
 });

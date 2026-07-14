@@ -44,15 +44,15 @@ function makeDb() {
 }
 
 describe('KoboDeviceService', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+  function makeService(db: ReturnType<typeof makeDb>) {
+    return new KoboDeviceService(db as never);
+  }
 
   it('lists devices for user ordered by creation time', async () => {
     const db = makeDb();
     const rows = [{ id: 1, name: 'Aura' }];
     db.select.mockReturnValueOnce(makeSelectChain(rows));
-    const service = new KoboDeviceService(db as never);
+    const service = makeService(db);
 
     await expect(service.listDevices(8)).resolves.toEqual(rows);
   });
@@ -68,7 +68,7 @@ describe('KoboDeviceService', () => {
         createdAt: new Date('2026-01-01T00:00:00.000Z'),
       },
     ]);
-    const service = new KoboDeviceService(db as never);
+    const service = makeService(db);
 
     await expect(service.createDevice(8, 'Libra')).resolves.toEqual({
       id: 22,
@@ -84,13 +84,14 @@ describe('KoboDeviceService', () => {
         token: expect.stringMatching(/^[0-9a-f]+$/i),
       }),
     );
+    expect(db.select).not.toHaveBeenCalled();
   });
 
   it('renames existing devices and throws when device is missing', async () => {
     const db = makeDb();
     db.select.mockReturnValueOnce(makeSelectChain([], [])).mockReturnValueOnce(makeSelectChain([], [{ id: 5, userId: 8 }]));
     db.updateReturning.mockResolvedValueOnce([{ id: 5, name: 'Clara', lastSeenAt: null, createdAt: new Date('2026-01-01T00:00:00.000Z') }]);
-    const service = new KoboDeviceService(db as never);
+    const service = makeService(db);
 
     await expect(service.renameDevice(8, 404, 'Nope')).rejects.toThrow(NotFoundException);
     await expect(service.renameDevice(8, 5, 'Clara')).resolves.toEqual({
@@ -104,11 +105,14 @@ describe('KoboDeviceService', () => {
   it('revokes devices and rejects unknown ids', async () => {
     const db = makeDb();
     db.select.mockReturnValueOnce(makeSelectChain([], [])).mockReturnValueOnce(makeSelectChain([], [{ id: 7 }]));
-    const service = new KoboDeviceService(db as never);
+    const service = makeService(db);
 
     await expect(service.revokeDevice(8, 111)).rejects.toThrow(NotFoundException);
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(db.deleteWhere).not.toHaveBeenCalled();
+
     await expect(service.revokeDevice(8, 7)).resolves.toBeUndefined();
-    expect(db.delete).toHaveBeenCalled();
-    expect(db.deleteWhere).toHaveBeenCalled();
+    expect(db.delete).toHaveBeenCalledTimes(1);
+    expect(db.deleteWhere).toHaveBeenCalledTimes(1);
   });
 });

@@ -25,14 +25,15 @@ services:
       CLIENT_URL: ${CLIENT_URL:-${APP_URL?required}}
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
-      NODE_MAX_OLD_SPACE_SIZE: ${NODE_MAX_OLD_SPACE_SIZE:-2048}
+      NODE_MAX_OLD_SPACE_SIZE: ${NODE_MAX_OLD_SPACE_SIZE:-auto}
+      BOOK_DOCK_PATH: ${BOOK_DOCK_PATH:-}
+      LIBRARY_BROWSE_ROOT: ${LIBRARY_BROWSE_ROOT:-}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ${BOOKS_HOST_PATH:-./books}:/books
       - ./data/app:/data
-      - ${BOOK_DROP_HOST_PATH:-./data/app/book-dock}:/data/book-dock
     read_only: true
     tmpfs:
       - /tmp
@@ -50,8 +51,10 @@ services:
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          'node -e "fetch(''http://127.0.0.1:''+(process.env.PORT||3000)+''/api/v1/health'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+          "CMD",
+          "node",
+          "-e",
+          "const p=process.env.PORT||3000;fetch('http://127.0.0.1:'+p+'/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 5s
@@ -60,7 +63,7 @@ services:
 
   postgres:
     container_name: bookorbit-db
-    image: pgvector/pgvector:pg16@sha256:7d400e340efb42f4d8c9c12c6427adb253f726881a9985d2a471bf0eed824dff
+    image: pgvector/pgvector:pg18
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER?required}

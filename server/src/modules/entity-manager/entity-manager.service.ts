@@ -15,11 +15,12 @@ import type {
   BulkDeleteResult,
 } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
+import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { FileWriteService } from '../file-write/file-write.service';
 import { LibraryService } from '../library/library.service';
 import { EntityManagerRepository } from './entity-manager.repository';
 import { DuplicateComputeService } from './duplicate-compute.service';
-import type { EntityStrategy, RawCandidatePair } from './strategies/entity-strategy.interface';
+import type { EntityBookScope, EntityStrategy, RawCandidatePair } from './strategies/entity-strategy.interface';
 import { AuthorStrategy } from './strategies/author.strategy';
 import { GenreStrategy } from './strategies/genre.strategy';
 import { TagStrategy } from './strategies/tag.strategy';
@@ -32,6 +33,11 @@ const BOOK_TITLES_LIMIT = 5;
 const DEFAULT_MIN_SIMILARITY = 0.5;
 const DEFAULT_SCAN_PAGE = 1;
 const DEFAULT_SCAN_PAGE_SIZE = 20;
+
+function logErrorFields(err: unknown): { errorClass: string; error: string } {
+  const error = err instanceof Error ? err : new Error(String(err));
+  return { errorClass: error.name, error: sanitizeLogValue(error.message) };
+}
 
 @Injectable()
 export class EntityManagerService {
@@ -83,23 +89,26 @@ export class EntityManagerService {
     try {
       const strategy = this.getStrategy(entityType);
       const similarity = minSimilarity ?? DEFAULT_MIN_SIMILARITY;
+      const allLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      if (libraryId && !allLibraryIds.includes(libraryId)) throw new BadRequestException('Library not accessible');
 
-      if (libraryId) {
-        const allLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-        if (!allLibraryIds.includes(libraryId)) throw new BadRequestException('Library not accessible');
-      }
+      const libraryIds = libraryId ? [libraryId] : allLibraryIds;
+      const bookScope: EntityBookScope = {
+        libraryIds,
+        contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+      };
 
       let rawPairs: RawCandidatePair[];
 
-      if (strategy.isInline) {
-        const allLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-        const libraryIds = libraryId ? allLibraryIds.filter((id) => id === libraryId) : allLibraryIds;
-        rawPairs = await strategy.findCandidatePairs(libraryIds, similarity);
+      if (libraryIds.length === 0) {
+        rawPairs = [];
+      } else if (strategy.isInline) {
+        rawPairs = await strategy.findCandidatePairs(libraryIds, similarity, bookScope.contentFilters);
 
         const dismissedSet = await this.repo.getInlineDismissedPairSet(entityType);
         rawPairs = rawPairs.filter((pair) => !dismissedSet.has(`${pair.idA}:${pair.idB}`));
       } else {
-        const storedPairs = await this.duplicateCompute.readCandidatePairs(entityType, similarity);
+        const storedPairs = await this.duplicateCompute.readCandidatePairs(entityType, similarity, bookScope);
 
         if (storedPairs.length === 0) {
           const status = await this.duplicateCompute.getStatus(entityType);
@@ -129,7 +138,7 @@ export class EntityManagerService {
       const offset = (clampedPage - 1) * pageSize;
       const pageSlice = ranked.slice(offset, offset + pageSize);
 
-      const enrichedClusters = await this.enrichClusterSlice(strategy, pageSlice, rawPairs);
+      const enrichedClusters = await this.enrichClusterSlice(strategy, pageSlice, rawPairs, bookScope);
 
       this.logger.log(
         `[${event}] [end] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} total=${total} page=${clampedPage} clusters=${enrichedClusters.length} - duplicate scan completed`,
@@ -144,8 +153,9 @@ export class EntityManagerService {
         pageSize,
       };
     } catch (err) {
+      const error = logErrorFields(err);
       this.logger.warn(
-        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${(err as Error).name} error="${(err as Error).message}" - duplicate scan failed`,
+        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${error.errorClass} error="${error.error}" - duplicate scan failed`,
       );
       throw err;
     }
@@ -196,7 +206,7 @@ export class EntityManagerService {
   async browse(
     entityType: EntityType,
     user: RequestUser,
-    params: { search?: string; page?: number; pageSize?: number; sortBy?: string; sortOrder?: string },
+    params: { search?: string; page?: number; pageSize?: number; sortBy?: string; sortOrder?: string; bookCount?: string },
   ): Promise<BrowseEntitiesResponse> {
     const strategy = this.getStrategy(entityType);
     const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
@@ -208,6 +218,8 @@ export class EntityManagerService {
       pageSize: params.pageSize ?? 25,
       sortBy: (params.sortBy as 'name' | 'bookCount') || 'name',
       sortOrder: (params.sortOrder as 'asc' | 'desc') || 'asc',
+      bookCount: strategy.isInline ? 'any' : (params.bookCount as 'any' | 'empty') || 'any',
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
     });
 
     return { items: result.items, total: result.total, page: params.page ?? 1, pageSize: params.pageSize ?? 25 };
@@ -228,7 +240,8 @@ export class EntityManagerService {
 
     try {
       const strategy = this.getStrategy(entityType);
-      const result = await strategy.merge({ targetId, sourceIds, userId: user.id });
+      const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const result = await strategy.merge({ targetId, sourceIds, userId: user.id, libraryIds });
 
       const nonInlineSourceIds: number[] = [];
       for (const sourceId of sourceIds) {
@@ -260,8 +273,9 @@ export class EntityManagerService {
         fieldsResolved: result.fieldsResolved,
       };
     } catch (err) {
+      const error = logErrorFields(err);
       this.logger.warn(
-        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${(err as Error).name} error="${(err as Error).message}" - merge failed`,
+        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${error.errorClass} error="${error.error}" - merge failed`,
       );
       throw err;
     }
@@ -294,8 +308,9 @@ export class EntityManagerService {
         mergedEntityId: result.mergedEntityId,
       };
     } catch (err) {
+      const error = logErrorFields(err);
       this.logger.warn(
-        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${(err as Error).name} error="${(err as Error).message}" - rename failed`,
+        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${error.errorClass} error="${error.error}" - rename failed`,
       );
       throw err;
     }
@@ -315,11 +330,12 @@ export class EntityManagerService {
     try {
       const strategy = this.getStrategy(entityType);
       const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-      const result = await strategy.deleteEntity({ entityId, mode, libraryIds });
+      const effectiveMode = !strategy.isInline && mode === 'soft' && (await strategy.getBookCount(entityId)) === 0 ? 'hard' : mode;
+      const result = await strategy.deleteEntity({ entityId, mode: effectiveMode, libraryIds });
 
       if (strategy.isInline) {
         await this.repo.deleteInlineDismissedPairsForValue(entityType, entityId as string);
-      } else if (mode === 'hard') {
+      } else if (effectiveMode === 'hard') {
         await this.repo.deleteDismissedPairsForEntity(entityType, entityId as number);
         await this.duplicateCompute.invalidateCandidatesForEntities(entityType, [entityId as number]);
       }
@@ -332,10 +348,11 @@ export class EntityManagerService {
         `[${event}] [end] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} affectedBooks=${result.affectedBookIds.length} - delete completed`,
       );
 
-      return { entityId, name: result.name, affectedBookCount: result.affectedBookIds.length, mode };
+      return { entityId, name: result.name, affectedBookCount: result.affectedBookIds.length, mode: effectiveMode };
     } catch (err) {
+      const error = logErrorFields(err);
       this.logger.warn(
-        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${(err as Error).name} error="${(err as Error).message}" - delete failed`,
+        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${error.errorClass} error="${error.error}" - delete failed`,
       );
       throw err;
     }
@@ -378,7 +395,8 @@ export class EntityManagerService {
         throw new BadRequestException('Split requires at least 2 new names');
       }
 
-      const result = await strategy.split({ entityId, newNames });
+      const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const result = await strategy.split({ entityId, newNames, libraryIds });
 
       await this.repo.deleteDismissedPairsForEntity(entityType, entityId);
 
@@ -397,8 +415,9 @@ export class EntityManagerService {
         affectedBookCount: result.affectedBookIds.length,
       };
     } catch (err) {
+      const error = logErrorFields(err);
       this.logger.warn(
-        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${(err as Error).name} error="${(err as Error).message}" - split failed`,
+        `[${event}] [fail] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} errorClass=${error.errorClass} error="${error.error}" - split failed`,
       );
       throw err;
     }
@@ -476,12 +495,22 @@ export class EntityManagerService {
     return result;
   }
 
-  async getEntityInfo(entityType: EntityType, entityId: number | string): Promise<EntityInfo> {
+  async getEntityInfo(entityType: EntityType, user: RequestUser, entityId: number | string): Promise<EntityInfo> {
     const strategy = this.getStrategy(entityType);
     const entity = await strategy.findEntityById(entityId);
     if (!entity) throw new NotFoundException(`${entityType} not found`);
 
-    const [bookCount, bookTitles] = await Promise.all([strategy.getBookCount(entityId), strategy.getBookTitles(entityId, BOOK_TITLES_LIMIT)]);
+    const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+    const bookScope: EntityBookScope = {
+      libraryIds,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+    };
+    const [globalBookCount, bookCount, bookTitles] = await Promise.all([
+      strategy.getBookCount(entityId),
+      strategy.getBookCount(entityId, bookScope),
+      strategy.getBookTitles(entityId, BOOK_TITLES_LIMIT, bookScope),
+    ]);
+    if (globalBookCount > 0 && bookCount === 0) throw new NotFoundException(`${entityType} not found`);
 
     return { id: entity.id, name: entity.name, bookCount, bookTitles };
   }
@@ -592,6 +621,7 @@ export class EntityManagerService {
     strategy: EntityStrategy,
     rankedSlice: Array<{ memberIds: Set<string>; avgSimilarity: number }>,
     pairs: RawCandidatePair[],
+    bookScope: EntityBookScope,
   ): Promise<DuplicateCluster[]> {
     const enriched: DuplicateCluster[] = [];
     let clusterIndex = 0;
@@ -602,8 +632,8 @@ export class EntityManagerService {
           const parsedId = strategy.isInline ? id : Number(id);
           const [entity, bookCount, bookTitles] = await Promise.all([
             strategy.findEntityById(parsedId),
-            strategy.getBookCount(parsedId),
-            strategy.getBookTitles(parsedId, BOOK_TITLES_LIMIT),
+            strategy.getBookCount(parsedId, bookScope),
+            strategy.getBookTitles(parsedId, BOOK_TITLES_LIMIT, bookScope),
           ]);
           return entity
             ? { id: entity.id, name: entity.name, bookCount, bookTitles, sortName: (entity as any).sortName, hasPhoto: (entity as any).hasPhoto }

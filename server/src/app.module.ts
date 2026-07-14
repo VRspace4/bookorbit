@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 
 import {
@@ -19,10 +19,12 @@ import {
 import { validateEnv } from './config/env.validation';
 import { loggerConfig } from './common/logger.config';
 import { CommonModule } from './common/common.module';
+import { SeriesIdentityModule } from './common/series-identity.module';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { LibraryAccessGuard } from './common/guards/library-access.guard';
 import { PermissionGuard } from './common/guards/permission.guard';
+import { SensitiveEndpointThrottlerGuard } from './common/guards/sensitive-endpoint-throttler.guard';
 import { DbModule } from './db/db.module';
 import { AnnotationModule } from './modules/annotation/annotation.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
@@ -46,6 +48,7 @@ import { MetadataModule } from './modules/metadata/metadata.module';
 import { NarratorModule } from './modules/narrator/narrator.module';
 import { ReaderPreferencesModule } from './modules/reader-preferences/reader-preferences.module';
 import { RecommendationModule } from './modules/recommendation/recommendation.module';
+import { UserPreferencesModule } from './modules/user-preferences/user-preferences.module';
 import { ScannerModule } from './modules/scanner/scanner.module';
 import { SeedModule } from './modules/seed/seed.module';
 import { EmailModule } from './modules/email/email.module';
@@ -59,6 +62,7 @@ import { MetadataScoreModule } from './modules/metadata-score/metadata-score.mod
 import { StatisticsModule } from './modules/statistics/statistics.module';
 import { UserStatisticsModule } from './modules/user-statistics/user-statistics.module';
 import { ReadingSessionModule } from './modules/reading-session/reading-session.module';
+import { ReadingStateModule } from './modules/reading-state/reading-state.module';
 import { UserBookStatusModule } from './modules/user-book-status/user-book-status.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { MigrationModule } from './modules/migration/migration.module';
@@ -68,10 +72,17 @@ import { EntityManagerModule } from './modules/entity-manager/entity-manager.mod
 import { FontModule } from './modules/font/font.module';
 import { KoreaderModule } from './modules/koreader/koreader.module';
 import { AppInfoModule } from './modules/app-info/app-info.module';
+import { ReleaseNotesModule } from './modules/release-notes/release-notes.module';
 import { AchievementModule } from './modules/achievement/achievement.module';
 import { HardcoverModule } from './modules/hardcover/hardcover.module';
 import { TtsModule } from './modules/tts/tts.module';
 import { ZlibModule } from './modules/zlib/zlib.module';
+import { ReadwiseModule } from './modules/readwise/readwise.module';
+import { StorygraphModule } from './modules/storygraph/storygraph.module';
+import { CustomMetadataModule } from './modules/custom-metadata/custom-metadata.module';
+import { CustomIconModule } from './modules/custom-icon/custom-icon.module';
+import { AccountActivityModule } from './modules/account-activity/account-activity.module';
+import { SharedReadingInsightsModule } from './modules/shared-reading-insights/shared-reading-insights.module';
 
 @Module({
   imports: [
@@ -93,6 +104,7 @@ import { ZlibModule } from './modules/zlib/zlib.module';
       ],
     }),
     DbModule,
+    SeriesIdentityModule,
     CommonModule,
     SeedModule,
     AuthModule,
@@ -113,6 +125,8 @@ import { ZlibModule } from './modules/zlib/zlib.module';
     UploadModule,
     MetadataFetchModule,
     MetadataPreferencesModule,
+    CustomMetadataModule,
+    CustomIconModule,
     RecommendationModule,
     KoboModule,
     OpdsModule,
@@ -122,6 +136,7 @@ import { ZlibModule } from './modules/zlib/zlib.module';
     HealthModule,
     CbzModule,
     ReaderPreferencesModule,
+    UserPreferencesModule,
     EpubModule,
     BookDockModule,
     EmailModule,
@@ -129,6 +144,7 @@ import { ZlibModule } from './modules/zlib/zlib.module';
     StatisticsModule,
     UserStatisticsModule,
     ReadingSessionModule,
+    ReadingStateModule,
     UserBookStatusModule,
     AuditModule,
     MigrationModule,
@@ -138,14 +154,19 @@ import { ZlibModule } from './modules/zlib/zlib.module';
     FontModule,
     KoreaderModule,
     AppInfoModule,
+    ReleaseNotesModule,
     AchievementModule,
     HardcoverModule,
     TtsModule,
     ZlibModule,
+    ReadwiseModule,
+    StorygraphModule,
+    AccountActivityModule,
+    SharedReadingInsightsModule,
   ],
   providers: [
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+    { provide: APP_GUARD, useClass: SensitiveEndpointThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
     { provide: APP_GUARD, useClass: LibraryAccessGuard },

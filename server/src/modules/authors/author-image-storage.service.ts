@@ -43,6 +43,13 @@ export class AuthorImageStorageService {
     this.appDataPath = this.config.get<string>('storage.appDataPath')!;
   }
 
+  async saveFromBuffer(authorId: number, bytes: Buffer): Promise<void> {
+    if (!bytes || bytes.length === 0) {
+      throw new AuthorImageStorageError('Image bytes are empty', { transient: false });
+    }
+    await this.persistImage(authorId, bytes);
+  }
+
   async saveFromUrl(authorId: number, rawUrl: string): Promise<boolean> {
     const url = await this.normalizeUrl(rawUrl);
     if (!url) return false;
@@ -50,6 +57,11 @@ export class AuthorImageStorageService {
     const bytes = await this.fetchImageFromUrl(url);
     if (!bytes || bytes.length === 0) return false;
 
+    await this.persistImage(authorId, bytes);
+    return true;
+  }
+
+  private async persistImage(authorId: number, bytes: Buffer): Promise<void> {
     const dir = this.authorDir(authorId);
     await mkdir(dir, { recursive: true });
 
@@ -69,7 +81,6 @@ export class AuthorImageStorageService {
       await writeFile(join(dir, `photo.${ext}`), bytes);
       const thumb = await generateThumbnail(bytes);
       await writeFile(join(dir, 'thumbnail.jpg'), thumb);
-      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new AuthorImageStorageError(`Failed to persist author image: ${message}`, { transient: true });

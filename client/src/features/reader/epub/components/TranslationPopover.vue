@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import TranslationPanel from './TranslationPanel.vue'
 import { useTranslation } from '../composables/useTranslation'
+import { copyToClipboard } from '@/lib/clipboard'
 
 const props = defineProps<{
   text: string
@@ -54,7 +55,7 @@ function handleChangeLanguage(code: string) {
 
 function handleCopy() {
   if (result.value) {
-    navigator.clipboard.writeText(result.value.translatedText).catch(() => {})
+    void copyToClipboard(result.value.translatedText)
   }
 }
 

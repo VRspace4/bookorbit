@@ -163,6 +163,19 @@ describe('parseXmp', () => {
       expect(r?.tags).toEqual(['favorites', 'to-read']);
     });
 
+    it('parses pdf:Keywords as tags when bookorbit tags are absent', () => {
+      const xml = `<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:pdf="http://ns.adobe.com/pdf/1.3/">
+      <pdf:Keywords>Magazine, Travel</pdf:Keywords>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>`;
+      const r = parseXmp(xml);
+      expect(r?.tags).toEqual(['Magazine', 'Travel']);
+    });
+
     it('parses bookorbit:rating', () => {
       const r = parseXmp(xmpDoc('<bookorbit:rating>4.5</bookorbit:rating>'));
       expect(r?.rating).toBe(4.5);
@@ -178,6 +191,11 @@ describe('parseXmp', () => {
       expect(r?.googleBooksId).toBe('abc123');
     });
 
+    it('parses bookorbit:ranobedbId', () => {
+      const r = parseXmp(xmpDoc('<bookorbit:ranobedbId>ranobe-1</bookorbit:ranobedbId>'));
+      expect(r?.ranobedbId).toBe('ranobe-1');
+    });
+
     it('parses bookorbit:goodreadsId', () => {
       const r = parseXmp(xmpDoc('<bookorbit:goodreadsId>1234567</bookorbit:goodreadsId>'));
       expect(r?.goodreadsId).toBe('1234567');
@@ -186,6 +204,11 @@ describe('parseXmp', () => {
     it('parses bookorbit:amazonId', () => {
       const r = parseXmp(xmpDoc('<bookorbit:amazonId>B001234567</bookorbit:amazonId>'));
       expect(r?.amazonId).toBe('B001234567');
+    });
+
+    it('parses bookorbit:hardcoverEditionId', () => {
+      const r = parseXmp(xmpDoc('<bookorbit:hardcoverEditionId>8941973</bookorbit:hardcoverEditionId>'));
+      expect(r?.hardcoverEditionId).toBe('8941973');
     });
   });
 

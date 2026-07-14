@@ -1,7 +1,9 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import type { SQL } from 'drizzle-orm';
 
-import type { BookQuery, BooksPage, GroupRule, SortSpec } from '@bookorbit/types';
+import type { BookQuery, BooksPage, GroupRule, JumpBucketsResponse, SortSpec } from '@bookorbit/types';
 import type { RequestUser } from '../../common/types/request-user';
+import { normalizeIconValue } from '../../common/utils/icon-value.utils';
 import { resolveTimeZone } from '../../common/utils/timezone.utils';
 import type { SmartScope } from '../../db/schema/smart-scopes';
 import { BookService } from '../book/book.service';
@@ -13,12 +15,6 @@ import { CreateSmartScopeDto } from './dto/create-smart-scope.dto';
 import { ReorderSmartScopesDto } from './dto/reorder-smart-scopes.dto';
 import { UpdateSmartScopeDto } from './dto/update-smart-scope.dto';
 import { SmartScopeRepository } from './smart-scope.repository';
-
-function normalizeIcon(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const icon = value.trim();
-  return icon.length > 0 ? icon : null;
-}
 
 /**
  * SmartScopes: server-backed, rule-based dynamic datasets.
@@ -93,7 +89,7 @@ export class SmartScopeService {
 
   async create(dto: CreateSmartScopeDto, user: RequestUser) {
     const filter = validateGroupRule(dto.filter);
-    const icon = normalizeIcon(dto.icon);
+    const icon = normalizeIconValue(dto.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
     }
@@ -104,6 +100,7 @@ export class SmartScopeService {
       filter,
       defaultSort: dto.defaultSort ?? [],
       isPublic: dto.isPublic ?? false,
+      syncToKobo: dto.syncToKobo ?? false,
     });
     return smartScope;
   }
@@ -114,7 +111,7 @@ export class SmartScopeService {
 
     const hasFilterField = Object.prototype.hasOwnProperty.call(dto, 'filter');
     const filter = hasFilterField ? validateGroupRule(dto.filter) : undefined;
-    const icon = dto.icon !== undefined ? normalizeIcon(dto.icon) : normalizeIcon(smartScope.icon);
+    const icon = dto.icon !== undefined ? normalizeIconValue(dto.icon) : normalizeIconValue(smartScope.icon);
     if (!icon) {
       throw new BadRequestException('Icon is required');
     }
@@ -124,6 +121,7 @@ export class SmartScopeService {
       filter,
       defaultSort: dto.defaultSort,
       isPublic: dto.isPublic,
+      syncToKobo: dto.syncToKobo,
     });
     return updated;
   }
@@ -160,27 +158,11 @@ export class SmartScopeService {
       `[smart_scope.query_books] [start] scopeId=${id} userId=${user.id} page=${query.pagination.page} size=${query.pagination.size} - query started`,
     );
 
-    const smartScope = await this.getSmartScopeOrThrow(id);
-    this.assertReadAccess(smartScope, user);
-
-    if (!smartScope.filter) {
+    const prepared = await this.prepareBooksQuery(id, user, query);
+    if (!prepared) {
       return { items: [], total: 0, page: query.pagination.page, size: query.pagination.size };
     }
-
-    const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
-    const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
-    const filter = this.combineFilters(smartScope.filter, query.filter);
-    const effectiveQuery: BookQuery = {
-      ...query,
-      filter,
-      sort: this.resolveSort(query.sort, smartScope),
-    };
-    const where = this.queryBuilder.buildWhere(filter, {
-      accessibleLibraryIds,
-      userId: user.id,
-      q: query.q,
-      timeZone,
-    });
+    const { where, effectiveQuery } = prepared;
 
     try {
       const result = await this.bookService.executeBooksQuery(user.id, where, effectiveQuery);
@@ -198,6 +180,44 @@ export class SmartScopeService {
       );
       throw err;
     }
+  }
+
+  async queryJumpBuckets(id: number, user: RequestUser, query: BookQuery): Promise<JumpBucketsResponse> {
+    const prepared = await this.prepareBooksQuery(id, user, query);
+    if (!prepared) {
+      return { buckets: [], total: 0 };
+    }
+    // Eligibility is validated by the book service against effectiveQuery.sort,
+    // i.e. after the scope's defaultSort has been resolved.
+    return this.bookService.executeJumpBucketsQuery(user.id, prepared.where, prepared.effectiveQuery);
+  }
+
+  private async prepareBooksQuery(
+    id: number,
+    user: RequestUser,
+    query: BookQuery,
+  ): Promise<{ where: SQL | undefined; effectiveQuery: BookQuery } | null> {
+    const smartScope = await this.getSmartScopeOrThrow(id);
+    this.assertReadAccess(smartScope, user);
+
+    if (!smartScope.filter) return null;
+
+    const accessibleLibraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+    const timeZone = resolveTimeZone((user.settings as { timezone?: unknown } | undefined)?.timezone, 'UTC');
+    const filter = this.combineFilters(smartScope.filter, query.filter);
+    const effectiveQuery: BookQuery = {
+      ...query,
+      filter,
+      sort: this.resolveSort(query.sort, smartScope),
+    };
+    const where = this.queryBuilder.buildWhere(filter, {
+      accessibleLibraryIds,
+      userId: user.id,
+      q: query.q,
+      timeZone,
+      contentFilters: user.isSuperuser ? undefined : user.contentFilters,
+    });
+    return { where, effectiveQuery };
   }
 
   private combineFilters(scopeFilter: GroupRule | null, queryFilter?: GroupRule): GroupRule | undefined {

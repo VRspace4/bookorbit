@@ -16,8 +16,14 @@ export interface AudibleProduct {
   product_images?: { 500?: string; 1024?: string };
   publisher_summary?: string;
   merchandising_summary?: string;
-  series?: Array<{ title: string; sequence?: string }>;
+  series?: Array<{ asin?: string; title: string; sequence?: string; url?: string }>;
   category_ladders?: AudibleCategoryLadder[];
+  rating?: {
+    overall_distribution?: {
+      average_rating?: number;
+      num_ratings?: number;
+    };
+  };
 }
 
 export interface AudibleSearchResponse {

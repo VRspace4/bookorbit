@@ -134,7 +134,9 @@ describe('Email DTO validation', () => {
     expect((await errorsFor(SendBookDto, { bookIds: [1], recipientIds: [2], groupIds: [3], providerId: 4, templateId: 5, fileId: 6 })).length).toBe(
       0,
     );
+    expect((await errorsFor(SendBookDto, { query: { libraryId: 5 }, recipientIds: [2] })).length).toBe(0);
     expect((await errorsFor(SendBookDto, { bookIds: [] })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SendBookDto, { bookIds: [0] })).length).toBeGreaterThan(0);
     expect((await errorsFor(SendBookDto, { bookIds: [1], recipientIds: ['x'] })).length).toBeGreaterThan(0);
   });
 
