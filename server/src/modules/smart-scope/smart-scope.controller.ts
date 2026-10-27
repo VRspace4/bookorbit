@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Body,
   Controller,
-  DefaultValuePipe,
   Delete,
   Get,
   HttpCode,
@@ -11,18 +10,21 @@ import {
   ParseIntPipe,
   Patch,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 
 import { AuditAction, AuditResource } from '@bookorbit/types';
-import type { BookQuery } from '@bookorbit/types';
+import type { BookQuery, JumpBucketsQuery } from '@bookorbit/types';
 import { MAX_OFFSET_ROWS, isOffsetWithinLimit } from '../../common/constants/pagination.constants';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Auditable } from '../../common/decorators/auditable.decorator';
 import type { RequestUser } from '../../common/types/request-user';
-import { BookQueryPipe } from '../book/pipes/book-query.pipe';
+import { OptionalIntQueryPipe } from '../../common/pipes/optional-int-query.pipe';
+import { BookQueryPipe, JumpBucketsQueryPipe } from '../book/pipes/book-query.pipe';
 import { CreateSmartScopeDto } from './dto/create-smart-scope.dto';
 import { ReorderSmartScopesDto } from './dto/reorder-smart-scopes.dto';
+import { SetKoboSyncDto } from './dto/set-kobo-sync.dto';
 import { UpdateSmartScopeDto } from './dto/update-smart-scope.dto';
 import { SmartScopeService } from './smart-scope.service';
 
@@ -89,6 +91,17 @@ export class SmartScopeController {
     return this.smartScopeService.update(id, dto, user);
   }
 
+  @Put(':id/kobo-sync')
+  @Auditable({
+    action: AuditAction.SmartScopeUpdate,
+    resource: AuditResource.SmartScope,
+    getResourceId: (req) => parseInt(req.params['id'] as string, 10),
+    description: (req) => `Updated Kobo sync for smartScope #${req.params['id']}`,
+  })
+  setKoboSync(@Param('id', ParseIntPipe) id: number, @Body() dto: SetKoboSyncDto, @CurrentUser() user: RequestUser) {
+    return this.smartScopeService.setKoboSync(id, user, dto.enabled);
+  }
+
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   @Auditable({
@@ -105,8 +118,8 @@ export class SmartScopeController {
   executeSmartScope(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
-    @Query('page', new DefaultValuePipe(0), ParseIntPipe) page: number,
-    @Query('size', new DefaultValuePipe(50), ParseIntPipe) size: number,
+    @Query('page', new OptionalIntQueryPipe(0)) page: number,
+    @Query('size', new OptionalIntQueryPipe(50)) size: number,
     @Query('q') q?: string,
   ) {
     this.validateSizeQuery(size);
@@ -120,7 +133,21 @@ export class SmartScopeController {
   }
 
   @Post(':id/books/jump-buckets')
-  queryJumpBuckets(@Param('id', ParseIntPipe) id: number, @Body(BookQueryPipe) query: BookQuery, @CurrentUser() user: RequestUser) {
+  queryJumpBuckets(@Param('id', ParseIntPipe) id: number, @Body(JumpBucketsQueryPipe) query: JumpBucketsQuery, @CurrentUser() user: RequestUser) {
     return this.smartScopeService.queryJumpBuckets(id, user, query);
+  }
+
+  /** Podcast scopes match episodes, so they page through this rather than /books. */
+  @Get(':id/episodes')
+  queryEpisodes(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Query('page', new OptionalIntQueryPipe(0)) page: number,
+    @Query('size', new OptionalIntQueryPipe(50)) size: number,
+    @Query('q') q?: string,
+  ) {
+    this.validateSizeQuery(size);
+    this.validatePageQuery(page, size);
+    return this.smartScopeService.queryEpisodes(id, user, page, size, q);
   }
 }

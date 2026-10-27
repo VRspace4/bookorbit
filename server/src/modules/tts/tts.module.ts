@@ -1,15 +1,18 @@
 import { Module } from '@nestjs/common';
 
-import { TtsConfigController } from './tts-config.controller';
-import { TtsConfigService } from './tts-config.service';
+import { BookModule } from '../book/book.module';
+import { TtsAdminController } from './tts-admin.controller';
+import { TtsAdminService } from './tts-admin.service';
 import { TtsController } from './tts.controller';
+import { TtsRepository } from './tts.repository';
 import { TtsService } from './tts.service';
-import { TtsUsageRepository } from './tts-usage.repository';
-import { TtsUsageService } from './tts-usage.service';
+import { TtsSynthesisService } from './tts-synthesis.service';
+import { TtsTextExtractorService } from './tts-text-extractor.service';
+import { TtsProviderFactory } from './providers/tts-provider.factory';
 
 @Module({
-  controllers: [TtsController, TtsConfigController],
-  providers: [TtsService, TtsConfigService, TtsUsageRepository, TtsUsageService],
-  exports: [TtsConfigService],
+  imports: [BookModule],
+  controllers: [TtsController, TtsAdminController],
+  providers: [TtsRepository, TtsService, TtsAdminService, TtsSynthesisService, TtsTextExtractorService, TtsProviderFactory],
 })
 export class TtsModule {}

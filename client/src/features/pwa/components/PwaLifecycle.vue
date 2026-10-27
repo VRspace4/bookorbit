@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed } from 'vue'
 import { Download, RefreshCcw, Smartphone, X } from '@lucide/vue'
 import { useInstallPrompt } from '../composables/useInstallPrompt'
@@ -35,11 +36,11 @@ async function installApp() {
           <p class="text-sm font-semibold leading-5">Install BookOrbit</p>
           <p class="mt-0.5 text-xs leading-4 text-muted-foreground">{{ installPrompt.installHint.value }}</p>
           <div class="mt-3 flex flex-wrap items-center gap-2">
-            <button v-if="installPrompt.isInstallable.value" class="settings-btn-primary h-8 px-3 text-xs" @click="installApp">
+            <Button v-if="installPrompt.isInstallable.value" size="sm" class="text-xs" @click="installApp">
               <Download :size="13" />
               Install
-            </button>
-            <button class="settings-btn-outline h-8 px-3 text-xs" @click="installPrompt.dismissInstallPrompt()">Later</button>
+            </Button>
+            <Button variant="outline" size="sm" class="text-xs" @click="installPrompt.dismissInstallPrompt()">Later</Button>
           </div>
         </div>
         <button
@@ -66,15 +67,11 @@ async function installApp() {
             {{ serviceWorker.restartReady.value ? 'Restart when you are ready.' : 'Keep reading now or apply it for the next restart.' }}
           </p>
           <div class="mt-3 flex flex-wrap items-center gap-2">
-            <button v-if="serviceWorker.needRefresh.value" class="settings-btn-primary h-8 px-3 text-xs" @click="serviceWorker.activateUpdate()">
-              Apply
-            </button>
-            <button v-if="serviceWorker.restartReady.value" class="settings-btn-primary h-8 px-3 text-xs" @click="serviceWorker.restartNow()">
-              Restart
-            </button>
-            <button v-if="serviceWorker.needRefresh.value" class="settings-btn-outline h-8 px-3 text-xs" @click="serviceWorker.dismissUpdate()">
+            <Button v-if="serviceWorker.needRefresh.value" size="sm" class="text-xs" @click="serviceWorker.activateUpdate()"> Apply </Button>
+            <Button v-if="serviceWorker.restartReady.value" size="sm" class="text-xs" @click="serviceWorker.restartNow()"> Restart </Button>
+            <Button v-if="serviceWorker.needRefresh.value" variant="outline" size="sm" class="text-xs" @click="serviceWorker.dismissUpdate()">
               Later
-            </button>
+            </Button>
           </div>
         </div>
         <button

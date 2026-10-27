@@ -10,6 +10,8 @@ const settings = ref<KoboSyncSettings>({
   kepubConversionLimitMb: 100,
   twoWayProgressSync: false,
   syncBookOrbitAnnotationsToKobo: false,
+  storeSync: false,
+  fullSizeCovers: true,
 })
 let fetchPromise: Promise<void> | null = null
 

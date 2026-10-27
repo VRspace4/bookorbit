@@ -1,20 +1,36 @@
-import { nextTick, ref } from 'vue'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { BookCard, BooksPage, GroupRule, JumpBucket } from '@bookorbit/types'
+import { defineComponent, nextTick, ref } from 'vue'
+import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BookCard, BooksPage, GroupRule, JumpBucket, SortSpec } from '@bookorbit/types'
+import { COLLECTION_DEFAULT_SORT } from '../../lib/sort-defaults'
 
 const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<unknown>>()
+const bookEventsMock = vi.hoisted(() => ({
+  progressChangedCallback: null as (() => void) | null,
+}))
 
 vi.mock('@/lib/api', () => ({
   api: (url: string, init?: RequestInit) => fetchMock(url, init),
 }))
 
+vi.mock('../useBookEvents', () => ({
+  useBookEvents: () => ({
+    onBookProgressChanged: (callback: () => void) => {
+      bookEventsMock.progressChangedCallback = callback
+      return () => undefined
+    },
+  }),
+}))
+
 import { BOOK_WINDOW_BLOCK_SIZE } from '../useBookWindow'
 import { useBookViewWindow } from '../useBookViewWindow'
+import { useEffectiveSeriesCollapse } from '../useEffectiveSeriesCollapse'
 
 function makeBook(id: number): BookCard {
   return {
     id,
     status: 'active',
+    coverAspectRatio: '2/3',
     title: `Book ${id}`,
     authors: [],
     seriesName: null,
@@ -30,6 +46,7 @@ function makeBook(id: number): BookCard {
     readStatus: null,
     addedAt: '2024-01-01T00:00:00Z',
     updatedAt: null,
+    coverVersion: 'legacy:2024-01-01T00:00:00Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -61,7 +78,7 @@ function bucket(key: string, index: number): JumpBucket {
 function mockApi(total: number, buckets: JumpBucket[] = []) {
   fetchMock.mockImplementation((url, init) => {
     if (url.includes('jump-buckets')) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ buckets }) })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ buckets, total, kind: 'letter', granularity: null }) })
     }
     const body = JSON.parse(String(init?.body)) as { pagination: { page: number } }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(pageFor(body.pagination.page, total)) })
@@ -74,20 +91,38 @@ async function flush() {
   await nextTick()
 }
 
-function setup(options: { scope?: number | null; viewMode?: string; collapse?: boolean; q?: string } = {}) {
+function setup(
+  options: {
+    scope?: number | null
+    viewMode?: string
+    collapse?: boolean
+    selectionMode?: boolean
+    q?: string
+    railEnabled?: boolean
+    enabled?: boolean
+    defaultSort?: SortSpec[]
+  } = {},
+) {
   const scopeId = ref<number | null>(options.scope === undefined ? 1 : options.scope)
   const viewMode = ref(options.viewMode ?? 'table')
-  const collapseEnabled = ref(options.collapse ?? false)
+  const railEnabled = ref(options.railEnabled ?? true)
+  const enabled = ref(options.enabled ?? true)
+  const collapsePreference = ref(options.collapse ?? false)
+  const selectionMode = ref(options.selectionMode ?? false)
+  const collapseEnabled = useEffectiveSeriesCollapse(collapsePreference, selectionMode)
   const q = ref(options.q ?? '')
   const win = useBookViewWindow({
     scopeId,
     listEndpoint: (id) => `/api/v1/libraries/${id}/books`,
     bucketsEndpoint: (id) => `/api/v1/libraries/${id}/books/jump-buckets`,
     viewMode,
+    railEnabled,
     collapseEnabled,
     q,
+    enabled,
+    defaultSort: options.defaultSort,
   })
-  return { win, scopeId, viewMode, collapseEnabled, q }
+  return { win, scopeId, viewMode, railEnabled, enabled, collapsePreference, selectionMode, collapseEnabled, q }
 }
 
 function listRequests(): number[] {
@@ -96,9 +131,24 @@ function listRequests(): number[] {
     .map(([, init]) => (JSON.parse(String(init?.body)) as { pagination: { page: number } }).pagination.page)
 }
 
+function listRequestBodies(): Array<Record<string, unknown>> {
+  return fetchMock.mock.calls
+    .filter(([url]) => !url.includes('jump-buckets'))
+    .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)
+}
+
+function jumpRequestCount(): number {
+  return fetchMock.mock.calls.filter(([url]) => url.includes('jump-buckets')).length
+}
+
 describe('useBookViewWindow', () => {
   beforeEach(() => {
     fetchMock.mockReset()
+    bookEventsMock.progressChangedCallback = null
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('loads the first block on creation and exposes window state', async () => {
@@ -111,6 +161,53 @@ describe('useBookViewWindow', () => {
     expect(win.hasMorePrefix.value).toBe(true)
   })
 
+  it('defaults to title ascending when no default sort is supplied', async () => {
+    mockApi(250)
+    const { win } = setup()
+    await flush()
+
+    expect(win.sort.value).toEqual([{ field: 'title', dir: 'asc' }])
+    expect(listRequestBodies()[0]).toMatchObject({ sort: [{ field: 'title', dir: 'asc' }] })
+  })
+
+  it('sends the supplied default sort and hides the rail for collection order', async () => {
+    mockApi(250)
+    const { win } = setup({ viewMode: 'grid', defaultSort: COLLECTION_DEFAULT_SORT })
+    await flush()
+
+    expect(win.sort.value).toEqual([{ field: 'collectionOrder', dir: 'asc' }])
+    expect(listRequestBodies()[0]).toMatchObject({ sort: [{ field: 'collectionOrder', dir: 'asc' }] })
+    expect(win.bucketKind.value).toBeNull()
+    expect(jumpRequestCount()).toBe(0)
+  })
+
+  it('does not let a view mutate the shared default sort constant', async () => {
+    mockApi(250)
+    const { win } = setup({ defaultSort: COLLECTION_DEFAULT_SORT })
+    await flush()
+    win.sort.value[0]!.dir = 'desc'
+
+    expect(COLLECTION_DEFAULT_SORT).toEqual([{ field: 'collectionOrder', dir: 'asc' }])
+  })
+
+  it('debounces external progress events and reloads the current book window', async () => {
+    vi.useFakeTimers()
+    mockApi(250)
+    setup()
+    await flush()
+    fetchMock.mockClear()
+
+    bookEventsMock.progressChangedCallback?.()
+    bookEventsMock.progressChangedCallback?.()
+    bookEventsMock.progressChangedCallback?.()
+    await vi.advanceTimersByTimeAsync(249)
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+    await flush()
+    expect(listRequests()).toEqual([0])
+  })
+
   it('does not fetch when the scope id is invalid', async () => {
     mockApi(250)
     const { win } = setup({ scope: null })
@@ -118,6 +215,25 @@ describe('useBookViewWindow', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(win.total.value).toBe(0)
+  })
+
+  it('waits until enabled and sends only the prepared sort', async () => {
+    mockApi(250)
+    const { win, enabled } = setup({ enabled: false })
+    await flush()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    win.sort.value = [{ field: 'author', dir: 'desc' }]
+    enabled.value = true
+    await flush()
+
+    const listCalls = fetchMock.mock.calls.filter(([url]) => !url.includes('jump-buckets'))
+    expect(listCalls).toHaveLength(1)
+    expect(JSON.parse(String(listCalls[0]?.[1]?.body))).toMatchObject({
+      sort: [{ field: 'author', dir: 'desc' }],
+      pagination: { page: 0 },
+    })
   })
 
   it('loadMorePrefix resolves only after the next contiguous chunk has loaded', async () => {
@@ -177,6 +293,44 @@ describe('useBookViewWindow', () => {
     })
   })
 
+  it('reloads uncollapsed books for selection mode and restores collapse afterward', async () => {
+    mockApi(120)
+    const { win, collapsePreference, selectionMode } = setup({ collapse: true })
+    await flush()
+
+    expect(listRequestBodies()).toHaveLength(1)
+    expect(listRequestBodies()[0]).toMatchObject({ collapseSeries: true, pagination: { page: 0 } })
+
+    fetchMock.mockClear()
+    selectionMode.value = true
+    await flush()
+
+    expect(win.query.value).not.toHaveProperty('collapseSeries')
+    expect(listRequestBodies()).toHaveLength(1)
+    expect(listRequestBodies()[0]).not.toHaveProperty('collapseSeries')
+    expect(collapsePreference.value).toBe(true)
+
+    fetchMock.mockClear()
+    selectionMode.value = false
+    await flush()
+
+    expect(listRequestBodies()).toHaveLength(1)
+    expect(listRequestBodies()[0]).toMatchObject({ collapseSeries: true, pagination: { page: 0 } })
+    expect(collapsePreference.value).toBe(true)
+  })
+
+  it('does not reload when selection mode cannot change the effective collapse state', async () => {
+    mockApi(120)
+    const { selectionMode } = setup({ collapse: false })
+    await flush()
+    fetchMock.mockClear()
+
+    selectionMode.value = true
+    await flush()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('reverses the letter template for a descending sort', async () => {
     mockApi(120)
     const { win } = setup()
@@ -190,6 +344,20 @@ describe('useBookViewWindow', () => {
     expect(win.bucketKind.value).not.toBeNull()
   })
 
+  it('exposes categorical rail eligibility and the primary sort field', async () => {
+    mockApi(120, [bucket('en', 0), bucket('de', 60)])
+    const { win } = setup({ viewMode: 'grid' })
+    await flush()
+
+    win.sort.value = [{ field: 'language', dir: 'asc' }]
+    await flush()
+    await flush()
+
+    expect(win.bucketKind.value).toBe('category')
+    expect(win.primarySortField.value).toBe('language')
+    expect(win.railVisible.value).toBe(true)
+  })
+
   it('keeps the jump rail hidden in table mode', async () => {
     mockApi(250, [bucket('A', 0), bucket('B', 120)])
     const { win } = setup({ viewMode: 'table' })
@@ -197,6 +365,22 @@ describe('useBookViewWindow', () => {
 
     expect(win.railVisible.value).toBe(false)
     expect(win.railGutterReserved.value).toBe(false)
+  })
+
+  it('does not request buckets while jump rails are disabled and loads them when enabled', async () => {
+    mockApi(250, [bucket('A', 0), bucket('B', 120)])
+    const { win, railEnabled } = setup({ viewMode: 'grid', railEnabled: false })
+    await flush()
+
+    expect(jumpRequestCount()).toBe(0)
+    expect(win.railVisible.value).toBe(false)
+
+    railEnabled.value = true
+    await flush()
+    await flush()
+
+    expect(jumpRequestCount()).toBe(1)
+    expect(win.railVisible.value).toBe(true)
   })
 
   it('shows the jump rail in grid mode once buckets load and jumps scroll to the bucket index', async () => {
@@ -220,5 +404,101 @@ describe('useBookViewWindow', () => {
     expect(listRequests()).toContain(1)
 
     win.releaseRailGutter()
+  })
+
+  it('omits the shuffle seed until a sort tier is random', async () => {
+    mockApi(120)
+    const { win } = setup()
+    await flush()
+
+    expect(win.randomSortActive.value).toBe(false)
+    expect(listRequestBodies()[0]).not.toHaveProperty('randomSeed')
+
+    win.sort.value = [{ field: 'random', dir: 'asc' }]
+    await flush()
+
+    expect(win.randomSortActive.value).toBe(true)
+    const seed = listRequestBodies().at(-1)?.randomSeed
+    expect(typeof seed).toBe('number')
+  })
+
+  it('sends one seed for every page of a shuffled listing', async () => {
+    mockApi(250)
+    const { win } = setup({ defaultSort: [{ field: 'random', dir: 'asc' }] })
+    await flush()
+
+    await win.ensureRange(100, 199)
+    await flush()
+
+    const seeds = listRequestBodies().map((body) => body.randomSeed)
+    expect(seeds.length).toBeGreaterThan(1)
+    expect(new Set(seeds).size).toBe(1)
+    expect(typeof seeds[0]).toBe('number')
+  })
+
+  it('reshuffles into a new seed and refetches', async () => {
+    mockApi(120)
+    const { win } = setup({ defaultSort: [{ field: 'random', dir: 'asc' }] })
+    await flush()
+    const first = listRequestBodies().at(-1)?.randomSeed
+
+    win.reshuffle()
+    await flush()
+
+    const second = listRequestBodies().at(-1)?.randomSeed
+    expect(second).not.toBe(first)
+    expect(listRequestBodies().length).toBeGreaterThan(1)
+  })
+
+  it('reshuffles when the scope changes so two scopes never share an order', async () => {
+    mockApi(120)
+    const { win, scopeId } = setup({ defaultSort: [{ field: 'random', dir: 'asc' }] })
+    await flush()
+    const first = listRequestBodies().at(-1)?.randomSeed
+
+    scopeId.value = 2
+    await flush()
+
+    expect(listRequestBodies().at(-1)?.randomSeed).not.toBe(first)
+    expect(win.randomSortActive.value).toBe(true)
+  })
+
+  it('reshuffles when a kept-alive random listing is revisited', async () => {
+    mockApi(120)
+    const visible = ref(true)
+
+    const Source = defineComponent({
+      setup() {
+        useBookViewWindow({
+          scopeId: ref(1),
+          listEndpoint: (id) => `/api/v1/libraries/${id}/books`,
+          bucketsEndpoint: (id) => `/api/v1/libraries/${id}/books/jump-buckets`,
+          viewMode: ref('table'),
+          defaultSort: [{ field: 'random', dir: 'asc' }],
+        })
+        return {}
+      },
+      template: '<div />',
+    })
+    const Harness = defineComponent({
+      components: { Source },
+      setup() {
+        return { visible }
+      },
+      template: '<KeepAlive><Source v-if="visible" /></KeepAlive>',
+    })
+
+    const wrapper = mount(Harness)
+    await flush()
+    const first = listRequestBodies().at(-1)?.randomSeed
+    fetchMock.mockClear()
+
+    visible.value = false
+    await nextTick()
+    visible.value = true
+    await flush()
+
+    expect(listRequestBodies().at(-1)?.randomSeed).not.toBe(first)
+    wrapper.unmount()
   })
 })

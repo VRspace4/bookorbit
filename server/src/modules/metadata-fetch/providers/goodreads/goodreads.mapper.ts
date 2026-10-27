@@ -1,4 +1,4 @@
-import { MetadataCandidate, MetadataProviderKey } from '@bookorbit/types';
+import { MetadataCandidate, MetadataProviderKey, parseSeriesIndex as parseSeriesIndexLabel } from '@bookorbit/types';
 
 import {
   GoodreadsApolloBook,
@@ -8,6 +8,7 @@ import {
   GoodreadsAutocompleteItem,
 } from './goodreads.types';
 import { parsePublishedDateFromEpochMillis, publishedYearFromDateKey } from '../../../../common/utils/published-date.utils';
+import { htmlToPlainText } from '../../../../common/utils/html-to-text.utils';
 
 export function mapGoodreadsApolloState(state: Record<string, unknown>, bookId: string): MetadataCandidate | null {
   const book = findBook(state, bookId);
@@ -97,26 +98,20 @@ function stripSeriesSuffix(title: string | undefined): string | undefined {
   return title?.replace(/\s*\([^,(]+,\s*#[\d.]+\)\s*$/, '').trim();
 }
 
-function parseSeriesFromTitle(title: string | undefined): { seriesName?: string; seriesIndex?: number } {
+function parseSeriesFromTitle(title: string | undefined): { seriesName?: string; seriesIndex?: string } {
   const match = title?.match(/\(([^,(]+),\s*#([\d.]+)\)\s*$/);
   if (!match) return {};
   return { seriesName: normalize(match[1]), seriesIndex: parseSeriesIndex(match[2]) };
 }
 
+// Autocomplete caps the blurb near 180 characters and flags the cut with `truncated`. Keeping the
+// snippet would let a WAF-blocked detail page overwrite a full description from a later provider
+// with an ellipsised fragment, so drop it and leave the field for someone who has the whole thing.
 function extractAutocompleteDescription(description: GoodreadsAutocompleteItem['description']): string | undefined {
+  if (typeof description === 'object' && description?.truncated) return undefined;
   const html = typeof description === 'string' ? description : description?.html;
   if (!html) return undefined;
-  const text = html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&quot;/g, '"')
-    .replace(/&(?:#39|#x27|apos);/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const text = htmlToPlainText(html, { preserveLineBreaks: true });
   return text || undefined;
 }
 
@@ -212,8 +207,6 @@ function normalizeCommunityRatingCount(value: string | number | undefined): numb
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 
-function parseSeriesIndex(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const n = parseFloat(value);
-  return Number.isNaN(n) ? undefined : n;
+function parseSeriesIndex(value: string | undefined): string | undefined {
+  return parseSeriesIndexLabel(value) ?? undefined;
 }

@@ -112,7 +112,7 @@ describe('native app PWA helpers', () => {
       beforeEach: vi.fn<(handler: (to: RouteLocationNormalizedLoaded) => unknown) => void>((handler) => {
         beforeEachHandlers.push(handler)
       }),
-      afterEach: vi.fn(),
+      afterEach: vi.fn<(...args: unknown[]) => unknown>(),
       currentRoute: { value: makeRoute({ fullPath: '/book/9?tab=details', path: '/book/9' }) },
       push: vi.fn<(to: string) => Promise<void>>(() => Promise.resolve()),
     } as unknown as Router
@@ -143,7 +143,7 @@ describe('native app PWA helpers', () => {
       beforeEach: vi.fn<(handler: (to: RouteLocationNormalizedLoaded) => unknown) => void>((handler) => {
         beforeEachHandlers.push(handler)
       }),
-      afterEach: vi.fn(),
+      afterEach: vi.fn<(...args: unknown[]) => unknown>(),
       currentRoute: { value: makeRoute({ fullPath: '/read/1/2?format=epub', path: '/read/1/2' }) },
       push: vi.fn<(to: string) => Promise<void>>(() => Promise.resolve()),
     } as unknown as Router

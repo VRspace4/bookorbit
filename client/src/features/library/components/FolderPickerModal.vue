@@ -80,11 +80,7 @@ useModal({
 
 <template>
   <Teleport to="body">
-    <div
-      class="fixed inset-0 z-[80] flex items-end justify-center bg-foreground/30 sm:items-center sm:p-4"
-      role="presentation"
-      @click.self="requestClose"
-    >
+    <div class="fixed inset-0 z-[80] flex items-end justify-center bg-scrim sm:items-center sm:p-4" role="presentation" @click.self="requestClose">
       <div
         ref="panel"
         class="flex h-dvh w-full flex-col overflow-hidden bg-background shadow-2xl outline-none sm:h-[min(82dvh,700px)] sm:max-w-xl sm:rounded-lg sm:border sm:border-border"
@@ -120,7 +116,7 @@ useModal({
             <TooltipTrigger as-child>
               <button
                 type="button"
-                class="mr-1 flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30"
+                class="mr-1 flex size-7 shrink-0 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-30"
                 :disabled="!canGoUp"
                 :aria-label="t('library.folderPicker.parentFolder')"
                 @click="goUp"
@@ -131,10 +127,10 @@ useModal({
             <TooltipContent>{{ t('library.folderPicker.parentFolder') }}</TooltipContent>
           </Tooltip>
           <template v-for="(crumb, index) in breadcrumbs" :key="crumb.path">
-            <ChevronRight v-if="index > 0" :size="12" class="shrink-0 text-muted-foreground/60" />
+            <ChevronRight v-if="index > 0" :size="12" class="shrink-0 text-muted-foreground" />
             <button
               type="button"
-              class="shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-xs transition-colors"
+              class="shrink-0 whitespace-nowrap rounded-xs px-1.5 py-0.5 text-xs transition-colors"
               :class="
                 index === breadcrumbs.length - 1
                   ? 'bg-background font-medium text-foreground shadow-xs'
@@ -154,7 +150,7 @@ useModal({
               v-model="search"
               type="text"
               :placeholder="t('library.folderPicker.filterPlaceholder')"
-              class="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
+              class="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
             />
             <button
               v-if="search"
@@ -187,7 +183,7 @@ useModal({
                 v-model="newFolderName"
                 type="text"
                 :placeholder="t('library.folderPicker.newFolderNamePlaceholder')"
-                class="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
+                class="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
                 @keydown="onNewFolderKeydown"
               />
             </label>
@@ -220,7 +216,7 @@ useModal({
           </div>
 
           <div v-else-if="error" class="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-            <FolderOpen :size="30" class="text-muted-foreground/60" />
+            <FolderOpen :size="30" class="text-muted-foreground" />
             <p class="text-sm text-muted-foreground">{{ error }}</p>
             <button type="button" class="h-10 rounded-lg border border-border px-4 text-sm font-medium hover:bg-muted" @click="reloadCurrent">
               {{ t('reader.retry') }}
@@ -251,7 +247,7 @@ useModal({
             </label>
 
             <div v-if="filteredEntries.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-              <Folder :size="28" class="text-muted-foreground/50" />
+              <Folder :size="28" class="text-muted-foreground" />
               <p class="text-sm font-medium text-foreground">
                 {{ search ? t('library.folderPicker.noMatches') : t('library.folderPicker.empty') }}
               </p>
@@ -264,7 +260,7 @@ useModal({
               <template #default="{ item: entry }">
                 <div class="flex h-10 items-stretch border-b border-border/60 px-1.5 sm:px-2">
                   <label
-                    class="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded px-2 transition-colors hover:bg-muted/50"
+                    class="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-xs px-2 transition-colors hover:bg-muted/50"
                     :class="isSelectionDisabled(entry.path) ? 'cursor-not-allowed opacity-60' : ''"
                   >
                     <input
@@ -274,7 +270,7 @@ useModal({
                       :disabled="isSelectionDisabled(entry.path)"
                       @change="toggleSelection(entry.path)"
                     />
-                    <Folder :size="16" class="shrink-0 text-primary/80" />
+                    <Folder :size="16" class="shrink-0 text-primary" />
                     <span class="min-w-0 flex-1">
                       <span class="block truncate text-sm font-medium text-foreground">{{ entry.name }}</span>
                       <span
@@ -287,7 +283,7 @@ useModal({
                   </label>
                   <button
                     type="button"
-                    class="flex size-10 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    class="flex size-10 shrink-0 items-center justify-center rounded-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                     :aria-label="t('library.folderPicker.openFolderAria', { name: entry.name })"
                     @click="navigate(entry.path)"
                   >
@@ -306,7 +302,7 @@ useModal({
           </div>
           <div class="flex items-center justify-between gap-3">
             <p class="text-sm text-muted-foreground">
-              {{ t('library.folderPicker.selectedCount', { count: selectedCount }, selectedCount) }}
+              {{ t('library.folderPicker.selectedCount', { count: selectedCount }) }}
             </p>
             <div class="flex shrink-0 items-center gap-2">
               <button

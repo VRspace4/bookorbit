@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { onMounted, ref } from 'vue'
 import { BookOpen, Link } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
+import { SECRET_INPUT_ATTRS } from '@/lib/secret-input'
 
 const connected = ref(false)
 const connectedEmail = ref<string | null>(null)
@@ -103,10 +105,10 @@ onMounted(fetchStatus)
       <p class="text-xs text-muted-foreground">Connect your Z-Library account to search and add ebooks directly to your library.</p>
 
       <div v-if="!showForm">
-        <button type="button" class="settings-btn-outline inline-flex items-center gap-2" @click="showForm = true">
+        <Button type="button" variant="outline" @click="showForm = true">
           <Link class="h-3.5 w-3.5" />
           Connect Z-Library
-        </button>
+        </Button>
       </div>
 
       <div v-else class="space-y-3">
@@ -124,18 +126,18 @@ onMounted(fetchStatus)
           <label class="settings-label">Password</label>
           <input
             v-model="formPassword"
-            type="password"
+            v-bind="SECRET_INPUT_ATTRS"
+            type="text"
             placeholder="••••••••"
-            autocomplete="current-password"
-            class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+            class="input-secret w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
           />
         </div>
         <div class="flex items-center gap-2">
-          <button type="button" class="settings-btn-primary" :disabled="saving || !formEmail || !formPassword" @click="connect">
+          <Button type="button" :disabled="saving || !formEmail || !formPassword" @click="connect">
             <Link class="h-3.5 w-3.5" />
             {{ saving ? 'Connecting...' : 'Connect' }}
-          </button>
-          <button type="button" class="settings-btn-outline" :disabled="saving" @click="showForm = false">Cancel</button>
+          </Button>
+          <Button type="button" variant="outline" :disabled="saving" @click="showForm = false">Cancel</Button>
         </div>
       </div>
     </template>

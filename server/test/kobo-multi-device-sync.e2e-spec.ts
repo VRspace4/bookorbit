@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { readFile, readdir } from 'fs/promises';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -6,6 +6,8 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { Client } from 'pg';
 
 import * as schema from '../src/db/schema';
+import { SYNC_PAGE_SIZE } from '../src/modules/kobo/services/kobo-sync.service';
+import { waitForCondition } from './e2e/app-harness';
 import { createEpubFixture } from './e2e/reader-state-isolation/reader-state-isolation-fixture-builder';
 import {
   authHeader,
@@ -23,6 +25,9 @@ type SyncResponse = { entries: unknown[]; hasMore: boolean; syncToken: string };
 type NewEntitlement = { BookEntitlement: { Id: string }; ReadingState: Record<string, unknown> };
 
 const MIGRATIONS_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), '../src/db/migrations');
+
+// One book past a full page, so the suite keeps exercising a page boundary whatever SYNC_PAGE_SIZE is.
+const LIBRARY_BOOK_COUNT = SYNC_PAGE_SIZE + 1;
 
 function escapeIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
@@ -61,6 +66,13 @@ function changedReadingStates(entries: unknown[]): Record<string, unknown>[] {
   return entries.flatMap((entry) => {
     const value = entry as { ChangedReadingState?: { ReadingState: Record<string, unknown> } };
     return value.ChangedReadingState ? [value.ChangedReadingState.ReadingState] : [];
+  });
+}
+
+function changedProductMetadata(entries: unknown[]): Array<{ BookEntitlement: { Id: string }; BookMetadata: { Title: string | null } }> {
+  return entries.flatMap((entry) => {
+    const value = entry as { ChangedProductMetadata?: { BookEntitlement: { Id: string }; BookMetadata: { Title: string | null } } };
+    return value.ChangedProductMetadata ? [value.ChangedProductMetadata] : [];
   });
 }
 
@@ -232,7 +244,7 @@ describe('Kobo multi-device library sync (e2e)', { timeout: 180_000 }, () => {
     library = await createLibraryWithFolder(ctx, { name: `kobo-multi-device-${randomUUID()}` });
 
     const paths = await Promise.all(
-      Array.from({ length: 6 }, (_, index) =>
+      Array.from({ length: LIBRARY_BOOK_COUNT }, (_, index) =>
         createEpubFixture(library.folderPath, `kobo-multi-device-${index + 1}.epub`, {
           title: `Kobo Multi Device ${index + 1}`,
           uid: `urn:uuid:${randomUUID()}`,
@@ -283,7 +295,7 @@ describe('Kobo multi-device library sync (e2e)', { timeout: 180_000 }, () => {
     const first = await sync(echoDevice);
     const firstEntitlements = newEntitlements(first.entries);
     expect(first.hasMore).toBe(true);
-    expect(firstEntitlements).toHaveLength(5);
+    expect(firstEntitlements).toHaveLength(SYNC_PAGE_SIZE);
 
     for (const entitlement of firstEntitlements) {
       await putReadingState(echoDevice, entitlement.BookEntitlement.Id, entitlement.ReadingState);
@@ -315,8 +327,8 @@ describe('Kobo multi-device library sync (e2e)', { timeout: 180_000 }, () => {
     const bFirst = await sync(deviceB);
     expect(aFirst.hasMore).toBe(true);
     expect(bFirst.hasMore).toBe(true);
-    expect(entitlementIds(aFirst.entries)).toHaveLength(5);
-    expect(entitlementIds(bFirst.entries)).toHaveLength(5);
+    expect(entitlementIds(aFirst.entries)).toHaveLength(SYNC_PAGE_SIZE);
+    expect(entitlementIds(bFirst.entries)).toHaveLength(SYNC_PAGE_SIZE);
 
     const aSecond = await sync(deviceA, aFirst.syncToken);
     expect(aSecond.hasMore).toBe(false);
@@ -365,7 +377,7 @@ describe('Kobo multi-device library sync (e2e)', { timeout: 180_000 }, () => {
           snapshots.map((snapshot) => snapshot.id),
         ),
       );
-    expect(rows).toHaveLength(12);
+    expect(rows).toHaveLength(LIBRARY_BOOK_COUNT * 2);
     expect(rows.every((row) => row.synced)).toBe(true);
   });
 
@@ -474,7 +486,7 @@ describe('Kobo multi-device library sync (e2e)', { timeout: 180_000 }, () => {
             .map((snapshot) => snapshot.id),
         ),
       );
-    expect(aAndBRows).toHaveLength(12);
+    expect(aAndBRows).toHaveLength(LIBRARY_BOOK_COUNT * 2);
     expect(aAndBRows.every((row) => row.synced)).toBe(true);
 
     const [targetIdentity] = await ctx.db
@@ -598,5 +610,250 @@ describe('Kobo multi-device library sync (e2e)', { timeout: 180_000 }, () => {
       where: eq(schema.koboLegacyLibrarySnapshots.userId, userId),
     });
     expect(retiredLegacySnapshot).toBeUndefined();
+  });
+
+  describe('manual read status delivery', () => {
+    let statusBookIds!: number[];
+
+    async function setReadStatus(bookId: number, status: string): Promise<Record<string, unknown>> {
+      const response = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/books/${bookId}/status`,
+        headers: authHeader(ctx.adminToken),
+        payload: { status },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json() as Record<string, unknown>;
+    }
+
+    async function entitlementIdFor(bookId: number): Promise<string> {
+      const [identity] = await ctx.db
+        .select({ entitlementId: schema.koboBookEntitlements.entitlementId })
+        .from(schema.koboBookEntitlements)
+        .where(and(eq(schema.koboBookEntitlements.userId, userId), eq(schema.koboBookEntitlements.bookId, bookId)));
+      if (!identity) throw new Error(`Book ${bookId} has no Kobo entitlement identity`);
+      return identity.entitlementId;
+    }
+
+    beforeAll(async () => {
+      const paths = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          createEpubFixture(library.folderPath, `kobo-manual-status-${randomUUID()}.epub`, {
+            title: `Kobo Manual Status ${randomUUID().slice(0, 8)}`,
+            uid: `urn:uuid:${randomUUID()}`,
+          }),
+        ),
+      );
+      await triggerAndWaitForLibraryScan(ctx, library.libraryId);
+      statusBookIds = (await Promise.all(paths.map((path) => locateBookByAbsolutePath(ctx, path)))).map((book) => book.bookId);
+
+      const addBooksResponse = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/collections/${collectionId}/books`,
+        headers: authHeader(ctx.adminToken),
+        payload: { bookIds: statusBookIds },
+      });
+      expect([200, 201]).toContain(addBooksResponse.statusCode);
+    }, 180_000);
+
+    beforeEach(async () => {
+      await drainEntries(deviceA);
+      await drainEntries(deviceB);
+    });
+
+    it('delivers Finished for a book marked read that was never opened anywhere', async () => {
+      const targetBookId = statusBookIds[0]!;
+      const existingState = await ctx.db.query.koboReadingStates.findFirst({
+        where: and(eq(schema.koboReadingStates.userId, userId), eq(schema.koboReadingStates.bookId, targetBookId)),
+      });
+      expect(existingState).toBeUndefined();
+      expect((await snapshotState(targetBookId)).every((row) => row.synced)).toBe(true);
+
+      await setReadStatus(targetBookId, 'read');
+
+      expect(await snapshotState(targetBookId)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ deviceId: deviceA.id, synced: false, isNew: false }),
+          expect.objectContaining({ deviceId: deviceB.id, synced: false, isNew: false }),
+        ]),
+      );
+
+      const targetEntitlementId = await entitlementIdFor(targetBookId);
+      const delivered = changedReadingStates(await drainEntries(deviceA));
+      const state = delivered.find((readingState) => readingState.EntitlementId === targetEntitlementId);
+      expect(state).toEqual(expect.objectContaining({ StatusInfo: expect.objectContaining({ Status: 'Finished' }) }));
+    });
+
+    it('keeps the device bookmark when a partly read book is corrected to read', async () => {
+      const targetBookId = statusBookIds[1]!;
+      const targetEntitlementId = await entitlementIdFor(targetBookId);
+      const deviceModified = new Date(Date.now() - 60_000).toISOString();
+      await putReadingState(deviceA, targetEntitlementId, {
+        EntitlementId: targetEntitlementId,
+        LastModified: deviceModified,
+        PriorityTimestamp: deviceModified,
+        CurrentBookmark: { LastModified: deviceModified, ProgressPercent: 42 },
+        Statistics: { LastModified: deviceModified, SpentReadingMinutes: 30 },
+        StatusInfo: { LastModified: deviceModified, Status: 'Reading', TimesStartedReading: 2 },
+      });
+      await drainEntries(deviceB);
+
+      await setReadStatus(targetBookId, 'read');
+
+      const delivered = changedReadingStates(await drainEntries(deviceB));
+      const state = delivered.find((readingState) => readingState.EntitlementId === targetEntitlementId);
+      expect(state).toEqual(
+        expect.objectContaining({
+          StatusInfo: expect.objectContaining({ Status: 'Finished', TimesStartedReading: 2 }),
+          CurrentBookmark: expect.objectContaining({ ProgressPercent: 42 }),
+          Statistics: expect.objectContaining({ SpentReadingMinutes: 30 }),
+        }),
+      );
+    });
+
+    it('does not resync when the manual status leaves the Kobo status unchanged', async () => {
+      const targetBookId = statusBookIds[2]!;
+      await setReadStatus(targetBookId, 'reading');
+      await drainEntries(deviceA);
+      await drainEntries(deviceB);
+
+      await setReadStatus(targetBookId, 'on_hold');
+
+      expect((await snapshotState(targetBookId)).every((row) => row.synced)).toBe(true);
+    });
+
+    it('marks a book read after a skewed device clock started its attempt in the future', async () => {
+      const targetBookId = statusBookIds[3]!;
+      const targetEntitlementId = await entitlementIdFor(targetBookId);
+      const futureModified = new Date(Date.now() + 120 * 24 * 60 * 60 * 1000).toISOString();
+      const futureDay = futureModified.slice(0, 10);
+      await putReadingState(deviceA, targetEntitlementId, {
+        EntitlementId: targetEntitlementId,
+        LastModified: futureModified,
+        PriorityTimestamp: futureModified,
+        CurrentBookmark: { LastModified: futureModified, ProgressPercent: 35 },
+        Statistics: { LastModified: futureModified },
+        StatusInfo: { LastModified: futureModified, Status: 'Reading', TimesStartedReading: 1 },
+      });
+      const [attemptBefore] = await ctx.db
+        .select({ startedOn: schema.readingAttempts.startedOn })
+        .from(schema.readingAttempts)
+        .where(and(eq(schema.readingAttempts.userId, userId), eq(schema.readingAttempts.bookId, targetBookId)));
+      expect(attemptBefore?.startedOn).toBe(futureDay);
+
+      const status = await setReadStatus(targetBookId, 'read');
+
+      expect(status).toMatchObject({ status: 'read', finishedAt: futureDay });
+      const delivered = changedReadingStates(await drainEntries(deviceB));
+      const state = delivered.find((readingState) => readingState.EntitlementId === targetEntitlementId);
+      expect(state).toEqual(expect.objectContaining({ StatusInfo: expect.objectContaining({ Status: 'Finished' }) }));
+    });
+  });
+
+  describe('metadata edits that rewrite the book file', () => {
+    let writeBookId!: number;
+    let writePrimaryFileId!: number;
+    let writeEntitlementId!: string;
+    let writeDevice!: KoboDevice;
+
+    async function primaryFileHash(): Promise<string | null> {
+      const [row] = await ctx.db
+        .select({ fileHash: schema.bookFiles.fileHash })
+        .from(schema.books)
+        .innerJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.books.primaryFileId))
+        .where(eq(schema.books.id, writeBookId));
+      if (!row) throw new Error(`Book ${writeBookId} has no primary file`);
+      return row.fileHash;
+    }
+
+    async function snapshotFileHash(deviceId: number): Promise<string | null> {
+      const [row] = await ctx.db
+        .select({ fileHash: schema.koboSnapshotBooks.fileHash })
+        .from(schema.koboSnapshotBooks)
+        .innerJoin(schema.koboLibrarySnapshots, eq(schema.koboLibrarySnapshots.id, schema.koboSnapshotBooks.snapshotId))
+        .where(and(eq(schema.koboLibrarySnapshots.deviceId, deviceId), eq(schema.koboSnapshotBooks.bookId, writeBookId)));
+      if (!row) throw new Error(`Device ${deviceId} has no snapshot row for book ${writeBookId}`);
+      return row.fileHash;
+    }
+
+    beforeAll(async () => {
+      const writeLibrary = await createLibraryWithFolder(ctx, { name: `kobo-file-write-${randomUUID()}` });
+      await ctx.db.update(schema.libraries).set({ fileWriteEnabled: true }).where(eq(schema.libraries.id, writeLibrary.libraryId));
+
+      const path = await createEpubFixture(writeLibrary.folderPath, `kobo-file-write-${randomUUID()}.epub`, {
+        title: 'Kobo File Write Seed',
+        uid: `urn:uuid:${randomUUID()}`,
+      });
+      await triggerAndWaitForLibraryScan(ctx, writeLibrary.libraryId);
+      writeBookId = (await locateBookByAbsolutePath(ctx, path)).bookId;
+
+      const [book] = await ctx.db.select({ primaryFileId: schema.books.primaryFileId }).from(schema.books).where(eq(schema.books.id, writeBookId));
+      if (!book?.primaryFileId) throw new Error(`Book ${writeBookId} has no primary file`);
+      writePrimaryFileId = book.primaryFileId;
+
+      const addBooksResponse = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/collections/${collectionId}/books`,
+        headers: authHeader(ctx.adminToken),
+        payload: { bookIds: [writeBookId] },
+      });
+      expect([200, 201]).toContain(addBooksResponse.statusCode);
+
+      writeDevice = await createDevice('Kobo File Write');
+      await drainEntries(writeDevice);
+
+      const [identity] = await ctx.db
+        .select({ entitlementId: schema.koboBookEntitlements.entitlementId })
+        .from(schema.koboBookEntitlements)
+        .where(and(eq(schema.koboBookEntitlements.userId, userId), eq(schema.koboBookEntitlements.bookId, writeBookId)));
+      if (!identity) throw new Error(`Book ${writeBookId} has no Kobo entitlement identity`);
+      writeEntitlementId = identity.entitlementId;
+    }, 180_000);
+
+    it('delivers changed metadata without re-issuing the entitlement after the file is rewritten', async () => {
+      const hashBeforeEdit = await primaryFileHash();
+      expect(hashBeforeEdit).toEqual(expect.any(String));
+      expect(await snapshotFileHash(writeDevice.id)).toBe(hashBeforeEdit);
+
+      const patchResponse = await ctx.app.inject({
+        method: 'PATCH',
+        url: `/api/v1/books/${writeBookId}/metadata`,
+        headers: authHeader(ctx.adminToken),
+        payload: { title: 'Kobo File Write Updated', description: 'Rewritten by the metadata write' },
+      });
+      expect(patchResponse.statusCode).toBe(200);
+
+      await waitForCondition(async () => {
+        if ((await primaryFileHash()) === hashBeforeEdit) throw new Error('the metadata write has not rewritten the EPUB yet');
+      }, 60_000);
+
+      const hashAfterEdit = await primaryFileHash();
+      expect(hashAfterEdit).not.toBe(hashBeforeEdit);
+      // Read before syncing: reconcile writes the current hash onto the row either way, so after a
+      // sync this no longer distinguishes an acknowledged rewrite from a re-delivered one.
+      const acknowledgedHash = await snapshotFileHash(writeDevice.id);
+
+      const delivered = await drainEntries(writeDevice);
+      const changed = changedProductMetadata(delivered).filter((entry) => entry.BookEntitlement.Id === writeEntitlementId);
+
+      expect(newEntitlementIds(delivered)).not.toContain(writeEntitlementId);
+      expect(changed).toHaveLength(1);
+      expect(changed[0]!.BookMetadata.Title).toBe('Kobo File Write Updated');
+      expect(acknowledgedHash).toBe(hashAfterEdit);
+    });
+
+    it('re-issues the entitlement when the file changes outside a metadata write', async () => {
+      await drainEntries(writeDevice);
+
+      // A scanner-detected content change moves the hash without the file-write acknowledgement,
+      // so the device genuinely holds stale bytes and has to download the book again.
+      await ctx.db
+        .update(schema.bookFiles)
+        .set({ fileHash: createHash('sha256').update(randomUUID()).digest('hex') })
+        .where(eq(schema.bookFiles.id, writePrimaryFileId));
+
+      const delivered = await drainEntries(writeDevice);
+      expect(newEntitlementIds(delivered)).toContain(writeEntitlementId);
+    });
   });
 });

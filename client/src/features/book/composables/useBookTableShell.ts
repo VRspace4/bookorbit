@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import type { BookCard } from '@bookorbit/types'
 import { useTableViewControls } from './useTableViewControls'
 import { useBookViewSelection } from './useBookViewSelection'
+import { useBookSelectionPermissions } from './useBookSelectionPermissions'
 import { useBookNavigation } from './useBookNavigation'
 import { useDeleteBook } from './useDeleteBook'
 import { useBookBulkActions, type QuerySelectionState } from './useBookBulkActions'
@@ -11,19 +12,23 @@ import { useBookBulkActions, type QuerySelectionState } from './useBookBulkActio
 interface BookTableShellOptions {
   viewType?: 'library' | 'collection' | 'smartScope'
   books: Ref<BookCard[]>
+  selectionMode?: Ref<boolean>
   total?: Ref<number>
   loading?: Ref<boolean>
   exitSelectionMode?: () => void
   querySelection?: Ref<QuerySelectionState | null>
+  /** Called for a single-book move; the host view owns the destination sheet. */
+  onMoveToLibrary?: (bookId: number) => void
 }
 
-type BookActionType = 'quick-view' | 'add-to-collection' | 'delete'
+type BookActionType = 'quick-view' | 'add-to-collection' | 'move-to-library' | 'delete'
 
-export function useBookTableShell({ books, querySelection }: BookTableShellOptions) {
+export function useBookTableShell({ books, selectionMode, querySelection, onMoveToLibrary }: BookTableShellOptions) {
   const router = useRouter()
   const { setBookContext } = useBookNavigation()
   const tableControls = useTableViewControls()
-  const selection = useBookViewSelection(books)
+  const selection = useBookViewSelection(books, selectionMode)
+  const { canEditSelectionMetadata } = useBookSelectionPermissions(books, selection.selectedIds, querySelection)
 
   const {
     pendingId: deleteBookId,
@@ -71,6 +76,11 @@ export function useBookTableShell({ books, querySelection }: BookTableShellOptio
       return
     }
 
+    if (action === 'move-to-library') {
+      onMoveToLibrary?.(book.id)
+      return
+    }
+
     promptDelete(book.id)
   }
 
@@ -92,6 +102,7 @@ export function useBookTableShell({ books, querySelection }: BookTableShellOptio
   return {
     ...tableControls,
     ...selection,
+    canEditSelectionMetadata,
     deleteBookId,
     deletingBook,
     promptDelete,

@@ -1,22 +1,26 @@
 import { UnsupportedMediaTypeException } from '@nestjs/common';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { IncomingHttpHeaders } from 'http';
 import { Readable } from 'stream';
 
 const DEFAULT_TRUST_PROXY = 'loopback,linklocal,uniquelocal';
 const EMPTY_JSON_BODY = '{}';
 const BODY_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
+// Matches @fastify/helmet's default Strict-Transport-Security max-age (1 year).
+const HSTS_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
+const HSTS_HEADER_VALUE = `max-age=${HSTS_MAX_AGE_SECONDS}; includeSubDomains`;
 
-export function parseTrustProxy(value: string | undefined): string | boolean | number {
+export function parseTrustProxy(value: string | undefined): string | boolean {
   const raw = value?.trim();
   if (!raw) return DEFAULT_TRUST_PROXY;
 
   const normalized = raw.toLowerCase();
-  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
-  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', 'no', 'off'].includes(normalized)) return false;
+  if (['true', 'yes', 'on'].includes(normalized)) return true;
 
-  const hopCount = Number(raw);
-  if (Number.isInteger(hopCount) && hopCount >= 0) return hopCount;
+  if (!Number.isNaN(Number(raw))) {
+    throw new Error('Numeric TRUST_PROXY hop counts are not supported; configure trusted proxy IP or CIDR ranges');
+  }
 
   return raw;
 }
@@ -38,6 +42,7 @@ export interface CspOptions {
 const CLOUDFLARE_INSIGHTS_SCRIPT_SRC = 'https://static.cloudflareinsights.com';
 const CLOUDFLARE_INSIGHTS_CONNECT_SRC = 'https://cloudflareinsights.com';
 const DICTIONARY_CONNECT_SRC = ['https://api.dictionaryapi.dev', 'https://*.wiktionary.org'];
+const TRANSLATE_CONNECT_SRC = 'https://translate.googleapis.com';
 
 export function buildCspDirectives(options: CspOptions = {}) {
   const { allowCloudflareInsights = false } = options;
@@ -53,6 +58,7 @@ export function buildCspDirectives(options: CspOptions = {}) {
     'https://*.voice.speech.microsoft.com',
     'https://*.cognitiveservices.azure.com',
     ...DICTIONARY_CONNECT_SRC,
+    TRANSLATE_CONNECT_SRC,
     ...(allowCloudflareInsights ? [CLOUDFLARE_INSIGHTS_CONNECT_SRC] : []),
   ];
 
@@ -70,6 +76,38 @@ export function buildCspDirectives(options: CspOptions = {}) {
     workerSrc: ["'self'", 'blob:'],
     upgradeInsecureRequests: null,
   };
+}
+
+export function buildHelmetOptions(options: CspOptions = {}) {
+  return {
+    crossOriginOpenerPolicy: false,
+    // Helmet sends HSTS over plain HTTP by default. The conditional hook adds it only for HTTPS.
+    hsts: false,
+    contentSecurityPolicy: {
+      directives: buildCspDirectives(options),
+    },
+  };
+}
+
+/**
+ * Decides whether an unmatched request should be answered with the SPA shell.
+ *
+ * Serving `index.html` for everything means a hashed bundle that no longer exists after an upgrade
+ * answers `200 OK` with an HTML body under a `.js` URL. A 200 is storable, so both the browser HTTP
+ * cache and the Workbox precache keep it, dynamic imports of that chunk fail, and the broken state
+ * survives reloads until the user clears site data. Anything that names a file gets a real 404.
+ *
+ * Every BookOrbit route parameter is numeric, so "has an extension" reliably separates asset
+ * requests from client-side routes such as `/book/123/files`.
+ */
+export function isStaticAssetPath(url: string): boolean {
+  const pathname = url.split('?')[0].split('#')[0];
+  const lastSegment = pathname.slice(pathname.lastIndexOf('/') + 1);
+  return lastSegment.includes('.');
+}
+
+export function shouldServeSpaFallback(url: string): boolean {
+  return !isStaticAssetPath(url);
 }
 
 export function shouldInjectEmptyJsonBody(method: string, headers: IncomingHttpHeaders): boolean {
@@ -100,4 +138,55 @@ export function registerEmptyBodyContentTypeParser(fastify: FastifyInstance): vo
 
 function getHeaderValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+// Sending Strict-Transport-Security over a plain HTTP connection is harmful: browsers cache the
+// directive per-hostname and force HTTPS for that host (and, with includeSubDomains, its subdomains)
+// for up to a year, breaking access to BookOrbit and any other unrelated service on the same host
+// when it isn't actually served over TLS. Only emit the header for requests that are genuinely
+// secure, i.e. terminated over TLS directly or forwarded by a trusted proxy (see `request.protocol`,
+// which already honours the app's `TRUST_PROXY` setting).
+export function isSecureProtocol(protocol: string | undefined): boolean {
+  return protocol === 'https';
+}
+
+export function applyConditionalHsts(request: Pick<FastifyRequest, 'protocol'>, reply: Pick<FastifyReply, 'header'>): void {
+  if (isSecureProtocol(request.protocol)) {
+    reply.header('Strict-Transport-Security', HSTS_HEADER_VALUE);
+  }
+}
+
+export function registerConditionalHsts(fastify: FastifyInstance): void {
+  fastify.addHook('onSend', (request, reply, payload, done) => {
+    applyConditionalHsts(request, reply);
+    done(null, payload);
+  });
+}
+
+/**
+ * Nest's `@RouteConfig({ bodyLimit })` only reaches Fastify's user-space `config` object, while
+ * Fastify reads `bodyLimit` from the route options. Without copying it across, a route that asks
+ * for a larger body silently keeps the 1 MiB default and its DTO length limit is unreachable.
+ */
+export function applyDeclaredBodyLimit(route: { config?: unknown; bodyLimit?: number }): void {
+  const declared = (route.config as { bodyLimit?: unknown } | undefined)?.bodyLimit;
+  if (typeof declared === 'number' && Number.isInteger(declared) && declared > 0) route.bodyLimit = declared;
+}
+
+export function registerDeclaredBodyLimits(fastify: FastifyInstance): void {
+  fastify.addHook('onRoute', applyDeclaredBodyLimit);
+}
+
+/**
+ * `@fastify/compress` reads its per-route opt-out from the route options, which Nest's
+ * `@RouteConfig({ compress: false })` cannot reach. Raw file routes need it: the plugin's default
+ * type check gzips `+xml` and `octet-stream` bodies (FB2, unknown formats) and drops Content-Length.
+ * Register before the compress plugin so this hook runs first.
+ */
+export function applyDeclaredCompressionOptOut(route: { config?: unknown; compress?: unknown }): void {
+  if ((route.config as { compress?: unknown } | undefined)?.compress === false) route.compress = false;
+}
+
+export function registerDeclaredCompressionOptOuts(fastify: FastifyInstance): void {
+  fastify.addHook('onRoute', applyDeclaredCompressionOptOut);
 }

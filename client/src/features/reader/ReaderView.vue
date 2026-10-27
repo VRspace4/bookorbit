@@ -1,80 +1,107 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { useFoliate, type RelocateDetail } from './epub/composables/useFoliate'
-import { useReaderProgress } from './shared/composables/useReaderProgress'
+import type { SelectionDetail } from './epub/composables/useFoliateSelection'
+import { useReaderProgress, type NewerPosition } from './shared/composables/useReaderProgress'
 import { useReadingSession } from './shared/composables/useReadingSession'
 import { leaveReader } from './shared/lib/reader-navigation'
+import { useReaderPageTitle } from './shared/composables/useReaderPageTitle'
 import { useReaderState } from './epub/composables/useReaderState'
 import { useReaderSettings } from './shared/composables/useReaderSettings'
 import { useCustomFonts } from './epub/composables/useCustomFonts'
 import { useVisibility } from './shared/composables/useVisibility'
 import { useWakeLock } from './shared/composables/useWakeLock'
+import { useFullscreen } from './shared/composables/useFullscreen'
 import { useBookmarks } from './epub/composables/useBookmarks'
 import { useSeekBookmark } from './epub/composables/useSeekBookmark'
 import { useAnnotations } from './epub/composables/useAnnotations'
+import { useReaderAnnotationActions } from './epub/composables/useReaderAnnotationActions'
+import { useReaderMarksRefresh } from './epub/composables/useReaderMarksRefresh'
 import { useToc } from './epub/composables/useToc'
 import { useSearch, type FoliateView } from './epub/composables/useSearch'
 import { useReaderSelection } from './epub/composables/useReaderSelection'
+import { useReaderSidebarPin } from './epub/composables/useReaderSidebarPin'
 import { useReaderKeyboardShortcuts } from './epub/composables/useReaderKeyboardShortcuts'
-import { useEpubTts } from './epub/composables/useEpubTts'
+import { useEpubReadAloud } from './epub/composables/useEpubReadAloud'
+import { useFoliateTts } from '@/features/tts/composables/useFoliateTts'
+import { useTtsPlayer } from '@/features/tts/composables/useTtsPlayer'
+import { useTtsMiniPlayerUi } from '@/features/tts/composables/useTtsMiniPlayerUi'
+import { useTtsPreferences } from '@/features/tts/composables/useTtsPreferences'
+import { useTtsPosition } from '@/features/tts/composables/useTtsPosition'
+import { useTtsKeyboard } from '@/features/tts/composables/useTtsKeyboard'
+import { getProviders, getVoices } from '@/features/tts/api/tts.api'
+import { useMediaOverlay } from './media-overlay/composables/useMediaOverlay'
+import { mediaOverlayFragmentSeconds, resolveMediaOverlayResume, type MediaOverlayResumePosition } from './media-overlay/lib/media-overlay-resume'
+import { injectMediaOverlayHighlightCss, MEDIA_OVERLAY_DEFAULT_ACTIVE_CLASS } from './media-overlay/lib/media-overlay-highlight'
+import { startMediaOverlayWithFallback } from './media-overlay/lib/media-overlay-start'
+import { mediaOverlayEntriesOverlapping } from './media-overlay/lib/media-overlay-range'
+import TtsResumePrompt from '@/features/tts/components/TtsResumePrompt.vue'
 import ReaderHeader from './epub/components/ReaderHeader.vue'
 import ReaderFooter from './epub/components/ReaderFooter.vue'
 import ReaderSidebar from './epub/components/ReaderSidebar.vue'
 import ReaderSettingsPanel from './epub/components/ReaderSettingsPanel.vue'
-import TtsControls from './epub/components/TtsControls.vue'
-import TtsFollowAlongButton from './epub/components/TtsFollowAlongButton.vue'
-import TtsSettingsPanel from './epub/components/TtsSettingsPanel.vue'
-import TtsHighlightColorPanel from './epub/components/TtsHighlightColorPanel.vue'
+import NewerPositionDialog from './epub/components/NewerPositionDialog.vue'
 import SelectionPopup from './epub/components/SelectionPopup.vue'
 import ReaderSearchPanel from './epub/components/ReaderSearchPanel.vue'
-import NoteDialog from './epub/components/NoteDialog.vue'
+import NoteDialog from './shared/components/NoteDialog.vue'
 import DictionaryPopover from './epub/components/DictionaryPopover.vue'
 import TranslationPopover from './epub/components/TranslationPopover.vue'
 import TranslationSheet from './epub/components/TranslationSheet.vue'
 import KeyboardShortcutsModal from './epub/components/KeyboardShortcutsModal.vue'
+import TtsControls from './epub/components/TtsControls.vue'
+import TtsFollowAlongButton from './epub/components/TtsFollowAlongButton.vue'
+import TtsSettingsPanel from './epub/components/TtsSettingsPanel.vue'
+import TtsHighlightColorPanel from './epub/components/TtsHighlightColorPanel.vue'
 import TtsResumeDialog from './epub/components/TtsResumeDialog.vue'
-import PdfV4ReaderView from './pdf-v4/PdfV4ReaderView.vue'
+import { buildThemeSwitchHighlightPatch } from './epub/theme-highlight'
 import CbzReaderView from './cbz/CbzReaderView.vue'
 import AudiobookReaderView from './audiobook/AudiobookReaderView.vue'
-import { epubReaderUiKey, type ReaderState } from './epub/composables/useReaderState'
-import type { FoliateRenderer } from './epub/composables/useFoliate'
-import type { EpubReaderSettings } from '@bookorbit/types'
+import type { ReaderState } from './epub/composables/useReaderState'
+import type { FoliateLocationContext, FoliateRenderer } from './epub/composables/useFoliate'
+import type { BookDetail, EpubMediaOverlayPlaylist, EpubReaderSettings } from '@bookorbit/types'
+import { findMatchingCfiRange } from './epub/utils'
 import { getFormatGroup } from '@bookorbit/types'
-import { buildThemeHighlightPatch, buildThemeSwitchHighlightPatch } from './epub/theme-highlight'
-import { readCachedReaderProgress } from './shared/lib/reader-progress-cache'
-import { readTtsPlaybackSession, writeTtsPlaybackSession } from './epub/tts/tts-session-cache'
-import { isAwayFromLastTtsPosition } from './epub/lib/tts-resume'
+import { resolveReaderResumeTarget } from '@/lib/reading-checkpoint'
+import { api } from '@/lib/api'
+import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 
+const PdfV4ReaderView = defineAsyncComponent(() => import('./pdf-v4/PdfV4ReaderView.vue'))
+
+const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const { coverUrl } = useCoverVersions()
 const bookId = Number(route.params.bookId)
 const fileId = Number(route.params.fileId)
-const isPeekMode = computed(() => route.query.peek === '1' || route.query.peek === 'true')
-const trackingEnabled = computed(() => !isPeekMode.value)
 const fileFormat = (route.query.format as string) || 'epub'
+useReaderPageTitle(bookId)
+const normalizedFileFormat = fileFormat.toLowerCase()
 const isAudioFormat = getFormatGroup(fileFormat) === 'audio'
 const isPdfFormat = fileFormat === 'pdf'
-const isComicFormat = fileFormat === 'cbz' || fileFormat === 'cbr' || fileFormat === 'cb7'
+const isDjvuFormat = normalizedFileFormat === 'djvu'
+const isComicFormat = fileFormat === 'cbz' || fileFormat === 'cbr' || fileFormat === 'cb7' || isDjvuFormat
+const pageImageSource = isDjvuFormat ? 'djvu' : 'cbz'
+const isPeekMode = computed(() => {
+  const mode = route.query.mode
+  return (Array.isArray(mode) ? mode[0] : mode) === 'peek'
+})
+const trackingEnabled = computed(() => !isPeekMode.value)
+const isTtsAvailable = normalizedFileFormat === 'epub'
 
 const containerRef = ref<HTMLElement | null>(null)
 const readerShellRef = ref<HTMLElement | null>(null)
 const ttsToolbarRef = ref<InstanceType<typeof TtsControls> | null>(null)
-let ttsToolbarResizeObserver: ResizeObserver | null = null
 const showSidebar = ref(false)
 const showSettings = ref(false)
 const showSearch = ref(false)
-const showTtsSettings = ref(false)
-const ttsColorPickerTarget = ref<'sentence' | 'word' | null>(null)
-const showTtsResumeDialog = ref(false)
-const pendingTtsResume = ref<{ sectionIndex: number; wordIndex: number } | null>(null)
-const ttsAutoAdvancing = ref(false)
+const showTapZones = ref(false)
 const searchInitialQuery = ref('')
-const isFullscreen = ref(false)
 const sectionFractions = ref<number[]>([])
+const sidebarLocationMetaByCfi = ref<Record<string, { chapterTitle: string | null; percentage: number | null }>>({})
+let sidebarLocationResolveSeq = 0
 
 const bookSettings = useReaderSettings(fileId, fileFormat)
 const effectiveEpubSettings = computed(() => bookSettings.effective.value as EpubReaderSettings)
@@ -90,7 +117,13 @@ const {
   applyToRenderer,
   setFontSize,
   setLineHeight,
+  setParagraphSpacing,
+  setLetterSpacing,
+  setWordSpacing,
+  setTextIndent,
   setFontFamily,
+  setFontWeight,
+  setFontStyle,
   setMaxColumnCount,
   setGap,
   setMaxInlineSize,
@@ -100,20 +133,32 @@ const {
   setIsDark,
   setThemeName,
   setFlow,
-  setFontFaceCSS,
   setFixedLayoutSpread,
+  setFontFaceCSS,
 } = readerState
 
 const customFonts = useCustomFonts()
 
-const { onActivity, elapsedMinutes } = useReadingSession(fileId, () => ({
-  percentage: progress.percentage.value,
-  cfi: progress.cfi.value,
-  pageNumber: progress.pageNumber.value,
-}))
+const { onActivity, elapsedMinutes } = useReadingSession(
+  fileId,
+  () => ({
+    percentage: progress.percentage.value,
+    cfi: progress.cfi.value,
+    pageNumber: progress.pageNumber.value,
+  }),
+  { trackingEnabled },
+)
 
-const progress = useReaderProgress(bookId, fileId, elapsedMinutes, 0, { trackingEnabled })
+const progress = useReaderProgress(bookId, fileId, elapsedMinutes, 0, {
+  trackingEnabled,
+  narrationSeconds: narrationSecondsAt,
+  onNarrationMovedBack: handleNarrationMovedBack,
+})
 const { cfi, chapterTitle, sectionIndex, totalSections, fraction, locationTotal, footerMode, cycleFooterMode, updateHeadsFeet } = progress
+
+const visibility = useVisibility()
+const { headerVisible, footerVisible, isPinned, handleMiddleTap, togglePinned, hideOverlays, setVisibilityLock } = visibility
+const { toggleFullscreen } = useFullscreen()
 
 const { seekBookmark, placeBookmarkBeforeSeek, clearBookmark } = useSeekBookmark(() => ({
   fraction: fraction.value,
@@ -122,26 +167,17 @@ const { seekBookmark, placeBookmarkBeforeSeek, clearBookmark } = useSeekBookmark
 
 function handleSeek(newFraction: number) {
   placeBookmarkBeforeSeek(newFraction)
-  goToFraction(newFraction)
+  navigateToFraction(newFraction)
 }
 
 function handleSeekBookmarkTap() {
   const bookmark = seekBookmark.value
   if (!bookmark) return
-  if (bookmark.cfi) {
-    goTo(bookmark.cfi)
-  } else {
-    goToFraction(bookmark.fraction)
-  }
+  navigateToTarget(bookmark.cfi ?? bookmark.fraction)
 }
 
-const visibility = useVisibility()
-const { headerVisible, footerVisible, handleMiddleTap, setVisibilityLock } = visibility
-
 watch([headerVisible, footerVisible], ([header, footer]) => {
-  if (!header && !footer) {
-    clearBookmark()
-  }
+  if (!header && !footer) clearBookmark()
 })
 
 watch(
@@ -149,11 +185,7 @@ watch(
   () => {
     if (isAudioFormat || isPdfFormat || isComicFormat) return
     if (!shouldApplyStyles.value && !bookSettings.isCustomized.value) return
-
-    const effective = bookSettings.effective.value as EpubReaderSettings
-    seedState(effective)
-    const renderer = getRenderer()
-    if (renderer) applyToRenderer(renderer)
+    seedState(bookSettings.effective.value as EpubReaderSettings)
   },
 )
 
@@ -169,19 +201,28 @@ const search = useSearch()
 const { results: searchResults, isSearching, search: doSearch, clear: clearSearch } = search
 
 const selection = useReaderSelection()
+const { isSidebarPinned, toggleSidebarPinned, shouldCloseAfterNavigation } = useReaderSidebarPin(fileId)
+
+async function toggleBookmark() {
+  const wasBookmarked = bookmarks.isCurrentCfiBookmarked.value
+  const saved = await bookmarks.toggle(bookId, cfi.value ?? '', chapterTitle.value, fileId)
+  if (!saved) toast.error(t(wasBookmarked ? 'reader.toast.bookmarkDeleteFailed' : 'reader.toast.bookmarkSaveFailed'))
+}
+
+function handleToggleBookmark() {
+  void toggleBookmark()
+}
 
 function closeAnyPanel() {
-  if (showSearch.value) {
+  if (showTapZones.value) {
+    showTapZones.value = false
+  } else if (showSearch.value) {
     closeSearch()
   } else if (showSidebar.value) {
     showSidebar.value = false
   } else if (showSettings.value) {
     showSettings.value = false
-  } else if (showTtsSettings.value) {
-    showTtsSettings.value = false
-  } else if (ttsColorPickerTarget.value) {
-    ttsColorPickerTarget.value = null
-  } else {
+  } else if (!readAloud.closePanel()) {
     handleMiddleTap()
   }
 }
@@ -193,18 +234,25 @@ const { showHelpModal } = useReaderKeyboardShortcuts({
   toggleSearch: () => {
     showSearch.value = !showSearch.value
   },
-  toggleBookmark: () => {
-    bookmarks.toggle(bookId, cfi.value ?? '', chapterTitle.value)
-  },
+  toggleBookmark: handleToggleBookmark,
   toggleFullscreen,
   cycleFooterMode,
   closePanel: closeAnyPanel,
-  goToStart: () => goToFraction(0),
-  goToEnd: () => goToFraction(1),
+  goToStart: () => navigateToFraction(0),
+  goToEnd: () => navigateToFraction(1),
 })
 
 function toggleHelpModal() {
   showHelpModal.value = !showHelpModal.value
+}
+
+async function startTrackedReading() {
+  const query = { ...route.query }
+  delete query.mode
+  await router.replace({ name: 'reader', params: route.params, query })
+  await nextTick()
+  await progress.save()
+  onActivity()
 }
 
 const chapterStartFraction = computed(() => {
@@ -250,13 +298,498 @@ function handleTranslate() {
   showTranslation.value = true
 }
 
+const bookMeta = ref<BookDetail | null>(null)
+const initialNavigationPending = ref(true)
+
+const {
+  foliateReady,
+  setFoliateSource,
+  clearFoliateSource,
+  getServerTextBlocks,
+  getVisibleRange,
+  getBlockIndexForRange,
+  highlightBlock,
+  showResumeHighlightFromCfi,
+  showResumeHighlightFromBlock,
+  clearHighlight,
+} = useFoliateTts()
+const { startPlayback, isActive, currentBook, currentBlockIndex, currentChapterIndex, playbackState, primeAudioContext } = useTtsPlayer()
+const { setExpanded: setMiniPlayerExpanded, setReaderFooterVisible } = useTtsMiniPlayerUi()
+const { loadBookPreferences, loadUserPreferences, defaultProviderId, defaultVoiceId, defaultSpeed } = useTtsPreferences()
+const ttsPosition = useTtsPosition()
+const mediaOverlay = useMediaOverlay()
+let mediaOverlayStartId = 0
+
+const isMediaOverlayAvailable = computed(() => isTtsAvailable && hasMediaOverlay.value)
+const isTtsActive = computed(() => isActive.value && currentBook.value?.bookFileId === fileId)
+const isNavigationLocked = computed(
+  () =>
+    initialNavigationPending.value ||
+    (isTtsActive.value && playbackState.value === 'playing') ||
+    (mediaOverlay.isActive.value && mediaOverlay.isPlaying.value),
+)
+
+useTtsKeyboard(() => mediaOverlay.isActive.value, {
+  togglePlayPause: mediaOverlay.toggle,
+  prevBlock: mediaOverlay.prevSentence,
+  nextBlock: mediaOverlay.nextSentence,
+  increaseSpeed: mediaOverlay.increaseRate,
+  decreaseSpeed: mediaOverlay.decreaseRate,
+})
+const isOverlayFooterVisible = computed(() => footerVisible.value && !showTapZones.value)
+const showTtsResumePrompt = ref(false)
+const clearingSavedTtsPosition = ref(false)
+const pendingTtsChapterNavigation = ref<number | null>(null)
+const lastNavigationBlockedToastAt = ref(0)
+let mediaOverlayPlaylistPromise: Promise<EpubMediaOverlayPlaylist | null> | null = null
+// A paused narration can still finish loading its page. Keep its relocations separate from
+// reading progress until the reader explicitly navigates, rather than relying on playback state.
+let relocationSource: 'text' | 'narration' = 'text'
+
+watch(mediaOverlay.isPlaying, (playing) => {
+  if (playing) relocationSource = 'narration'
+})
+
+function ensureTtsAvailable(): boolean {
+  if (isTtsAvailable) return true
+  toast.error('TTS currently supports EPUB files only')
+  return false
+}
+
+function applySavedTtsResumeHighlight() {
+  if (!isTtsAvailable) return
+  if (!foliateReady.value || isTtsActive.value) return
+  const saved = ttsPosition.savedPosition.value
+  if (!saved?.cfi) return
+
+  // Clear any stale TTS marker before applying the current saved one.
+  clearHighlight()
+
+  if (showResumeHighlightFromCfi(saved.cfi)) return
+
+  const match = /^tts:(\d+):(\d+)$/.exec(saved.cfi)
+  if (!match) return
+  const savedChapterIdx = parseInt(match[1]!, 10)
+  const savedBlockIdx = parseInt(match[2]!, 10)
+  void showResumeHighlightFromBlock(savedChapterIdx, savedBlockIdx, sectionIndex.value)
+}
+
+// The most recently loaded chapter document, used to re-mark the resume sentence
+// after narration stops (foliate clears its own highlight on stop).
+let currentChapterDoc: Document | null = null
+
+// The sentence statically highlighted to show where narration will resume from.
+// Tracked so it can be cleared once foliate takes over highlighting on play.
+let resumeNarrationHighlight: { el: Element; cls: string } | null = null
+
+function clearResumeNarrationHighlight() {
+  if (resumeNarrationHighlight) {
+    resumeNarrationHighlight.el.classList.remove(resumeNarrationHighlight.cls)
+    resumeNarrationHighlight = null
+  }
+}
+
+// On (re)load, mark the saved resume sentence in the freshly loaded chapter so the
+// user can see where playback will pick up. No-op while narration is active -
+// foliate owns the highlight then.
+function showResumeNarrationHighlight(doc: Document) {
+  clearResumeNarrationHighlight()
+  if (mediaOverlay.isActive.value) return
+  const saved = getCurrentNarrationPos()
+  const id = saved?.fragment.split('#')[1]
+  if (!id) return
+  const el = doc.getElementById(id)
+  if (!el) return
+  const cls = getMediaActiveClass() ?? MEDIA_OVERLAY_DEFAULT_ACTIVE_CLASS
+  el.classList.add(cls)
+  resumeNarrationHighlight = { el, cls }
+}
+
+function onChapterLoadHandler(doc: Document, viewEl: HTMLElement) {
+  currentChapterDoc = doc
+  setFoliateSource(doc, viewEl)
+  if (getMediaOverlay()) {
+    injectMediaOverlayHighlightCss(doc, getMediaActiveClass())
+    showResumeNarrationHighlight(doc)
+  }
+}
+
+function syncFoliateHighlightToCurrentBlock() {
+  if (currentChapterIndex.value !== sectionIndex.value) {
+    clearHighlight()
+    return
+  }
+  highlightBlock(currentBlockIndex.value)
+}
+
+// Re-run the highlight sync whenever TTS becomes active, the chapter document
+// reloads (foliateReady toggles), or the visible chapter changes. sectionIndex
+// only changes on chapter boundaries, so this also catches the moment a TTS
+// chapter navigation settles.
+watch([isTtsActive, foliateReady, sectionIndex], () => {
+  if (!isTtsActive.value || !foliateReady.value) {
+    pendingTtsChapterNavigation.value = null
+    return
+  }
+  syncFoliateHighlightToCurrentBlock()
+})
+
+watch([foliateReady, isTtsActive, sectionIndex, () => ttsPosition.savedPosition.value?.cfi], ([ready, active, , savedCfi], previous) => {
+  if (!ready || active || !savedCfi) return
+  // On explicit TTS stop/close, keep the current sentence highlight in place
+  // instead of immediately re-resolving from persisted state.
+  const wasActive = previous?.[1] ?? false
+  if (wasActive && !active) return
+  applySavedTtsResumeHighlight()
+})
+
+// Keep the Foliate overlay in lockstep with TTS block changes.
+watch([currentChapterIndex, currentBlockIndex], async ([chapterIdx]) => {
+  if (!isTtsActive.value || !foliateReady.value) return
+
+  // Keep the visual reader chapter aligned with the TTS chapter before
+  // highlighting; otherwise chapter rollover can jump backwards. The highlight
+  // for the new chapter is applied by the foliateReady/sectionIndex watcher
+  // once navigation settles and the new document's block ranges are ready.
+  if (sectionIndex.value !== chapterIdx) {
+    if (pendingTtsChapterNavigation.value !== chapterIdx) {
+      pendingTtsChapterNavigation.value = chapterIdx
+      await goToSection(chapterIdx)
+    }
+    return
+  }
+  pendingTtsChapterNavigation.value = null
+  syncFoliateHighlightToCurrentBlock()
+})
+
+/**
+ * Nothing is narrated until a provider is configured, so an unset preference falls through to
+ * whichever provider the server lists first rather than to a built-in default.
+ */
+async function resolveProviderAndVoice() {
+  const effectivePrefs = await loadBookPreferences(bookId)
+  const speed = effectivePrefs.speed ?? defaultSpeed.value ?? 1.0
+  const resolvedProviderId = effectivePrefs.providerId ?? defaultProviderId.value ?? (await firstAvailableProviderId())
+  if (!resolvedProviderId) return { providerId: '', voiceId: '', speed }
+
+  let voiceId = effectivePrefs.voiceId ?? defaultVoiceId.value ?? ''
+  if (!voiceId.trim()) {
+    const voices = await getVoices(resolvedProviderId)
+    voiceId = voices[0]?.id ?? ''
+  }
+  return { providerId: resolvedProviderId, voiceId, speed }
+}
+
+async function firstAvailableProviderId(): Promise<string | null> {
+  const providers = await getProviders().catch(() => [])
+  return providers[0]?.id ?? null
+}
+
+async function buildTtsBook(): Promise<{
+  bookId: number
+  bookFileId: number
+  title: string
+  author: string | null
+  coverUrl: string | null
+  totalChapters: number
+} | null> {
+  if (!bookMeta.value) {
+    toast.error('Book metadata not loaded yet')
+    return null
+  }
+  return {
+    bookId,
+    bookFileId: fileId,
+    title: bookMeta.value.title ?? chapterTitle.value ?? 'Book',
+    author: bookMeta.value.authors?.[0]?.name ?? null,
+    coverUrl: bookMeta.value.coverSource ? coverUrl(bookId, 'cover', bookMeta.value.coverVersion, 'audio') : null,
+    totalChapters: totalSections.value,
+  }
+}
+
+async function handleStartTts() {
+  if (!ensureTtsAvailable()) return
+  primeAudioContext()
+
+  showSettings.value = false
+  showTapZones.value = false
+  hideOverlays(true)
+
+  if (isTtsActive.value) {
+    setMiniPlayerExpanded(true)
+    return
+  }
+
+  await ttsPosition.loadPosition(fileId)
+  if (ttsPosition.savedPosition.value?.cfi) {
+    showTtsResumePrompt.value = true
+    await nextTick()
+    applySavedTtsResumeHighlight()
+    return
+  }
+
+  await handlePlayFromCurrentPage()
+}
+
+// The headphones button drives embedded narration when the book has media
+// overlays, otherwise it falls back to synthesized TTS.
+function handleStartListen() {
+  if (isMediaOverlayAvailable.value) {
+    void handleStartMediaOverlay()
+    return
+  }
+  void handleStartTts()
+}
+
+const narrationPosKey = `bo:mo-pos:${fileId}`
+
+function saveNarrationPos(section: number, fragment: string) {
+  try {
+    localStorage.setItem(narrationPosKey, JSON.stringify({ section, fragment, updatedAt: Date.now() }))
+  } catch {
+    // localStorage may be unavailable (private mode); resume is best-effort.
+  }
+}
+
+function loadSavedNarrationPos(): { section: number; fragment: string } | null {
+  try {
+    const raw = localStorage.getItem(narrationPosKey)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (typeof parsed?.section === 'number' && typeof parsed?.fragment === 'string') return parsed
+  } catch {
+    // Ignore malformed/blocked storage.
+  }
+  return null
+}
+
+function hasAnyServerProgress(): boolean {
+  return (
+    !!progress.cfi.value ||
+    progress.pageNumber.value != null ||
+    progress.percentage.value > 0 ||
+    (progress.positionSeconds.value != null && progress.positionSeconds.value > 0) ||
+    !!progress.mediaOverlayFragment.value ||
+    progress.mediaOverlaySectionIndex.value != null
+  )
+}
+
+function getCurrentNarrationPos(): MediaOverlayResumePosition | null {
+  if (progress.mediaOverlayFragment.value && progress.mediaOverlaySectionIndex.value !== null) {
+    return { section: progress.mediaOverlaySectionIndex.value, fragment: progress.mediaOverlayFragment.value }
+  }
+  return null
+}
+
+async function loadMediaOverlayPlaylist(): Promise<EpubMediaOverlayPlaylist | null> {
+  if (!mediaOverlayPlaylistPromise) {
+    mediaOverlayPlaylistPromise = api(`/api/v1/epub/${bookId}/media-overlay?fileId=${fileId}`)
+      .then((res) => (res.ok ? (res.json() as Promise<EpubMediaOverlayPlaylist>) : null))
+      .catch(() => null)
+  }
+  return mediaOverlayPlaylistPromise
+}
+
+async function resolveSavedNarrationPos(): Promise<MediaOverlayResumePosition | null> {
+  const current = getCurrentNarrationPos()
+  if (current) return current
+
+  if (progress.mediaOverlayFragment.value || (progress.positionSeconds.value != null && progress.positionSeconds.value > 0)) {
+    const playlist = await loadMediaOverlayPlaylist()
+    if (playlist) {
+      const resolved = resolveMediaOverlayResume(playlist, {
+        fragment: progress.mediaOverlayFragment.value,
+        sectionIndex: progress.mediaOverlaySectionIndex.value,
+        positionSeconds: progress.positionSeconds.value,
+      })
+      if (resolved) {
+        progress.setMediaOverlayProgress(resolved.fragment, resolved.section, progress.positionSeconds.value)
+        saveNarrationPos(resolved.section, resolved.fragment)
+        return resolved
+      }
+    }
+  }
+
+  if (hasAnyServerProgress()) return null
+
+  const local = loadSavedNarrationPos()
+  if (local) {
+    progress.setMediaOverlayProgress(local.fragment, local.section)
+    return local
+  }
+  return null
+}
+
+// Persist the exact narrated sentence so playback can resume there after reload.
+watch([mediaOverlay.currentFragment, mediaOverlay.currentSectionIndex], ([fragment, narratedSection]) => {
+  if (!mediaOverlay.isActive.value || !fragment || narratedSection === null) return
+  relocationSource = 'narration'
+  saveNarrationPos(narratedSection, fragment)
+  progress.setMediaOverlayProgress(fragment, narratedSection)
+})
+
+// When narration is stopped (mini player closed), foliate clears its highlight.
+// Re-mark the last sentence so the resume point stays visible.
+watch(
+  () => mediaOverlay.isActive.value,
+  (active, wasActive) => {
+    if (wasActive && !active && currentChapterDoc) showResumeNarrationHighlight(currentChapterDoc)
+  },
+)
+
+// Starts media-overlay narration in `sectionIdx` at the first <par> that
+// `matches` accepts; if none plays, it falls back to the start of the section
+// instead of staying silent.
+async function beginNarration(sectionIdx: number, matches: ((item: { text: string }) => boolean) | null) {
+  const startId = ++mediaOverlayStartId
+  const mo = getMediaOverlay()
+  if (!mo) {
+    toast.error('This book has no embedded narration')
+    return
+  }
+  const book = await buildTtsBook()
+  if (!book) return
+
+  clearResumeNarrationHighlight()
+
+  relocationSource = 'narration'
+
+  await mediaOverlay.start(
+    mo,
+    () => startMediaOverlayWithFallback(mo, sectionIdx, matches, () => startId === mediaOverlayStartId && mediaOverlay.isActive.value),
+    book,
+  )
+}
+
+async function handleStartMediaOverlay() {
+  showSettings.value = false
+  showTapZones.value = false
+  hideOverlays(true)
+
+  if (mediaOverlay.isActive.value) {
+    mediaOverlay.toggle()
+    return
+  }
+
+  const saved = await resolveSavedNarrationPos()
+  if (saved) {
+    await beginNarration(saved.section, (item) => item.text === saved.fragment)
+    return
+  }
+
+  // No saved sentence: start from the first narrated sentence on the current page.
+  const visible = getVisibleRange()
+  await beginNarration(sectionIndex.value, visible ? mediaOverlayEntriesOverlapping(visible) : null)
+}
+
+async function handleReadFromHere() {
+  if (!ensureTtsAvailable()) return
+  const range = selection.selectionRange.value
+
+  // Embedded narration takes precedence: play the pre-recorded audio from the
+  // selected sentence rather than synthesizing TTS.
+  if (isMediaOverlayAvailable.value) {
+    selection.dismiss()
+    showSettings.value = false
+    showTapZones.value = false
+    hideOverlays(true)
+    await beginNarration(sectionIndex.value, range ? mediaOverlayEntriesOverlapping(range) : null)
+    return
+  }
+
+  primeAudioContext()
+  selection.dismiss()
+  const book = await buildTtsBook()
+  if (!book) return
+  try {
+    const { providerId, voiceId, speed } = await resolveProviderAndVoice()
+    if (!voiceId.trim()) {
+      toast.error('No TTS voices are available for the selected provider')
+      return
+    }
+    const chapterIdx = sectionIndex.value
+    // Map the selection directly to its paragraph index. The block ranges come
+    // from the same segmentation the server uses, so this index matches the
+    // audio block exactly - no fuzzy text matching.
+    const blockIndex = range ? getBlockIndexForRange(range) : -1
+    const startBlock = blockIndex >= 0 ? blockIndex : 0
+    await startPlayback(book, providerId, voiceId, speed, (chapterIndex) => getServerTextBlocks(fileId, chapterIndex), chapterIdx, startBlock)
+  } catch {
+    toast.error('Failed to start TTS playback')
+  }
+}
+
+async function handleResumeTts() {
+  if (!ensureTtsAvailable()) return
+  primeAudioContext()
+  showTtsResumePrompt.value = false
+  const saved = ttsPosition.savedPosition.value
+  if (!saved) {
+    await handleStartTts()
+    return
+  }
+  const match = /^tts:(\d+):(\d+)$/.exec(saved.cfi)
+  const chapterIdx = match ? parseInt(match[1]!, 10) : (saved.chapterIndex ?? sectionIndex.value)
+  const blockIdx = match ? parseInt(match[2]!, 10) : 0
+  const book = await buildTtsBook()
+  if (!book) return
+  try {
+    const { providerId, voiceId, speed } = await resolveProviderAndVoice()
+    if (!voiceId.trim()) {
+      toast.error('No TTS voices are available for the selected provider')
+      return
+    }
+    await startPlayback(book, providerId, voiceId, speed, (chapterIndex) => getServerTextBlocks(fileId, chapterIndex), chapterIdx, blockIdx)
+  } catch {
+    toast.error('Failed to resume TTS playback')
+  }
+}
+
+function dismissResumePrompt() {
+  showTtsResumePrompt.value = false
+  clearHighlight()
+}
+
+async function handleClearSavedTtsPosition() {
+  if (clearingSavedTtsPosition.value) return
+  clearingSavedTtsPosition.value = true
+  try {
+    await ttsPosition.clearPosition(fileId)
+    showTtsResumePrompt.value = false
+    clearHighlight()
+  } catch {
+    toast.error('Failed to clear saved TTS position')
+  } finally {
+    clearingSavedTtsPosition.value = false
+  }
+}
+
+async function handlePlayFromCurrentPage() {
+  if (!ensureTtsAvailable()) return
+  primeAudioContext()
+  showTtsResumePrompt.value = false
+  const book = await buildTtsBook()
+  if (!book) return
+  try {
+    const { providerId, voiceId, speed } = await resolveProviderAndVoice()
+    if (!voiceId.trim()) {
+      toast.error('No TTS voices are available for the selected provider')
+      return
+    }
+    const chapterIdx = sectionIndex.value
+    // The range cached from the last relocate event is the most reliable source
+    // of the currently visible position; map it to its paragraph index.
+    const blockIndex = getBlockIndexForRange(getVisibleRange())
+    const startBlock = blockIndex >= 0 ? blockIndex : 0
+    await startPlayback(book, providerId, voiceId, speed, (chapterIndex) => getServerTextBlocks(fileId, chapterIndex), chapterIdx, startBlock)
+  } catch {
+    toast.error('Failed to start TTS playback')
+  }
+}
+
 function onRelocateHandler(detail: RelocateDetail) {
-  // While the book is opening, Foliate may emit an intermediate relocate at the
-  // chapter start before the exact CFI page/scroll is applied. Keep in-memory
-  // state in sync but do not persist those intermediate positions.
-  const persist = !loading.value && !restoring.value
-  progress.onRelocate(detail, { persist })
-  if (tts.isActive.value) tts.evaluateScrollFollow()
+  progress.onRelocate(detail, relocationSource)
+  readAloud.onRelocate()
   onActivity()
   bookmarks.setCfi(detail?.cfi ?? null)
   toc.setActiveHref(detail?.tocItem?.href ?? '')
@@ -268,18 +801,115 @@ function onRelocateHandler(detail: RelocateDetail) {
 
 function onApplyStylesHandler(renderer: FoliateRenderer) {
   if (shouldApplyStyles.value) {
-    applyToRenderer(renderer)
+    applyToRenderer(renderer, isFixedLayout.value ? { flow: 'paginated' } : undefined)
   }
 }
+
+// A reader left open while another device reads on would save its old page over the newer one at
+// its next turn. Coming back to the tab asks the server first, and the reader chooses, as on iOS.
+const NEWER_POSITION_CHECK_INTERVAL_MS = 5000
+let lastNewerPositionCheckAt = 0
+const newerPosition = ref<NewerPosition | null>(null)
+const newerPositionLocalPercentage = ref(0)
+
+async function offerNewerPosition() {
+  if (document.visibilityState !== 'visible' || initialNavigationPending.value || newerPosition.value) return
+  if (mediaOverlay.isPlaying.value || isTtsActive.value) return
+  const now = Date.now()
+  if (now - lastNewerPositionCheckAt < NEWER_POSITION_CHECK_INTERVAL_MS) return
+  lastNewerPositionCheckAt = now
+  const newer = await progress.checkForNewerPosition().catch(() => null)
+  if (!newer || newerPosition.value) return
+  newerPositionLocalPercentage.value = progress.percentage.value
+  newerPosition.value = newer
+}
+
+async function narrationSecondsAt(fragment: string, section: number | null): Promise<number | null> {
+  const playlist = await loadMediaOverlayPlaylist()
+  return playlist ? mediaOverlayFragmentSeconds(playlist, fragment, section) : null
+}
+
+let resumeNarrationAfterStay = false
+let askedOverNarration = false
+
+/** A narration save held back because another device sent narration well behind it: pause and ask. */
+function handleNarrationMovedBack(newer: NewerPosition) {
+  if (newerPosition.value) return
+  askedOverNarration = true
+  if (mediaOverlay.isPlaying.value) {
+    mediaOverlay.pause()
+    resumeNarrationAfterStay = true
+  }
+  newerPositionLocalPercentage.value = progress.percentage.value
+  newerPosition.value = newer
+}
+
+function handleFollowNewerPosition() {
+  const newer = newerPosition.value
+  newerPosition.value = null
+  resumeNarrationAfterStay = false
+  askedOverNarration = false
+  if (newer) void goToNewerPosition(newer)
+}
+
+function handleStayAtCurrentPosition() {
+  const newer = newerPosition.value
+  newerPosition.value = null
+  if (newer) void progress.keepCurrentPosition(newer, askedOverNarration ? 'narration' : 'text')
+  if (resumeNarrationAfterStay) mediaOverlay.resume()
+  resumeNarrationAfterStay = false
+  askedOverNarration = false
+}
+
+async function goToNewerPosition(newer: NewerPosition) {
+  relocationSource = 'text'
+  await progress.adoptNewerPosition(newer, async () => {
+    // A paused narration resumes from its own sentence, so it gives way to the one adopted.
+    if (mediaOverlay.isActive.value) mediaOverlay.stop()
+    try {
+      if (progress.cfi.value) await goTo(progress.cfi.value)
+      else await goToFraction(newer.percentage / 100)
+    } catch {
+      toast.error(t('reader.toast.newerPositionError'))
+    }
+  })
+  const narration = getCurrentNarrationPos()
+  if (narration) saveNarrationPos(narration.section, narration.fragment)
+}
+
+function handleReaderReturn() {
+  void offerNewerPosition()
+  if (document.visibilityState === 'visible') void refreshMarks()
+}
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleReaderReturn)
+  window.addEventListener('focus', handleReaderReturn)
+})
 
 function onMiddleTapHandler() {
   handleMiddleTap()
 }
 
-let handleLoadedDocument: ((doc: Document) => void) | null = null
+function canRunManualNavigation(): boolean {
+  if (initialNavigationPending.value) return false
 
-function onDocumentLoadHandler(doc: Document) {
-  handleLoadedDocument?.(doc)
+  if (!isNavigationLocked.value) {
+    relocationSource = 'text'
+    return true
+  }
+
+  const now = Date.now()
+  if (now - lastNavigationBlockedToastAt.value >= 1200) {
+    lastNavigationBlockedToastAt.value = now
+    toast.info(mediaOverlay.isActive.value ? 'Pause narration to navigate pages.' : 'Pause TTS playback to navigate pages.')
+  }
+
+  return false
+}
+
+function handleBlockedPageInteraction() {
+  canRunManualNavigation()
 }
 
 const {
@@ -292,218 +922,153 @@ const {
   goToSection,
   getSectionFractions,
   getChapters,
+  getLocationContext,
   getRenderer,
   getActiveDocument,
+  waitForInitialRestore,
   addAnnotation,
   addAnnotations,
   deleteAnnotation,
+  redrawAnnotation,
   setTextSelectedHandler,
+  setSelectionInteractionStartHandler,
+  setAnnotationClickHandler,
   view: foliateView,
   bookLanguage,
-  waitForInitialRestore,
-} = useFoliate(() => containerRef.value, onRelocateHandler, onApplyStylesHandler, onMiddleTapHandler, onDocumentLoadHandler)
+  isFixedLayout,
+  hasMediaOverlay,
+  getMediaOverlay,
+  getMediaActiveClass,
+} = useFoliate(
+  () => containerRef.value,
+  onRelocateHandler,
+  onApplyStylesHandler,
+  onMiddleTapHandler,
+  onChapterLoadHandler,
+  canRunManualNavigation,
+  onDocumentLoadHandler,
+)
 
-function alignTtsSessionWithProgress(position = progress.getTtsPosition()) {
-  const saved = position
-  if (!saved) return
-  const session = readTtsPlaybackSession(fileId)
-  if (!session?.enabled) return
-  // Keep wasPlaying so reload can auto-resume audio when appropriate.
-  writeTtsPlaybackSession(fileId, {
-    enabled: true,
-    wasPlaying: session.wasPlaying,
-    sectionIndex: saved.sectionIndex,
-    wordIndex: saved.wordIndex,
-  })
+function onDocumentLoadHandler(doc: Document) {
+  readAloud.handleDocumentLoad(doc)
 }
 
-async function waitForActiveSection(targetSection: number, timeoutMs = 12_000): Promise<boolean> {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < timeoutMs) {
-    const doc = getActiveDocument()
-    if (sectionIndex.value === targetSection && doc?.body) {
-      await nextTick()
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, 0)
-      })
-      return true
-    }
-    await new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 50)
-    })
-  }
-  return sectionIndex.value === targetSection && Boolean(getActiveDocument()?.body)
-}
-
-async function ensureReaderAtTtsPosition(saved: { sectionIndex: number; wordIndex: number }) {
-  if (sectionIndex.value !== saved.sectionIndex) {
-    await goToSection(saved.sectionIndex)
-  }
-  await waitForActiveSection(saved.sectionIndex)
-  alignTtsSessionWithProgress(saved)
-}
-
-function measureTtsToolbarHeight(): number {
-  const toolbar = ttsToolbarRef.value?.$el
-  if (!(toolbar instanceof HTMLElement)) return 0
-  return Math.ceil(toolbar.getBoundingClientRect().height)
-}
-
-function updateReaderBottomChromeHeight() {
-  const shell = readerShellRef.value
-  if (!shell) return
-
-  const height = measureTtsToolbarHeight()
-  if (height > 0) {
-    shell.style.setProperty('--reader-tts-toolbar-height', `${height}px`)
-  } else {
-    shell.style.removeProperty('--reader-tts-toolbar-height')
-  }
-}
-
-function refreshReaderLayout() {
-  updateReaderBottomChromeHeight()
-  window.dispatchEvent(new Event('resize'))
-  if (tts.isActive.value) {
-    tts.refreshTtsHighlight()
-  }
-}
-
-function attachTtsToolbarResizeObserver() {
-  ttsToolbarResizeObserver?.disconnect()
-  ttsToolbarResizeObserver = null
-
-  const toolbar = ttsToolbarRef.value?.$el
-  if (!(toolbar instanceof HTMLElement)) return
-
-  ttsToolbarResizeObserver = new ResizeObserver(() => {
-    refreshReaderLayout()
-  })
-  ttsToolbarResizeObserver.observe(toolbar)
-}
-
-const tts = useEpubTts({
+const readAloud = useEpubReadAloud({
   fileId,
-  getDocument: () => getActiveDocument(),
-  getSettings: () => effectiveEpubSettings.value,
+  enabled: !isAudioFormat && !isPdfFormat && !isComicFormat,
+  progress,
+  sectionIndex,
+  totalSections,
+  chapterTitle,
   bookLanguage,
-  getChapterTitle: () => chapterTitle.value,
-  getResumeKey: () => `${fileId}:${sectionIndex.value}`,
-  getCurrentSectionIndex: () => sectionIndex.value,
-  getPersistedTtsPosition: () => progress.getTtsPosition(),
-  onTtsWordIndexChange: (wordIndex) => progress.updateTtsPosition(sectionIndex.value, wordIndex),
-  onTtsCheckpoint: () => {
-    void progress.flush()
-  },
-  onSectionComplete: () => {
-    void handleTtsSectionComplete()
-  },
-  getFoliateRenderer: () => {
-    const renderer = getRenderer() as {
-      scrolled?: boolean
-      size?: number
-      start?: number
-      scrollProp?: string
-      scrollBy?: (dx: number, dy: number) => void
-      scrollToAnchor?: (anchor: Range | Element, select?: boolean) => Promise<void>
-    } | null
-    if (!renderer) return null
-    // Foliate: vertical paginated uses scrollTop; vertical scrolled uses scrollLeft.
-    // Use live getters for size/start/scrolled — pinWordRangeAsViewportLead reads
-    // start *after* scrollToAnchor; a one-shot snapshot is stale and fine-tunes the wrong way.
-    const scrollProp = renderer.scrollProp
-    return {
-      get scrolled() {
-        return Boolean(renderer.scrolled)
-      },
-      get size() {
-        return renderer.size
-      },
-      get start() {
-        return renderer.start
-      },
-      get vertical() {
-        const scrolled = Boolean(renderer.scrolled)
-        return typeof scrollProp === 'string'
-          ? scrolled
-            ? scrollProp === 'scrollLeft'
-            : scrollProp === 'scrollTop'
-          : false
-      },
-      scrollBy: renderer.scrollBy?.bind(renderer),
-      scrollToAnchor: renderer.scrollToAnchor?.bind(renderer),
-    }
-  },
+  settings: effectiveEpubSettings,
+  updateGlobalSettings: bookSettings.updateGlobalSettings,
+  getActiveDocument,
+  getRenderer,
+  goTo,
+  goToSection,
+  waitForInitialRestore,
+  dismissSelection: selection.dismiss,
+  readerShellRef,
+  ttsToolbarRef,
 })
-handleLoadedDocument = tts.handleDocumentLoad
+const {
+  tts,
+  ttsStatus,
+  ttsProgress,
+  ttsActiveIndex,
+  ttsWordCount,
+  ttsCurrentProvider,
+  ttsIsActive,
+  showTtsFollowAlong,
+  showTtsSettings,
+  ttsColorPickerTarget,
+  showTtsResumeDialog,
+  pendingTtsResume,
+  ttsResumeSavedLabel,
+  ttsResumeCurrentLabel,
+  ttsResumeSameView,
+  toggleTts,
+  startTtsPlayback,
+  resumeTtsPlayback,
+  followTtsPosition,
+  prefetchTts,
+  handleTtsProviderUpdate,
+  handleTtsRateUpdate,
+  applyTtsUpdate,
+  openTtsColorPicker,
+  closeTtsColorPicker,
+  resumeTtsAtSavedPosition,
+  startTtsFromHereAwaitingTap,
+  cancelTtsResumeDialog,
+} = readAloud
 
-const ttsStatus = computed(() => tts.status.value)
-const ttsProgress = computed(() => tts.progress.value)
-const ttsActiveIndex = computed(() => tts.activeIndex.value)
-const ttsWordCount = computed(() => tts.wordCount.value)
-const ttsCurrentProvider = computed(() => tts.currentProvider.value)
-const isLeavingReader = ref(false)
-const ttsIsActive = computed(() => tts.isActive.value && !isLeavingReader.value)
-const ttsFollowTarget = computed(() => tts.followTarget.value)
-const ttsFollowTargetOffViewport = computed(() => tts.followTargetOffViewport.value)
-const ttsFollowTargetAway = computed(() => {
-  const target = ttsFollowTarget.value
-  return Boolean(target && target.sectionIndex !== sectionIndex.value)
-})
-const showTtsFollowAlong = computed(() => {
-  if (!ttsIsActive.value || ttsStatus.value === 'error') return false
-  // Show whenever the spoken word is not on the current paginated page / scrolled viewport,
-  // or when the user is in a different spine section than the TTS word.
-  return ttsFollowTargetAway.value || ttsFollowTargetOffViewport.value
+const {
+  isSaving: isSavingAnnotation,
+  handleHighlight,
+  handleOpenNoteDialog,
+  handleSaveNote,
+  handleDeleteAnnotation: deleteReaderAnnotation,
+} = useReaderAnnotationActions({
+  bookId,
+  fileId,
+  chapterTitle,
+  annotations,
+  selection,
+  addAnnotation,
+  redrawAnnotation,
+  deleteAnnotation,
 })
 
-watch(ttsIsActive, async (active) => {
-  await nextTick()
-  if (active) {
-    attachTtsToolbarResizeObserver()
-  } else {
-    ttsToolbarResizeObserver?.disconnect()
-    ttsToolbarResizeObserver = null
-  }
-  requestAnimationFrame(() => {
-    refreshReaderLayout()
-  })
+const marksDrawn = ref(false)
+const { refreshMarks } = useReaderMarksRefresh({
+  bookId,
+  fileId,
+  annotations,
+  bookmarks,
+  canRefresh: () => marksDrawn.value && !isSavingAnnotation.value && !initialNavigationPending.value,
+  addAnnotation,
+  redrawAnnotation,
+  deleteAnnotation,
 })
 
-setTextSelectedHandler(selection.show)
+function handleTextSelected(detail: SelectionDetail) {
+  const match = findMatchingCfiRange(annotations.annotations.value, detail.cfi)
+  selection.show(detail, match?.id ?? null)
+}
+
+function handleAnnotationClick(cfi: string, popupPosition: { x: number; y: number; showBelow: boolean }) {
+  const ann = annotations.annotations.value.find((a) => a.cfi === cfi)
+  if (!ann) return
+  selection.show({ text: ann.text, cfi, range: null, popupPosition }, ann.id)
+}
+
+setTextSelectedHandler(handleTextSelected)
+setSelectionInteractionStartHandler(selection.dismiss)
+setAnnotationClickHandler(handleAnnotationClick)
+
+onUnmounted(clearFoliateSource)
 
 onMounted(async () => {
-  const onFullscreenChange = () => {
-    isFullscreen.value = !!document.fullscreenElement
-  }
-  document.addEventListener('fullscreenchange', onFullscreenChange)
-  onUnmounted(() => {
-    document.removeEventListener('fullscreenchange', onFullscreenChange)
-    ttsToolbarResizeObserver?.disconnect()
-    ttsToolbarResizeObserver = null
-  })
-
   // Specialized readers own their own progress/settings/loading lifecycle.
   if (isAudioFormat || isPdfFormat || isComicFormat) return
 
-  await customFonts.fetchFonts()
-  setFontFaceCSS(customFonts.generateFontFaceCSS())
+  void Promise.all([
+    api(`/api/v1/books/${bookId}`)
+      .then((r) => r.json() as Promise<BookDetail>)
+      .then((b) => {
+        bookMeta.value = b
+      })
+      .catch(() => {}),
+    ...(isTtsAvailable ? [loadUserPreferences().catch(() => {})] : []),
+  ])
+
+  await customFonts.fetchAllFonts()
+  await refreshFontFaces()
 
   await progress.load()
-  // Snapshot restore targets before open so intermediate Foliate relocates cannot
-  // clobber the page we intend to reopen.
-  const restoreCfi = progress.cfi.value
-  const restoreFraction = progress.percentage.value > 0 ? progress.percentage.value / 100 : undefined
-  const restoreSectionFraction = progress.sectionFraction.value
-  const restoreTtsPosition = progress.getTtsPosition()
-  const pendingTtsSession = readTtsPlaybackSession(fileId)
-  const shouldRestoreTtsToolbar = Boolean(pendingTtsSession?.enabled)
-  if (shouldRestoreTtsToolbar) {
-    alignTtsSessionWithProgress(restoreTtsPosition ?? undefined)
-  }
 
   await bookSettings.load()
-  void tts.warmUp()
   const effective = bookSettings.effective.value as EpubReaderSettings
   if (effective.footerDisplayMode !== undefined) {
     footerMode.value = effective.footerDisplayMode
@@ -518,107 +1083,80 @@ onMounted(async () => {
     shouldApplyStyles.value = false
   }
 
-  const cachedProgress = readCachedReaderProgress(fileId)
-  const hadProgress = progress.percentage.value > 0 || Boolean(restoreCfi) || cachedProgress !== null
+  const restoringReadAloud = await readAloud.prepareRestore()
 
-  // 1) Restore TTS chrome first so pagination/scroll geometry matches last session.
-  if (shouldRestoreTtsToolbar) {
-    await settleTtsChromeLayout()
-  }
-
-  // 2) Only after chrome is settled, restore the exact previous page.
-  await open(bookId, fileId, fileFormat, restoreCfi, restoreFraction, {
-    hasCachedProgress: hadProgress,
+  const deepLinkCfi = typeof route.query.cfi === 'string' ? route.query.cfi : null
+  const hadProgress = progress.percentage.value > 0
+  const resumeTarget = resolveReaderResumeTarget(deepLinkCfi ? undefined : route.query.checkpoint, progress.cfi.value, progress.percentage.value)
+  // The saved page fraction only belongs to the saved position, not to a checkpoint link.
+  const restoreSectionFraction = resumeTarget.cfi !== null && resumeTarget.cfi === progress.cfi.value ? progress.sectionFraction.value : null
+  const savedNarration = await resolveSavedNarrationPos()
+  await open(bookId, fileId, fileFormat, {
+    cfi: resumeTarget.cfi,
+    fallbackFraction: resumeTarget.fraction,
     fixedLayoutSpread: state.value.fixedLayoutSpread,
+    hasCachedProgress: resumeTarget.cfi !== null || (resumeTarget.fraction ?? 0) > 0,
     sectionFraction: restoreSectionFraction,
+    mediaOverlayFragment: savedNarration?.fragment,
+    mediaOverlaySectionIndex: savedNarration?.section,
   })
   setChapters(getChapters())
   sectionFractions.value = getSectionFractions()
-
-  await waitForInitialRestore()
-
-  // Re-apply the snapshot after toolbar reflow so we do not land on a chapter-start
-  // intermediate page that Foliate may have emitted during open.
-  if (restoreCfi) {
-    await goTo(restoreCfi)
-  } else if (restoreFraction !== undefined && restoreFraction > 0) {
-    await goToFraction(restoreFraction)
+  await readAloud.finishRestore(resumeTarget.cfi, restoreSectionFraction)
+  await bookmarks.load(bookId, fileId)
+  await annotations.load(bookId, fileId)
+  if (bookmarks.loadError.value || annotations.loadError.value) toast.error(t('reader.toast.marksLoadFailed'))
+  const drawableAnnotations = annotations.annotations.value.filter((a): a is typeof a & { cfi: string } => a.cfi != null)
+  if (drawableAnnotations.length > 0) {
+    addAnnotations(
+      drawableAnnotations.map((a) => ({
+        cfi: a.cfi,
+        color: a.color,
+        style: a.style,
+      })),
+    )
   }
+  marksDrawn.value = true
+  await readAloud.refreshHighlightIfActive()
+  void hydrateSidebarLocationMeta()
 
-  // Paginated EPUB: CFI alone can still land one visual page early (boundary glyphs /
-  // multi-page blocks). Re-snap with the saved section page fraction after CFI loads
-  // the correct spine section.
-  if (restoreSectionFraction != null && Number.isFinite(restoreSectionFraction)) {
-    const renderer = getRenderer() as FoliateRenderer | null
-    if (renderer && renderer.scrolled !== true && typeof renderer.scrollToAnchor === 'function') {
-      await renderer.scrollToAnchor(restoreSectionFraction).catch(() => {})
+  if (deepLinkCfi) {
+    try {
+      await goTo(deepLinkCfi)
+    } catch {
+      toast.error(t('reader.toast.linkedHighlightError'))
     }
   }
 
-  // Persist the settled exact page/scroll once (saves were suppressed during open).
-  if (hadProgress && (progress.cfi.value || progress.percentage.value > 0)) {
-    void progress.save().catch(() => {})
+  initialNavigationPending.value = error.value !== null
+
+  const resumedPercentage = resumeTarget.checkpointPercentage ?? (hadProgress ? progress.percentage.value : null)
+  if (resumedPercentage !== null && !restoringReadAloud) {
+    const pct = Math.round(resumedPercentage)
+    const label = chapterTitle.value || t('reader.chapterNumber', { number: sectionIndex.value + 1 })
+    toast.info(t('reader.toast.resumed', { pct, label }), { duration: 2500 })
   }
 
-  // 3) Finish TTS mode: highlight/resume on the restored page without jumping away
-  // unless auto-resume needs the saved TTS section (playing across sections).
-  if (shouldRestoreTtsToolbar) {
-    const sectionBeforeTts = sectionIndex.value
-    const savedTts = restoreTtsPosition ?? progress.getTtsPosition()
-    if (savedTts && pendingTtsSession?.wasPlaying && savedTts.sectionIndex !== sectionIndex.value) {
-      await ensureReaderAtTtsPosition(savedTts)
-    }
-    alignTtsSessionWithProgress(savedTts ?? undefined)
-    const ttsRestoreResult = await tts.restoreTtsAfterReload()
-    if (ttsRestoreResult === 'resumed') {
-      toast.info('Resumed read aloud', { duration: 2500 })
-    } else if (tts.isActive.value) {
+  if (isTtsAvailable) {
+    // Load saved TTS position and show its marker immediately on open.
+    await ttsPosition.loadPosition(fileId)
+    if (ttsPosition.hasSavedPosition.value) {
       await nextTick()
-      attachTtsToolbarResizeObserver()
-      refreshReaderLayout()
-      tts.refreshTtsHighlight()
+      applySavedTtsResumeHighlight()
     }
-
-    // TTS highlight restore / residual auto-resume must not leave us on the wrong
-    // page or the next spine section. Re-snap to the pre-TTS reading position when
-    // we are still on the same section the book opened to.
-    if (sectionIndex.value === sectionBeforeTts) {
-      if (restoreCfi) {
-        await goTo(restoreCfi).catch(() => {})
-      }
-      if (restoreSectionFraction != null && Number.isFinite(restoreSectionFraction)) {
-        const renderer = getRenderer() as FoliateRenderer | null
-        if (renderer && renderer.scrolled !== true && typeof renderer.scrollToAnchor === 'function') {
-          await renderer.scrollToAnchor(restoreSectionFraction).catch(() => {})
-        }
-      }
-      if (tts.isActive.value) {
-        tts.restoreTtsHighlightNow()
-      }
-    }
-  }
-
-  await bookmarks.load(bookId)
-  await annotations.load(bookId)
-  if (annotations.annotations.value.length > 0) {
-    addAnnotations(annotations.annotations.value.map((a) => ({ cfi: a.cfi, color: a.color, style: a.style })))
-    if (tts.isActive.value) {
-      await nextTick()
-      tts.refreshTtsHighlight()
-    }
-  }
-
-  if (hadProgress && !shouldRestoreTtsToolbar) {
-    const pct = Math.round(progress.percentage.value)
-    const label = chapterTitle.value || `Chapter ${sectionIndex.value + 1}`
-    toast.info(`Resumed at ${pct}% - ${label}`, { duration: 2500 })
   }
 })
 
 const epubSetters: Record<string, (v: unknown) => void> = {
   fontSize: (v) => setFontSize(v as number),
   lineHeight: (v) => setLineHeight(v as number),
+  paragraphSpacing: (v) => setParagraphSpacing(v as number),
+  letterSpacing: (v) => setLetterSpacing(v as number | null),
+  wordSpacing: (v) => setWordSpacing(v as number | null),
+  textIndent: (v) => setTextIndent(v as number | null),
   fontFamily: (v) => setFontFamily(v as string | null),
+  fontWeight: (v) => setFontWeight(v as number),
+  fontStyle: (v) => setFontStyle(v as EpubReaderSettings['fontStyle']),
   maxColumnCount: (v) => setMaxColumnCount(v as number),
   gap: (v) => setGap(v as number),
   maxInlineSize: (v) => setMaxInlineSize(v as number),
@@ -638,43 +1176,43 @@ function seedState(partial: Partial<ReaderState>) {
     epubSetters[key]?.(value)
   }
   const renderer = getRenderer()
-  if (renderer) applyToRenderer(renderer)
+  if (renderer) applyToRenderer(renderer, isFixedLayout.value ? { flow: 'paginated' } : undefined)
+}
+
+async function reopenEpubAtCurrentLocation() {
+  const fallbackFraction = fraction.value > 0 ? fraction.value : progress.percentage.value > 0 ? progress.percentage.value / 100 : undefined
+  await open(bookId, fileId, fileFormat, null, fallbackFraction, {
+    fixedLayoutSpread: state.value.fixedLayoutSpread,
+  })
+  setChapters(getChapters())
+  sectionFractions.value = getSectionFractions()
 }
 
 // Applies a user-initiated change: updates reactive refs AND saves the changed field to delta.
 // Also enables style injection from this point forward (user has opted in by changing something).
 async function applyUpdate(partial: Partial<ReaderState>) {
-  const shouldReopenForSpread =
-    partial.fixedLayoutSpread !== undefined && partial.fixedLayoutSpread !== state.value.fixedLayoutSpread
+  const shouldReopenForSpread = partial.fixedLayoutSpread !== undefined && partial.fixedLayoutSpread !== state.value.fixedLayoutSpread
   shouldApplyStyles.value = true
   seedState(partial)
-
-  if ('themeName' in partial && partial.themeName) {
+  if (partial.themeName) {
     bookSettings.updateGlobalSettings(buildThemeSwitchHighlightPatch(effectiveEpubSettings.value, partial.themeName) as Partial<ReaderState>)
   } else {
     bookSettings.updateGlobalSettings(partial)
   }
-
   if (shouldReopenForSpread) {
-    const fallbackFraction =
-      fraction.value > 0 ? fraction.value : progress.percentage.value > 0 ? progress.percentage.value / 100 : undefined
-    await open(bookId, fileId, fileFormat, null, fallbackFraction, {
-      fixedLayoutSpread: state.value.fixedLayoutSpread,
-    })
-    sectionFractions.value = getSectionFractions()
+    await reopenEpubAtCurrentLocation()
   }
 }
 
-provide(epubReaderUiKey, {
-  state,
-  applyUpdate,
-})
-
-function toggleFullscreen() {
-  if (document.fullscreenElement) {
-    document.exitFullscreen?.()
-  } else {
-    document.documentElement.requestFullscreen?.()
+// Drops this book's overrides and falls back to the reader defaults. The renderer keeps
+// injecting styles so the change is visible immediately rather than only after a reopen.
+async function resetSettings() {
+  const previousSpread = state.value.fixedLayoutSpread
+  bookSettings.resetBookSettings()
+  shouldApplyStyles.value = true
+  seedState(bookSettings.effective.value as EpubReaderSettings)
+  if (state.value.fixedLayoutSpread !== previousSpread) {
+    await reopenEpubAtCurrentLocation()
   }
 }
 
@@ -697,331 +1235,114 @@ watch([showSettings, showTtsSettings], ([settingsOpen, ttsSettingsOpen]) => {
   setVisibilityLock(settingsOpen || ttsSettingsOpen)
 })
 
-watch(
-  () => tts.error.value,
-  (message) => {
-    if (message) toast.error(message)
-  },
-)
-
-const TTS_SETTINGS_PATCH_KEYS = [
-  'ttsProvider',
-  'ttsVoice',
-  'ttsRate',
-  'ttsPitch',
-  'ttsVolume',
-  'ttsGcpChirp3Voice',
-  'ttsAzureVoice',
-  'ttsXaiVoice',
-  'ttsKokoroVoice',
-  'ttsGpt4oMiniVoice',
-] as const satisfies readonly (keyof EpubReaderSettings)[]
-
-function applyTtsUpdate(patch: Partial<EpubReaderSettings>) {
-  if ('ttsSentenceHighlightColor' in patch || 'ttsWordHighlightColor' in patch) {
-    bookSettings.updateGlobalSettings(buildThemeHighlightPatch(effectiveEpubSettings.value, patch) as Partial<EpubReaderSettings>)
-    return
-  }
-
-  bookSettings.updateGlobalSettings(patch)
-
-  if (TTS_SETTINGS_PATCH_KEYS.some((key) => key in patch)) {
-    tts.applyTtsSettingsChange()
-  }
-}
-
-function openTtsColorPicker(target: 'sentence' | 'word') {
-  showTtsSettings.value = false
-  ttsColorPickerTarget.value = target
-}
-
-function closeTtsColorPicker() {
-  ttsColorPickerTarget.value = null
-}
-
-async function handleTtsSectionComplete() {
-  if (ttsAutoAdvancing.value) return
-  if (sectionIndex.value >= totalSections.value - 1) return
-
-  ttsAutoAdvancing.value = true
-  try {
-    const nextSection = sectionIndex.value + 1
-    progress.updateTtsPosition(nextSection, 0)
-    await goToSection(nextSection)
-    await nextTick()
-    await tts.start(0, { userInitiated: false })
-  } finally {
-    ttsAutoAdvancing.value = false
-  }
-}
-
-function formatSectionLabel(index: number, title?: string): string {
-  return title?.trim() || `Section ${index + 1}`
-}
-
-const ttsResumeSavedLabel = computed(() => {
-  const saved = pendingTtsResume.value
-  if (!saved) return ''
-  if (saved.sectionIndex === sectionIndex.value) return 'your last position'
-  return formatSectionLabel(saved.sectionIndex)
-})
-
-const ttsResumeCurrentLabel = computed(() => {
-  const saved = pendingTtsResume.value
-  if (saved && saved.sectionIndex === sectionIndex.value) return 'this page'
-  return formatSectionLabel(sectionIndex.value, chapterTitle.value)
-})
-
-const ttsResumeSameView = computed(() => {
-  const saved = pendingTtsResume.value
-  return Boolean(saved && saved.sectionIndex === sectionIndex.value)
-})
-
-/**
- * Wait for content-area height to reflow after TTS chrome appears or disappears.
- * `.reader-content-area` uses a 300ms bottom transition — must wait past that or the
- * final column layout (and our re-anchor) race mid-animation.
- */
-async function waitForTtsChromeLayoutSettle() {
-  await nextTick()
-  refreshReaderLayout()
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve())
-    })
-  })
-  // Match main.css `.reader-content-area { transition: bottom 300ms }` + a frame for
-  // Foliate's ResizeObserver → expand → columnize to finish after the height sticks.
-  await new Promise<void>((resolve) => {
-    window.setTimeout(resolve, 360)
-  })
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve())
-    })
-  })
-}
-
-/**
- * Pin Foliate to the first on-screen word, run a chrome change, then re-pin after reflow.
- * Used when the TTS toolbar appears or disappears so page breaks don't drift.
- */
-async function withViewportWordAnchor(runChromeChange: () => void | Promise<void>) {
-  const layoutAnchorWordIndex = await tts.anchorViewportToFirstVisibleWord()
-  await runChromeChange()
-  await waitForTtsChromeLayoutSettle()
-  if (layoutAnchorWordIndex !== null) {
-    // Re-pin with lead fine-tune after height has fully settled (fresh Range).
-    await tts.anchorViewportToWord(layoutAnchorWordIndex)
-  }
-}
-
-/** Show the TTS toolbar and wait for content-area height to reflow (reload restore + play entry). */
-async function settleTtsChromeLayout() {
-  // Before chrome appears: pin Foliate's layout anchor to the first on-screen word.
-  // The toolbar shrinks the content area and re-paginates; with this anchor set first,
-  // Foliate's resize/expand path keeps that word as the page start instead of drifting.
-  await withViewportWordAnchor(async () => {
-    tts.prepareUi()
-    await nextTick()
-    attachTtsToolbarResizeObserver()
-  })
-}
-
-/** Hide the TTS toolbar while keeping the first on-screen word as the layout anchor. */
-async function dismissTtsChromeLayout(stopOptions?: { checkpoint?: boolean }) {
-  // Before chrome leaves: pin the first visible word so expanding the content area
-  // re-paginates around that word instead of jumping the reading position.
-  await withViewportWordAnchor(() => {
-    tts.stop(stopOptions)
-    showTtsSettings.value = false
-    ttsColorPickerTarget.value = null
-    ttsToolbarResizeObserver?.disconnect()
-    ttsToolbarResizeObserver = null
-  })
-}
-
-function remindTapToStartReading() {
-  toast.info('Tap anywhere on the page to start reading from that sentence.', { duration: 4500 })
-}
-
-function cancelTtsResumeDialog() {
-  showTtsResumeDialog.value = false
-  pendingTtsResume.value = null
-  // Chrome may already be open from layout settle; dismiss if nothing is playing.
-  if (tts.status.value === 'idle' || tts.status.value === 'done' || tts.status.value === 'error') {
-    void dismissTtsChromeLayout({ checkpoint: false })
-  }
-}
-
-async function resumeTtsAtSavedPosition() {
-  const saved = pendingTtsResume.value
-  showTtsResumeDialog.value = false
-  pendingTtsResume.value = null
-  if (!saved) return
-
-  await ensureReaderAtTtsPosition(saved)
-  await tts.start(saved.wordIndex)
-}
-
-/** Stay on this page: enable TTS and wait for a tap to pick the starting sentence. */
-async function startTtsFromHereAwaitingTap() {
-  showTtsResumeDialog.value = false
-  pendingTtsResume.value = null
-  await settleTtsChromeLayout()
-  remindTapToStartReading()
-}
-
-/**
- * Speaker / play entry point.
- * - Last-read page still in view → resume from that word.
- * - Any other page with a saved position → prompt resume vs read from here.
- * - No saved position → enable TTS only; tap a sentence to start.
- */
-async function startTtsFromSavedProgress() {
-  try {
-    await progress.flush()
-  } catch {
-    // Continue with the last known snapshot if the flush fails.
-  }
-  await progress.refreshFromServer()
-
-  const saved = progress.getTtsPosition()
-  // Reserve chrome first so viewport metrics match the TTS layout.
-  await settleTtsChromeLayout()
-
-  if (saved) {
-    const savedWordVisibleInViewport =
-      saved.sectionIndex === sectionIndex.value ? tts.isWordVisibleInViewport(saved.wordIndex) : false
-    const awayFromLastRead = isAwayFromLastTtsPosition({
-      savedSectionIndex: saved.sectionIndex,
-      currentSectionIndex: sectionIndex.value,
-      savedWordVisibleInViewport,
-    })
-    if (awayFromLastRead) {
-      pendingTtsResume.value = saved
-      showTtsResumeDialog.value = true
-      return
-    }
-    await tts.start(saved.wordIndex, { userInitiated: true, preserveViewport: true })
-    return
-  }
-
-  // No prior TTS position — enable and wait for tap.
-  remindTapToStartReading()
-}
-
-async function startTtsPlayback() {
-  if (tts.status.value === 'paused') {
-    await resumeTtsPlayback()
-    return
-  }
-
-  if (tts.status.value === 'loading') {
-    tts.stop({ checkpoint: false })
-  }
-
-  // Already enabled and idle: play button resumes last position only if it is still in view;
-  // otherwise stay idle so the user can tap a sentence on this page.
-  if (tts.isActive.value && (tts.status.value === 'idle' || tts.status.value === 'done' || tts.status.value === 'error')) {
-    const saved = progress.getTtsPosition()
-    if (saved && saved.sectionIndex === sectionIndex.value && tts.isWordVisibleInViewport(saved.wordIndex)) {
-      await tts.start(saved.wordIndex, { userInitiated: true, preserveViewport: true })
-      return
-    }
-    // Not on last-read page — remind and wait for a page tap.
-    if (!showTtsResumeDialog.value) {
-      remindTapToStartReading()
-    }
-    return
-  }
-
-  await startTtsFromSavedProgress()
-}
-
-async function followTtsPosition() {
-  const target = ttsFollowTarget.value ?? progress.getTtsPosition()
-  // Jump to the TTS section when needed, rebuild the highlight, then scroll/page
-  // exactly to the spoken word (paginated page turn or scrolled keep-in-view).
-  if (target && target.sectionIndex !== sectionIndex.value) {
-    await ensureReaderAtTtsPosition(target)
-    await nextTick()
-  }
-  tts.restoreTtsHighlightNow()
-  await nextTick()
-  tts.resumeScrollFollow()
-  // Layout may still be settling after a section change — re-jump once more.
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve())
-    })
-  })
-  tts.resumeScrollFollow()
-}
-
-async function resumeTtsPlayback() {
-  const target = ttsFollowTarget.value
-  if (target && target.sectionIndex !== sectionIndex.value) {
-    await followTtsPosition()
-  }
-  tts.resume()
-}
-
-function toggleTts() {
-  if (tts.isActive.value) {
-    void dismissTtsChromeLayout()
-    return
-  }
-  selection.dismiss()
-  void startTtsPlayback()
+async function handleBack() {
+  await leaveReader(router, { onLeaving: readAloud.markLeaving })
 }
 
 watch(
-  () => customFonts.fonts.value,
-  () => {
-    setFontFaceCSS(customFonts.generateFontFaceCSS())
-    const renderer = getRenderer()
-    if (renderer && shouldApplyStyles.value) applyToRenderer(renderer)
+  () => isNavigationLocked.value,
+  (locked) => {
+    if (!locked) return
+    selection.dismiss()
+    showDictionary.value = false
+    showTranslation.value = false
   },
 )
 
-async function handleHighlight(color: string, style: string, note?: string) {
-  const annotationCfi = selection.cfi.value
-  if (!selection.text.value || !annotationCfi) return
-  const created = await annotations.create(bookId, {
-    cfi: annotationCfi,
-    text: selection.text.value,
-    color,
-    style,
-    note: note ?? null,
-    chapterTitle: chapterTitle.value || null,
-  })
-  if (created) {
-    addAnnotation(created.cfi, created.color, created.style)
-  }
-  selection.dismiss()
+watch(
+  () => isOverlayFooterVisible.value,
+  (visible) => {
+    setReaderFooterVisible(visible)
+  },
+  { immediate: true },
+)
+
+// Only the selected family is held in memory, so the blob URLs backing the injected
+// CSS have to be refreshed whenever either the selection or the font list changes.
+async function refreshFontFaces() {
+  await customFonts.ensureCssFamilyLoaded(state.value.fontFamily)
+  setFontFaceCSS(customFonts.generateFontFaceCSS())
+  const renderer = getRenderer()
+  if (renderer && shouldApplyStyles.value) applyToRenderer(renderer, isFixedLayout.value ? { flow: 'paginated' } : undefined)
 }
 
-async function handleSaveNote(note: string) {
-  await handleHighlight('#FACC15', 'highlight', note)
-  selection.showNoteDialog.value = false
-  selection.noteText.value = ''
-}
+watch(() => [customFonts.fonts.value, customFonts.serverFonts.value], refreshFontFaces)
+
+watch(() => state.value.fontFamily, refreshFontFaces)
 
 function handleDeleteAnnotation(id: number) {
-  const ann = annotations.annotations.value.find((a) => a.id === id)
-  if (ann) {
-    deleteAnnotation(ann.cfi)
-    annotations.remove(bookId, id)
-  }
+  void deleteReaderAnnotation(id)
   selection.dismiss()
 }
 
 function handleSidebarDeleteAnnotation(id: number) {
-  const ann = annotations.annotations.value.find((a) => a.id === id)
-  if (ann) {
-    deleteAnnotation(ann.cfi)
-    annotations.remove(bookId, id)
+  void deleteReaderAnnotation(id)
+}
+
+async function handleSidebarDeleteBookmark(id: number) {
+  if (!(await bookmarks.remove(bookId, id))) toast.error(t('reader.toast.bookmarkDeleteFailed'))
+}
+
+async function handleSidebarEditBookmark(id: number, title: string, note: string | null) {
+  if (!(await bookmarks.update(bookId, id, { title, note }))) toast.error(t('reader.toast.bookmarkUpdateFailed'))
+}
+
+function getSidebarCfiTargets(): string[] {
+  const targets = new Set<string>()
+  for (const bm of bookmarks.bookmarks.value) {
+    if (bm.cfi) targets.add(bm.cfi)
+  }
+  for (const ann of annotations.annotations.value) {
+    if (ann.cfi) targets.add(ann.cfi)
+  }
+  return Array.from(targets)
+}
+
+function pruneSidebarLocationMeta(targets: string[]) {
+  const targetSet = new Set(targets)
+  const next: Record<string, { chapterTitle: string | null; percentage: number | null }> = {}
+  for (const [cfiKey, meta] of Object.entries(sidebarLocationMetaByCfi.value)) {
+    if (targetSet.has(cfiKey)) {
+      next[cfiKey] = meta
+    }
+  }
+  if (Object.keys(next).length === Object.keys(sidebarLocationMetaByCfi.value).length) return
+  sidebarLocationMetaByCfi.value = next
+}
+
+function toSidebarLocationMeta(context: FoliateLocationContext): {
+  chapterTitle: string | null
+  percentage: number | null
+} {
+  const percentage =
+    typeof context.fraction === 'number' && Number.isFinite(context.fraction) ? Math.max(0, Math.min(100, Math.round(context.fraction * 100))) : null
+  return { chapterTitle: context.chapterTitle, percentage }
+}
+
+async function hydrateSidebarLocationMeta() {
+  const targets = getSidebarCfiTargets()
+  pruneSidebarLocationMeta(targets)
+  if (targets.length === 0) return
+
+  const unresolved = targets.filter((target) => !sidebarLocationMetaByCfi.value[target])
+  if (unresolved.length === 0) return
+
+  const requestSeq = ++sidebarLocationResolveSeq
+  const entries = await Promise.all(
+    unresolved.map(async (target) => {
+      try {
+        const context = await getLocationContext(target)
+        return [target, toSidebarLocationMeta(context)] as const
+      } catch {
+        return [target, { chapterTitle: null, percentage: null }] as const
+      }
+    }),
+  )
+
+  if (requestSeq !== sidebarLocationResolveSeq) return
+  sidebarLocationMetaByCfi.value = {
+    ...sidebarLocationMetaByCfi.value,
+    ...Object.fromEntries(entries),
   }
 }
 
@@ -1042,48 +1363,93 @@ function onSearchClear() {
   clearSearch(foliateView.value as FoliateView | null)
 }
 
+function navigateToTarget(target: string | number) {
+  if (!canRunManualNavigation()) return undefined
+  return goTo(target)
+}
+
+function navigateToFraction(targetFraction: number) {
+  if (!canRunManualNavigation()) return undefined
+  return goToFraction(targetFraction)
+}
+
+function navigateToSection(targetSection: number) {
+  if (!canRunManualNavigation()) return undefined
+  return goToSection(targetSection)
+}
+
 function navigateSearch(cfiTarget: string) {
-  goTo(cfiTarget)
+  navigateToTarget(cfiTarget)
 }
 
-async function handleBack() {
-  await leaveReader(router, {
-    onLeaving: () => {
-      if (!isAudioFormat && !isPdfFormat && !isComicFormat) {
-        isLeavingReader.value = true
-      }
-    },
-  })
+function closeSidebarAfterNavigation() {
+  if (shouldCloseAfterNavigation()) {
+    showSidebar.value = false
+  }
 }
 
-onBeforeRouteLeave(async () => {
-  if (isAudioFormat || isPdfFormat || isComicFormat) return true
-  isLeavingReader.value = true
-  const savedTts = ttsFollowTarget.value ?? progress.getTtsPosition()
-  tts.persistForNavigation({
-    sectionIndex: savedTts?.sectionIndex ?? sectionIndex.value,
-    wordIndex: savedTts?.wordIndex,
-  })
-  await progress.flush()
-  return true
-})
+async function navigateFromSidebar(cfiTarget: string) {
+  const goToPromise = navigateToTarget(cfiTarget)
+  if (!goToPromise) return
+  const navigated = await Promise.resolve(goToPromise)
+    .then(() => true)
+    .catch(() => false)
+  if (!navigated) return
+  closeSidebarAfterNavigation()
+}
+
+function navigateAnnotationChapterFromSidebar(chapterIndex: number) {
+  const goToPromise = navigateToSection(chapterIndex)
+  if (!goToPromise) return
+  void Promise.resolve(goToPromise)
+    .then(() => {
+      closeSidebarAfterNavigation()
+    })
+    .catch(() => undefined)
+}
+
+function navigateChapterFromSidebar(href: string) {
+  void navigateFromSidebar(href)
+}
 
 function closeSearch() {
   onSearchClear()
   searchInitialQuery.value = ''
   showSearch.value = false
 }
+
+watch(showSidebar, (open) => {
+  if (open) {
+    void hydrateSidebarLocationMeta()
+  }
+})
+
+watch(
+  () => [bookmarks.bookmarks.value.map((bm) => bm.cfi).join('|'), annotations.annotations.value.map((ann) => ann.cfi).join('|')],
+  () => {
+    if (showSidebar.value) {
+      void hydrateSidebarLocationMeta()
+    }
+  },
+)
+
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', handleReaderReturn)
+  window.removeEventListener('focus', handleReaderReturn)
+  mediaOverlayStartId++
+  setReaderFooterVisible(false)
+  mediaOverlay.stop()
+})
 </script>
 
 <template>
-  <PdfV4ReaderView v-if="isPdfFormat" :bookId="bookId" :fileId="fileId" />
-  <CbzReaderView v-else-if="isComicFormat" :bookId="bookId" :fileId="fileId" />
-  <AudiobookReaderView v-else-if="isAudioFormat" :bookId="bookId" :fileId="fileId" />
+  <PdfV4ReaderView v-if="isPdfFormat" :bookId="bookId" :fileId="fileId" :peek-mode="isPeekMode" />
+  <CbzReaderView v-else-if="isComicFormat" :bookId="bookId" :fileId="fileId" :peek-mode="isPeekMode" :source="pageImageSource" />
+  <AudiobookReaderView v-else-if="isAudioFormat" :bookId="bookId" :fileId="fileId" :peek-mode="isPeekMode" />
   <div
     v-else
     ref="readerShellRef"
     class="reader-shell fixed inset-0 overflow-hidden"
-    :class="{ 'reader-tts-active': ttsIsActive }"
     :style="
       shouldApplyStyles ? { background: activeMode.bg, colorScheme: isDark ? 'dark' : 'light' } : { background: '#ffffff', colorScheme: 'light' }
     "
@@ -1093,21 +1459,38 @@ function closeSearch() {
       :isBookmarked="bookmarks.isCurrentCfiBookmarked.value"
       :settings-open="showSettings"
       :footerMode="footerMode"
+      :peek-mode="isPeekMode"
+      :isTtsActive="isTtsActive || (mediaOverlay.isActive.value && mediaOverlay.isPlaying.value)"
+      :isTtsAvailable="isTtsAvailable"
+      :isMediaOverlay="isMediaOverlayAvailable"
+      :isPinned="isPinned"
+      :showTapZones="showTapZones"
       :tts-active="ttsIsActive"
       class="transition-all duration-300"
-      :class="headerVisible || ttsIsActive ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'"
-      @back="handleBack()"
+      :class="(headerVisible || ttsIsActive) && !showTapZones ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'"
+      @back="handleBack"
       @toggleSidebar="showSidebar = !showSidebar"
       @toggleSearch="showSearch = !showSearch"
-      @toggleBookmark="bookmarks.toggle(bookId, cfi ?? '', chapterTitle)"
-      @toggleTts="toggleTts"
+      @toggleBookmark="handleToggleBookmark"
       @update:settings-open="setSettingsOpen"
       @toggleFullscreen="toggleFullscreen"
       @toggleHelp="toggleHelpModal"
       @cycleFooterMode="cycleFooterMode"
+      @startReading="startTrackedReading"
+      @startTts="handleStartListen"
+      @toggleTts="toggleTts"
+      @togglePin="togglePinned"
+      @toggleTapZones="showTapZones = !showTapZones"
     >
       <template #settingsPanel>
-        <ReaderSettingsPanel :state="state" :customFonts="customFonts" @update="applyUpdate" />
+        <ReaderSettingsPanel
+          :state="state"
+          :customFonts="customFonts"
+          :is-fixed-layout="isFixedLayout"
+          :can-reset="bookSettings.isCustomized.value"
+          @update="applyUpdate"
+          @reset="resetSettings"
+        />
       </template>
     </ReaderHeader>
 
@@ -1117,22 +1500,274 @@ function closeSearch() {
       </div>
     </Transition>
 
-    <div class="reader-content-area absolute inset-x-0 top-0">
+    <div class="absolute inset-0">
       <div v-if="loading || restoring" class="absolute inset-0 flex items-center justify-center z-10 bg-background">
         <div class="flex flex-col items-center gap-3">
           <div class="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-          <p class="text-sm text-muted-foreground">{{ restoring ? 'Restoring reader…' : 'Loading book…' }}</p>
+          <p class="text-sm text-muted-foreground">
+            {{ t('reader.loadingBook') }}
+          </p>
         </div>
       </div>
 
       <div v-if="error && !loading" class="absolute inset-0 flex items-center justify-center z-10 p-8 bg-background">
         <div class="text-center max-w-sm">
-          <p class="text-sm font-medium mb-2 text-foreground">Failed to load book</p>
+          <p class="text-sm font-medium mb-2 text-foreground">
+            {{ t('reader.failedToLoadBook') }}
+          </p>
           <p class="text-xs text-muted-foreground">{{ error }}</p>
         </div>
       </div>
 
       <div ref="containerRef" class="absolute inset-0" />
+      <div
+        v-if="isNavigationLocked"
+        class="absolute inset-0 z-[40] touch-none"
+        @pointerdown.stop.prevent="handleBlockedPageInteraction"
+        @touchstart.stop.prevent="handleBlockedPageInteraction"
+        @click.stop.prevent="handleBlockedPageInteraction"
+      />
+
+      <!-- Tap/Click Zones Reference Overlay -->
+      <Transition name="fade">
+        <div v-if="showTapZones" class="absolute inset-0 z-20 pointer-events-none flex select-none">
+          <!-- Floating Exit Button -->
+          <button
+            class="absolute top-4 right-4 z-50 px-3.5 py-2 rounded-xl bg-background/90 text-foreground border border-border/80 shadow-lg hover:bg-background pointer-events-auto flex items-center gap-2 text-xs font-semibold cursor-pointer transition-all duration-200 active:scale-95 animate-pulse"
+            @click="showTapZones = false"
+            title="Close Guide"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="lucide lucide-x text-primary"
+            >
+              <line x1="18" x2="6" y1="6" y2="18" />
+              <line x1="6" x2="18" y1="6" y2="18" />
+            </svg>
+            <span>Exit Guide</span>
+          </button>
+
+          <!-- Mobile Guide -->
+          <div v-if="isMobile" class="w-full h-full flex flex-col items-center justify-center bg-primary/[0.24] backdrop-blur-[4px] p-6 text-center">
+            <div
+              class="flex flex-col items-center gap-4 p-6 max-w-sm rounded-2xl bg-background/90 border border-border/70 shadow-2xl text-muted-foreground"
+            >
+              <div class="flex gap-4 items-center">
+                <span class="p-3 rounded-full bg-primary/10 text-primary">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="lucide lucide-touchpad"
+                  >
+                    <rect width="20" height="20" x="2" y="2" rx="2" />
+                    <path d="M12 14v4" />
+                    <path d="M10 16h4" />
+                    <circle cx="12" cy="8" r="2" />
+                  </svg>
+                </span>
+                <span class="p-3 rounded-full bg-primary/10 text-primary">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    class="lucide lucide-hand"
+                  >
+                    <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0" />
+                    <path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
+                    <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v4.5" />
+                    <path
+                      d="M6 14.5V11a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v7.5A8.5 8.5 0 0 0 10.5 27h3A8.5 8.5 0 0 0 22 18.5V14a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v.5"
+                    />
+                  </svg>
+                </span>
+              </div>
+              <div>
+                <h3 class="text-sm font-semibold tracking-wide uppercase text-foreground mb-1">Mobile Interactions</h3>
+                <p class="text-xs text-muted-foreground mb-4">Optimized for handheld touch reading</p>
+                <div class="space-y-3 text-left">
+                  <div class="flex items-start gap-2.5">
+                    <span class="w-1.5 h-1.5 rounded-full bg-primary mt-1.5" />
+                    <div>
+                      <p class="text-xs font-medium text-foreground">Tap Anywhere</p>
+                      <p class="text-[10px] text-muted-foreground">Toggles the header and footer overlays</p>
+                    </div>
+                  </div>
+                  <div class="flex items-start gap-2.5">
+                    <span class="w-1.5 h-1.5 rounded-full bg-primary mt-1.5" />
+                    <div>
+                      <p class="text-xs font-medium text-foreground">Swipe Left / Right</p>
+                      <p class="text-[10px] text-muted-foreground">Turns pages smoothly forward or backward</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Desktop Guide -->
+          <div v-else class="w-full h-full flex flex-col">
+            <!-- Top Zone (64px) -->
+            <div
+              class="h-16 w-full flex items-center justify-center border-b-2 border-dashed border-primary/40 bg-primary/[0.18] backdrop-blur-[3px] shrink-0"
+            >
+              <div
+                class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/90 border border-border/70 shadow-md text-muted-foreground text-center animate-pulse"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="lucide lucide-menu text-primary"
+                >
+                  <line x1="4" x2="20" y1="12" y2="12" />
+                  <line x1="4" x2="20" y1="6" y2="6" />
+                  <line x1="4" x2="20" y1="18" y2="18" />
+                </svg>
+                <span class="text-xs font-semibold tracking-wide uppercase text-foreground">Toggle Header</span>
+                <span class="text-[10px] text-muted-foreground">Click top edge (y &lt; 64px)</span>
+              </div>
+            </div>
+
+            <!-- Central Content Area -->
+            <div class="flex-1 w-full flex min-h-0">
+              <!-- Left Zone (30%) -->
+              <div class="w-[30%] h-full flex flex-col items-center justify-center border-r-2 border-dashed border-primary/40 bg-primary/[0.08]">
+                <div
+                  class="flex flex-col items-center gap-2 p-4 mx-2 rounded-xl bg-background/90 border border-border/70 shadow-md text-muted-foreground animate-pulse text-center"
+                >
+                  <span class="p-2 rounded-full bg-primary/10 text-primary">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      class="lucide lucide-chevron-left"
+                    >
+                      <path d="m15 18-6-6 6-6" />
+                    </svg>
+                  </span>
+                  <span class="text-xs font-semibold tracking-wide uppercase text-foreground">Previous Page</span>
+                  <span class="text-[10px] text-muted-foreground max-w-[120px]">Click left 30%</span>
+                </div>
+              </div>
+
+              <!-- Middle Zone (40%) -->
+              <div class="w-[40%] h-full flex flex-col items-center justify-center border-r-2 border-dashed border-primary/40 bg-transparent">
+                <div
+                  class="flex flex-col items-center gap-2 p-4 mx-2 rounded-xl bg-background/90 border border-border/70 text-muted-foreground text-center shadow-md animate-pulse"
+                >
+                  <span class="p-2 rounded-full bg-primary/10 text-primary">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      class="lucide lucide-menu"
+                    >
+                      <line x1="4" x2="20" y1="12" y2="12" />
+                      <line x1="4" x2="20" y1="6" y2="6" />
+                      <line x1="4" x2="20" y1="18" y2="18" />
+                    </svg>
+                  </span>
+                  <span class="text-xs font-semibold tracking-wide uppercase text-foreground">Toggle Header & Footer</span>
+                  <span class="text-[10px] text-muted-foreground max-w-[120px]">Click center 40%</span>
+                </div>
+              </div>
+
+              <!-- Right Zone (30%) -->
+              <div class="w-[30%] h-full flex flex-col items-center justify-center bg-primary/[0.08]">
+                <div
+                  class="flex flex-col items-center gap-2 p-4 mx-2 rounded-xl bg-background/90 border border-border/70 shadow-md text-muted-foreground animate-pulse text-center"
+                >
+                  <span class="p-2 rounded-full bg-primary/10 text-primary">
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      class="lucide lucide-chevron-right"
+                    >
+                      <path d="m9 18 6-6-6-6" />
+                    </svg>
+                  </span>
+                  <span class="text-xs font-semibold tracking-wide uppercase text-foreground">Next Page</span>
+                  <span class="text-[10px] text-muted-foreground max-w-[120px]">Click right 30%</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Bottom Zone (64px) -->
+            <div
+              class="h-16 w-full flex items-center justify-center border-t-2 border-dashed border-primary/40 bg-primary/[0.18] backdrop-blur-[3px] shrink-0"
+            >
+              <div
+                class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-background/90 border border-border/70 shadow-md text-muted-foreground text-center animate-pulse"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="lucide lucide-menu text-primary"
+                >
+                  <line x1="4" x2="20" y1="12" y2="12" />
+                  <line x1="4" x2="20" y1="6" y2="6" />
+                  <line x1="4" x2="20" y1="18" y2="18" />
+                </svg>
+                <span class="text-xs font-semibold tracking-wide uppercase text-foreground">Toggle Footer</span>
+                <span class="text-[10px] text-muted-foreground">Click bottom edge (y &gt; height - 64px)</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </div>
 
     <ReaderFooter
@@ -1144,12 +1779,13 @@ function closeSearch() {
       :chapterStartFraction="chapterStartFraction"
       :chapterEndFraction="chapterEndFraction"
       :locationTotal="locationTotal"
+      :navigationLocked="isNavigationLocked"
       :seekBookmark="seekBookmark"
       class="transition-all duration-300"
-      :class="footerVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-full pointer-events-none'"
-      @prevSection="goToSection(sectionIndex - 1)"
-      @nextSection="goToSection(sectionIndex + 1)"
-      @seek="handleSeek($event)"
+      :class="footerVisible && !showTapZones ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-full pointer-events-none'"
+      @prevSection="navigateToSection(sectionIndex - 1)"
+      @nextSection="navigateToSection(sectionIndex + 1)"
+      @seek="handleSeek"
       @seekBookmarkTap="handleSeekBookmarkTap"
     />
 
@@ -1165,15 +1801,15 @@ function closeSearch() {
       :provider="ttsCurrentProvider"
       :settings="effectiveEpubSettings"
       @start="startTtsPlayback"
-      @prefetch="void tts.prefetchPlaybackAhead()"
+      @prefetch="prefetchTts"
       @pause="tts.pause"
       @resume="resumeTtsPlayback"
       @replay="tts.replay"
       @skipBack="tts.skipBackward"
       @skipForward="tts.skipForward"
       @toggleSettings="showTtsSettings = true"
-      @updateProvider="(provider) => applyTtsUpdate({ ttsProvider: provider })"
-      @updateRate="(rate) => applyTtsUpdate({ ttsRate: rate })"
+      @updateProvider="handleTtsProviderUpdate"
+      @updateRate="handleTtsRateUpdate"
     />
 
     <TtsSettingsPanel
@@ -1199,16 +1835,20 @@ function closeSearch() {
       :chapters="chapters"
       :bookmarks="bookmarks.bookmarks.value"
       :annotations="annotations.annotations.value"
+      :currentCfi="cfi"
+      :locationMetaByCfi="sidebarLocationMetaByCfi"
       :activeHref="activeHref"
       :expandedHrefs="expandedHrefs"
+      :pinned="isSidebarPinned"
+      :navigationLocked="isNavigationLocked"
       @close="showSidebar = false"
-      @navigateChapter="
-        (href) => {
-          goTo(href)
-          showSidebar = false
-        }
-      "
-      @deleteBookmark="(id) => bookmarks.remove(bookId, id)"
+      @togglePinned="toggleSidebarPinned"
+      @navigateChapter="navigateChapterFromSidebar"
+      @navigateBookmark="navigateFromSidebar"
+      @navigateAnnotation="navigateFromSidebar"
+      @navigateAnnotationChapter="navigateAnnotationChapterFromSidebar"
+      @deleteBookmark="handleSidebarDeleteBookmark"
+      @editBookmark="handleSidebarEditBookmark"
       @deleteAnnotation="handleSidebarDeleteAnnotation"
       @toggleExpand="toggleExpand"
     />
@@ -1218,6 +1858,7 @@ function closeSearch() {
       :results="searchResults"
       :isSearching="isSearching"
       :initialQuery="searchInitialQuery"
+      :navigationLocked="isNavigationLocked"
       @search="onSearchQuery"
       @clear="onSearchClear"
       @navigate="navigateSearch($event)"
@@ -1228,6 +1869,7 @@ function closeSearch() {
       v-if="selection.showNoteDialog.value"
       :selectedText="selection.text.value"
       :modelValue="selection.noteText.value"
+      :saving="isSavingAnnotation"
       @update:modelValue="selection.noteText.value = $event"
       @save="handleSaveNote"
       @cancel="selection.showNoteDialog.value = false"
@@ -1239,14 +1881,39 @@ function closeSearch() {
       :showBelow="selection.showBelow.value"
       :selectedText="selection.text.value"
       :overlappingAnnotationId="selection.overlappingAnnotationId.value"
+      :isTtsAvailable="isTtsAvailable"
       @copy="selection.dismiss()"
       @highlight="handleHighlight"
       @search="() => openSearchWithText(selection.text.value)"
       @translate="handleTranslate"
       @define="handleDefine"
-      @note="selection.openNoteDialog()"
+      @note="handleOpenNoteDialog"
       @deleteAnnotation="handleDeleteAnnotation"
       @dismiss="selection.dismiss()"
+      @readFromHere="handleReadFromHere"
+    />
+
+    <Teleport to="body">
+      <Transition name="tts-resume-fade">
+        <div v-if="showTtsResumePrompt && !isTtsActive" class="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 w-full max-w-sm px-4">
+          <TtsResumePrompt
+            :chapterIndex="ttsPosition.savedPosition.value?.chapterIndex ?? null"
+            :clearing="clearingSavedTtsPosition"
+            @resume="handleResumeTts"
+            @playFromHere="handlePlayFromCurrentPage"
+            @clearSavedPosition="handleClearSavedTtsPosition"
+            @cancel="dismissResumePrompt"
+          />
+        </div>
+      </Transition>
+    </Teleport>
+
+    <NewerPositionDialog
+      :open="newerPosition !== null"
+      :remotePercentage="newerPosition?.percentage ?? 0"
+      :localPercentage="newerPositionLocalPercentage"
+      @follow="handleFollowNewerPosition"
+      @stay="handleStayAtCurrentPosition"
     />
 
     <DictionaryPopover
@@ -1287,6 +1954,25 @@ function closeSearch() {
 }
 .bookmark-fade-enter-from,
 .bookmark-fade-leave-to {
+  opacity: 0;
+}
+.tts-resume-fade-enter-active,
+.tts-resume-fade-leave-active {
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease;
+}
+.tts-resume-fade-enter-from,
+.tts-resume-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+}
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
   opacity: 0;
 }
 </style>

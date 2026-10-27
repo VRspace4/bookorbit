@@ -19,7 +19,7 @@ function sampleBook(overrides?: Partial<OpdsBookEntry>): OpdsBookEntry {
     description: 'A fantasy novel by Brandon Sanderson',
     seriesId: 1,
     seriesName: 'Mistborn',
-    seriesIndex: 1,
+    seriesIndex: '1',
     language: 'en',
     publisher: 'Tor Books',
     isbn13: '9780765311788',
@@ -68,6 +68,53 @@ describe('OpdsService', () => {
       expect(xml).not.toContain('http://localhost');
       expect(xml).toContain(`href="${BASE}"`);
       expect(xml).toContain(`href="${BASE}/catalog"`);
+    });
+  });
+
+  // Moon+ Reader and CrossPoint never fetch the OpenSearch description; they detect search
+  // only from a rel="search" href that already carries {searchTerms} (issue #860).
+  describe('inline templated search link', () => {
+    const feeds: [string, () => string][] = [
+      ['root', () => makeService().generateRootNavigation()],
+      ['libraries', () => makeService().generateLibrariesNavigation([{ id: 1, name: 'Main', bookCount: 2 }])],
+      ['collections', () => makeService().generateCollectionsNavigation([{ id: 1, name: 'Favourites', bookCount: 2 }])],
+      ['smart scopes', () => makeService().generateSmartScopesNavigation([{ id: 1, name: 'Unread', icon: null }])],
+      ['authors', () => makeService().generateAuthorsNavigation([{ name: 'Brandon Sanderson', bookCount: 2 }])],
+      ['series', () => makeService().generateSeriesNavigation([{ id: 1, name: 'Mistborn', bookCount: 2 }])],
+      ['acquisition', () => makeService().generateAcquisitionFeed('Catalog', 'urn:bookorbit:catalog', [], 0, 1, 50, `${BASE}/catalog`, 'tok')],
+    ];
+
+    it.each(feeds)('%s feed advertises both search links', (_name, generate) => {
+      const xml = generate();
+
+      expect(xml).toContain(`<link rel="search" href="${BASE}/search.opds" type="application/opensearchdescription+xml"/>`);
+      expect(xml).toContain(`<link rel="search" href="${BASE}/catalog?q={searchTerms}" type="application/atom+xml" title="Search"/>`);
+    });
+
+    it('leaves the searchTerms placeholder unescaped so clients can substitute it', () => {
+      const xml = makeService().generateRootNavigation();
+
+      expect(xml).toContain('{searchTerms}');
+      expect(xml).not.toContain('%7BsearchTerms%7D');
+    });
+
+    it('keeps the templated link type free of profile and kind parameters', () => {
+      const xml = makeService().generateRootNavigation();
+      const templated = xml.split('\n').find((line) => line.includes('{searchTerms}'))!;
+
+      expect(templated).toContain('type="application/atom+xml"');
+      expect(templated).not.toContain('profile=opds-catalog');
+    });
+
+    it('matches the template advertised by the OpenSearch description', () => {
+      const service = makeService();
+      const templated = service
+        .generateRootNavigation()
+        .split('\n')
+        .find((line) => line.includes('{searchTerms}'))!;
+
+      expect(service.generateOpenSearchDescription()).toContain(`template="${BASE}/catalog?q={searchTerms}"`);
+      expect(templated).toContain(`href="${BASE}/catalog?q={searchTerms}"`);
     });
   });
 
@@ -473,6 +520,42 @@ describe('OpdsService', () => {
 
       expect(xml).toContain('&amp;');
       expect(xml).toContain('&apos;');
+    });
+  });
+
+  describe('book descriptions', () => {
+    function feedFor(description: string | null): string {
+      return makeService().generateAcquisitionFeed(
+        'Catalog',
+        'urn:bookorbit:catalog',
+        [sampleBook({ description })],
+        1,
+        1,
+        50,
+        `${BASE}/catalog?page=1&size=50`,
+        'test-token',
+      );
+    }
+
+    it('sends an HTML description as plain text with its paragraph and line breaks', () => {
+      const xml = feedFor('<p>The <strong>first</strong> book &amp; its sequel.</p><p>Line one<br>line two</p>');
+
+      expect(xml).toContain('<content type="text">The first book &amp; its sequel.\nLine one\nline two</content>');
+      expect(xml).not.toContain('&lt;p&gt;');
+      expect(xml).not.toContain('&lt;strong&gt;');
+    });
+
+    it('keeps a plain-text description and its line breaks unchanged', () => {
+      const xml = feedFor('Part one.\n\nPart two.');
+
+      expect(xml).toContain('<content type="text">Part one.\n\nPart two.</content>');
+    });
+
+    it.each([
+      ['no description', null],
+      ['a description holding only markup', '<p> </p><br>'],
+    ])('sends empty content for %s', (_label, description) => {
+      expect(feedFor(description)).toContain('<content type="text"/>');
     });
   });
 });

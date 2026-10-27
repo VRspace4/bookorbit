@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatDate as formatLocaleDate } from '@/i18n/formatters'
@@ -10,10 +11,13 @@ import MigrationModal from '@/features/migration/components/MigrationModal.vue'
 import { api } from '@/lib/api'
 import { getWorkflowState, type MigrationWorkflowState } from '@/features/migration/lib/migration-api'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useAppInfo } from './composables/useAppInfo'
 
 const { t } = useI18n()
 
-const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+})
 
 const showMigrationModal = ref(false)
 
@@ -26,12 +30,15 @@ const migrationLoading = ref(true)
 
 const updateCheckEnabled = ref(true)
 const updateCheckLoading = ref(false)
-const maxUploadSizeMb = ref(500)
+const { maxUploadSizeMb } = useAppInfo()
 const localMaxUploadSizeMb = ref(500)
 const maxUploadSizeSaving = ref(false)
 const achievementBackfillRunning = ref(false)
 const achievementBackfillError = ref<string | null>(null)
-const achievementBackfillResult = ref<{ usersProcessed: number; awardsGranted: number } | null>(null)
+const achievementBackfillResult = ref<{
+  usersProcessed: number
+  awardsGranted: number
+} | null>(null)
 
 const { isSuperuser } = usePermissions()
 
@@ -115,11 +122,17 @@ async function rebuildEmbeddings() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data: { queued: number } = await res.json()
     queued.value = data.queued
-    toast.success(t('settings.admin.maintenance.booksQueuedForEmbedding', { count: data.queued }, data.queued))
+    toast.success(
+      t('settings.admin.maintenance.booksQueuedForEmbedding', {
+        count: data.queued,
+      }),
+    )
   } catch (e) {
     embeddingError.value = e instanceof Error ? e.message : t('settings.admin.maintenance.failed')
     toast.error(
-      t('settings.admin.maintenance.rebuildEmbeddingsFailed', { error: embeddingError.value ?? t('settings.admin.maintenance.unknownError') }),
+      t('settings.admin.maintenance.rebuildEmbeddingsFailed', {
+        error: embeddingError.value ?? t('settings.admin.maintenance.unknownError'),
+      }),
     )
   } finally {
     running.value = false
@@ -143,10 +156,18 @@ async function runAchievementBackfill() {
 
     const result: { usersProcessed: number; awardsGranted: number } = await res.json()
     achievementBackfillResult.value = result
-    toast.success(t('settings.admin.maintenance.achievementBackfillComplete', { count: result.awardsGranted }))
+    toast.success(
+      t('settings.admin.maintenance.achievementBackfillComplete', {
+        count: result.awardsGranted,
+      }),
+    )
   } catch (e) {
     achievementBackfillError.value = e instanceof Error ? e.message : t('settings.admin.maintenance.backfillRunFailed')
-    toast.error(t('settings.admin.maintenance.achievementBackfillFailed', { error: achievementBackfillError.value }))
+    toast.error(
+      t('settings.admin.maintenance.achievementBackfillFailed', {
+        error: achievementBackfillError.value,
+      }),
+    )
   } finally {
     achievementBackfillRunning.value = false
   }
@@ -180,7 +201,11 @@ async function saveMaxUploadSize() {
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return ''
-  return formatLocaleDate(new Date(iso), { month: 'short', day: 'numeric', year: 'numeric' })
+  return formatLocaleDate(new Date(iso), {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  })
 }
 </script>
 
@@ -193,7 +218,9 @@ function formatDate(iso: string | null | undefined): string {
     :subtitle="t('settings.admin.maintenance.subtitle')"
   />
   <div v-if="!props.embedded" class="md:hidden px-1">
-    <h1 class="text-xl font-semibold tracking-tight text-foreground">{{ t('settings.admin.maintenance.title') }}</h1>
+    <h1 class="text-xl font-semibold tracking-tight text-foreground">
+      {{ t('settings.admin.maintenance.title') }}
+    </h1>
     <p
       class="mt-1 text-sm text-muted-foreground leading-5 overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
     >
@@ -201,19 +228,25 @@ function formatDate(iso: string | null | undefined): string {
     </p>
   </div>
 
-  <div class="mt-5 md:mt-0 space-y-6">
+  <div class="space-y-6" :class="{ 'mt-5 md:mt-0': !props.embedded }">
     <!-- Uploads -->
     <div v-if="isSuperuser">
-      <p class="settings-group-label">{{ t('settings.admin.maintenance.uploadsGroup') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+      <p class="settings-group-label">
+        {{ t('settings.admin.maintenance.uploadsGroup') }}
+      </p>
+      <div class="settings-card">
+        <div class="settings-row">
           <div class="flex items-start gap-3">
             <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
               <Upload :size="16" class="text-primary" />
             </div>
             <div class="min-w-0">
-              <p class="settings-label">{{ t('settings.admin.maintenance.maxUploadSize') }}</p>
-              <p class="settings-hint">{{ t('settings.admin.maintenance.maxUploadSizeHint') }}</p>
+              <p class="settings-label">
+                {{ t('settings.admin.maintenance.maxUploadSize') }}
+              </p>
+              <p class="settings-hint">
+                {{ t('settings.admin.maintenance.maxUploadSizeHint') }}
+              </p>
             </div>
           </div>
           <div class="flex items-center gap-3">
@@ -228,13 +261,15 @@ function formatDate(iso: string | null | undefined): string {
               />
               <span class="text-sm text-muted-foreground">MB</span>
             </div>
-            <button
-              class="settings-btn-outline"
+            <Button
+              variant="outline"
+              size="sm"
               :disabled="maxUploadSizeSaving || localMaxUploadSizeMb === maxUploadSizeMb"
               @click="saveMaxUploadSize"
+              type="button"
             >
               {{ t('settings.admin.maintenance.save') }}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -242,7 +277,9 @@ function formatDate(iso: string | null | undefined): string {
 
     <!-- Booklore Import -->
     <div>
-      <p class="settings-group-label">{{ t('settings.admin.maintenance.importGroup') }}</p>
+      <p class="settings-group-label">
+        {{ t('settings.admin.maintenance.importGroup') }}
+      </p>
       <div class="border border-border rounded-lg bg-card px-4 py-4 md:px-5 md:py-5 shadow-xs">
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-6">
           <div class="flex items-start gap-3">
@@ -272,9 +309,9 @@ function formatDate(iso: string | null | undefined): string {
             <div class="min-w-0">
               <p class="settings-label">
                 <template v-if="migrationCardState === 'none' || migrationCardState === 'loading'">{{
-                  t('settings.admin.maintenance.importFromBooklore')
+                  t('settings.admin.maintenance.importLibraryData')
                 }}</template>
-                <template v-else-if="migrationCardState === 'configured'">{{ t('settings.admin.maintenance.bookloreImportConfigured') }}</template>
+                <template v-else-if="migrationCardState === 'configured'">{{ t('settings.admin.maintenance.migrationConfigured') }}</template>
                 <template v-else-if="migrationCardState === 'running'">{{ t('settings.admin.maintenance.migrationRunning') }}</template>
                 <template v-else-if="migrationCardState === 'completed'">{{ t('settings.admin.maintenance.migrationCompleted') }}</template>
                 <template v-else-if="migrationCardState === 'failed'">{{ t('settings.admin.maintenance.migrationFailed') }}</template>
@@ -284,10 +321,14 @@ function formatDate(iso: string | null | undefined): string {
                 class="settings-hint leading-relaxed max-w-sm mt-0.5 md:[display:block] overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
               >
                 <template v-if="migrationCardState === 'none' || migrationCardState === 'loading'">
-                  {{ t('settings.admin.maintenance.importDescription') }}
+                  {{ t('settings.admin.maintenance.migrationDescription') }}
                 </template>
                 <template v-else-if="migrationCardState === 'configured'">
-                  {{ t('settings.admin.maintenance.configuredDescription', { name: migrationSource!.name }) }}
+                  {{
+                    t('settings.admin.maintenance.configuredDescription', {
+                      name: migrationSource!.name,
+                    })
+                  }}
                 </template>
                 <template v-else-if="migrationCardState === 'running'">
                   {{
@@ -298,7 +339,12 @@ function formatDate(iso: string | null | undefined): string {
                   }}
                 </template>
                 <template v-else-if="migrationCardState === 'completed'">
-                  {{ t('settings.admin.maintenance.completedDescription', { name: migrationSource!.name, date: formatDate(migrationRun!.endedAt) }) }}
+                  {{
+                    t('settings.admin.maintenance.completedDescription', {
+                      name: migrationSource!.name,
+                      date: formatDate(migrationRun!.endedAt),
+                    })
+                  }}
                 </template>
                 <template v-else-if="migrationCardState === 'failed'">
                   {{ migrationRun!.errorMessage ?? t('settings.admin.maintenance.migrationErrorGeneric') }}
@@ -307,10 +353,12 @@ function formatDate(iso: string | null | undefined): string {
             </div>
           </div>
 
-          <button
+          <Button
             v-if="migrationCardState !== 'loading'"
+            type="button"
+            size="sm"
+            :variant="migrationCardState === 'none' ? 'default' : 'outline'"
             class="self-start md:w-auto md:shrink-0"
-            :class="migrationCardState === 'none' ? 'settings-btn-primary' : 'settings-btn-outline'"
             @click="goToMigration"
           >
             <template v-if="migrationCardState === 'none'">
@@ -319,14 +367,16 @@ function formatDate(iso: string | null | undefined): string {
             </template>
             <template v-else-if="migrationCardState === 'configured'">{{ t('settings.admin.maintenance.continueSetup') }}</template>
             <template v-else>{{ t('settings.admin.maintenance.viewDetails') }}</template>
-          </button>
+          </Button>
         </div>
       </div>
     </div>
 
     <!-- Recommendations -->
     <div>
-      <p class="settings-group-label">{{ t('settings.admin.maintenance.recommendationsGroup') }}</p>
+      <p class="settings-group-label">
+        {{ t('settings.admin.maintenance.recommendationsGroup') }}
+      </p>
       <div class="border border-border rounded-lg bg-card px-4 py-4 md:px-5 md:py-5 shadow-xs">
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-6">
           <div class="flex items-start gap-3">
@@ -334,7 +384,9 @@ function formatDate(iso: string | null | undefined): string {
               <Sparkles :size="16" class="text-primary" />
             </div>
             <div class="min-w-0">
-              <p class="settings-label">{{ t('settings.admin.maintenance.refreshRecommendationIndex') }}</p>
+              <p class="settings-label">
+                {{ t('settings.admin.maintenance.refreshRecommendationIndex') }}
+              </p>
               <p
                 class="settings-hint leading-relaxed max-w-sm md:[display:block] overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
               >
@@ -342,22 +394,30 @@ function formatDate(iso: string | null | undefined): string {
               </p>
               <p v-if="queued !== null" class="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400 mt-2">
                 <Check :size="12" />
-                {{ t('settings.admin.maintenance.booksQueuedForProcessing', { count: queued }, queued) }}
+                {{
+                  t('settings.admin.maintenance.booksQueuedForProcessing', {
+                    count: queued,
+                  })
+                }}
               </p>
-              <p v-if="embeddingError" class="text-xs text-destructive mt-2">{{ embeddingError }}</p>
+              <p v-if="embeddingError" class="text-xs text-destructive mt-2">
+                {{ embeddingError }}
+              </p>
             </div>
           </div>
-          <button class="settings-btn-outline self-start md:w-auto md:shrink-0" :disabled="running" @click="rebuildEmbeddings">
+          <Button variant="outline" size="sm" class="self-start md:w-auto md:shrink-0" :disabled="running" @click="rebuildEmbeddings" type="button">
             <RefreshCw :size="13" :class="running ? 'animate-spin' : ''" />
             {{ running ? t('settings.admin.maintenance.running') : t('settings.admin.maintenance.run') }}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
 
     <!-- Achievements -->
     <div v-if="isSuperuser">
-      <p class="settings-group-label">{{ t('settings.admin.maintenance.achievementsGroup') }}</p>
+      <p class="settings-group-label">
+        {{ t('settings.admin.maintenance.achievementsGroup') }}
+      </p>
       <div class="border border-border rounded-lg bg-card px-4 py-4 md:px-5 md:py-5 shadow-xs">
         <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-6">
           <div class="flex items-start gap-3 min-w-0">
@@ -366,7 +426,9 @@ function formatDate(iso: string | null | undefined): string {
             </div>
 
             <div class="min-w-0 flex-1">
-              <p class="settings-label">{{ t('settings.admin.maintenance.backfillAchievements') }}</p>
+              <p class="settings-label">
+                {{ t('settings.admin.maintenance.backfillAchievements') }}
+              </p>
               <p
                 class="settings-hint leading-relaxed max-w-sm md:[display:block] overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
               >
@@ -381,33 +443,42 @@ function formatDate(iso: string | null | undefined): string {
                   })
                 }}
               </p>
-              <p v-if="achievementBackfillError" class="mt-2 text-xs text-destructive">{{ achievementBackfillError }}</p>
+              <p v-if="achievementBackfillError" class="mt-2 text-xs text-destructive">
+                {{ achievementBackfillError }}
+              </p>
             </div>
           </div>
 
-          <button
-            class="settings-btn-outline self-start md:w-auto md:shrink-0"
+          <Button
+            variant="outline"
+            size="sm"
+            class="self-start md:w-auto md:shrink-0"
             :disabled="achievementBackfillRunning"
             @click="runAchievementBackfill"
+            type="button"
           >
             <RefreshCw :size="13" :class="achievementBackfillRunning ? 'animate-spin' : ''" />
             {{ achievementBackfillRunning ? t('settings.admin.maintenance.running') : t('settings.admin.maintenance.runBackfill') }}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
 
     <!-- Update checks -->
     <div>
-      <p class="settings-group-label">{{ t('settings.admin.maintenance.updatesGroup') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+      <p class="settings-group-label">
+        {{ t('settings.admin.maintenance.updatesGroup') }}
+      </p>
+      <div class="settings-card">
+        <div class="settings-row">
           <div class="flex items-start gap-3">
             <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
               <Bell :size="16" class="text-primary" />
             </div>
             <div class="min-w-0">
-              <p class="settings-label">{{ t('settings.admin.maintenance.checkForUpdates') }}</p>
+              <p class="settings-label">
+                {{ t('settings.admin.maintenance.checkForUpdates') }}
+              </p>
               <p class="settings-hint">
                 {{ t('settings.admin.maintenance.checkForUpdatesHint') }}
               </p>

@@ -18,6 +18,7 @@ import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { FileWriteService } from '../file-write/file-write.service';
 import { LibraryService } from '../library/library.service';
+import { MetadataScoreService } from '../metadata-score/metadata-score.service';
 import { EntityManagerRepository } from './entity-manager.repository';
 import { DuplicateComputeService } from './duplicate-compute.service';
 import type { EntityBookScope, EntityStrategy, RawCandidatePair } from './strategies/entity-strategy.interface';
@@ -48,6 +49,7 @@ export class EntityManagerService {
     private readonly repo: EntityManagerRepository,
     private readonly libraryService: LibraryService,
     private readonly fileWriteService: FileWriteService,
+    private readonly metadataScoreService: MetadataScoreService,
     private readonly duplicateCompute: DuplicateComputeService,
     authorStrategy: AuthorStrategy,
     genreStrategy: GenreStrategy,
@@ -240,7 +242,7 @@ export class EntityManagerService {
 
     try {
       const strategy = this.getStrategy(entityType);
-      const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const libraryIds = await this.libraryService.findEditableLibraryIds(user);
       const result = await strategy.merge({ targetId, sourceIds, userId: user.id, libraryIds });
 
       const nonInlineSourceIds: number[] = [];
@@ -260,6 +262,7 @@ export class EntityManagerService {
       if (writeFiles) {
         this.scheduleWrites(result.affectedBookIds, user.id);
       }
+      await this.metadataScoreService.calculateAndSaveMany(result.affectedBookIds);
 
       this.logger.log(
         `[${event}] [end] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} affectedBooks=${result.affectedBookIds.length} - merge completed`,
@@ -288,12 +291,13 @@ export class EntityManagerService {
 
     try {
       const strategy = this.getStrategy(entityType);
-      const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const libraryIds = await this.libraryService.findEditableLibraryIds(user);
       const result = await strategy.rename({ entityId, newName, userId: user.id, libraryIds });
 
       if (writeFiles) {
         this.scheduleWrites(result.affectedBookIds, user.id);
       }
+      await this.metadataScoreService.calculateAndSaveMany(result.affectedBookIds);
 
       this.logger.log(
         `[${event}] [end] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} implicitMerge=${result.wasImplicitMerge} - rename completed`,
@@ -329,7 +333,7 @@ export class EntityManagerService {
 
     try {
       const strategy = this.getStrategy(entityType);
-      const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const libraryIds = await this.libraryService.findEditableLibraryIds(user);
       const effectiveMode = !strategy.isInline && mode === 'soft' && (await strategy.getBookCount(entityId)) === 0 ? 'hard' : mode;
       const result = await strategy.deleteEntity({ entityId, mode: effectiveMode, libraryIds });
 
@@ -343,6 +347,7 @@ export class EntityManagerService {
       if (writeFiles) {
         this.scheduleWrites(result.affectedBookIds, user.id);
       }
+      await this.metadataScoreService.calculateAndSaveMany(result.affectedBookIds);
 
       this.logger.log(
         `[${event}] [end] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} affectedBooks=${result.affectedBookIds.length} - delete completed`,
@@ -395,7 +400,7 @@ export class EntityManagerService {
         throw new BadRequestException('Split requires at least 2 new names');
       }
 
-      const libraryIds = await this.libraryService.findAccessibleLibraryIds(user);
+      const libraryIds = await this.libraryService.findEditableLibraryIds(user);
       const result = await strategy.split({ entityId, newNames, libraryIds });
 
       await this.repo.deleteDismissedPairsForEntity(entityType, entityId);
@@ -403,6 +408,7 @@ export class EntityManagerService {
       if (writeFiles) {
         this.scheduleWrites(result.affectedBookIds, user.id);
       }
+      await this.metadataScoreService.calculateAndSaveMany(result.affectedBookIds);
 
       this.logger.log(
         `[${event}] [end] userId=${user.id} entityType=${entityType} durationMs=${Date.now() - startedAt} newEntities=${result.newEntities.length} - split completed`,

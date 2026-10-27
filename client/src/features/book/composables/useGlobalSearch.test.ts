@@ -20,6 +20,7 @@ function makeBook(id: number): BookCard {
   return {
     id,
     status: 'present',
+    coverAspectRatio: '2/3',
     title: `Prey ${id}`,
     authors: ['Author'],
     seriesId: null,
@@ -36,6 +37,7 @@ function makeBook(id: number): BookCard {
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,

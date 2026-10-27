@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertTriangle, X } from '@lucide/vue'
+import IcuCountText from '@/components/IcuCountText.vue'
 
 const { t } = useI18n()
 
@@ -31,7 +32,7 @@ function handleCancel(): void {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="handleCancel">
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-scrim" @click.self="handleCancel">
     <div class="bg-card border border-border rounded-lg shadow-lg w-full max-w-md mx-4 overflow-hidden">
       <div class="flex items-center justify-between px-5 py-4 border-b border-border">
         <h3 class="text-base font-semibold text-destructive flex items-center gap-2">
@@ -44,11 +45,11 @@ function handleCancel(): void {
       </div>
       <div class="px-5 py-4 space-y-4">
         <p class="text-sm">
-          <i18n-t keypath="tools.entityManager.bulkDeleteModal.confirm" :plural="count">
-            <template #count>
-              <span class="font-semibold">{{ count }}</span>
+          <IcuCountText keypath="tools.entityManager.bulkDeleteModal.confirm" :count="count">
+            <template #count="{ value }">
+              <span class="font-semibold">{{ value }}</span>
             </template>
-          </i18n-t>
+          </IcuCountText>
         </p>
 
         <div v-if="!isInline" class="space-y-2">
@@ -70,7 +71,7 @@ function handleCancel(): void {
         </div>
 
         <label class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
-          <input v-model="writeFiles" type="checkbox" class="rounded accent-primary" />
+          <input v-model="writeFiles" type="checkbox" class="rounded-xs accent-primary" />
           {{ t('tools.entityManager.writeChangesToFiles') }}
         </label>
       </div>

@@ -1,15 +1,53 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+import fastifyHelmet from '@fastify/helmet';
+import fastifyCompress from '@fastify/compress';
 import { request } from 'http';
 import type { AddressInfo } from 'net';
 import {
   parseBooleanEnv,
   parseTrustProxy,
   buildCspDirectives,
+  buildHelmetOptions,
   buildEmptyJsonBodyStream,
   registerEmptyBodyContentTypeParser,
+  applyDeclaredBodyLimit,
+  applyDeclaredCompressionOptOut,
+  registerDeclaredCompressionOptOuts,
   shouldInjectEmptyJsonBody,
+  isSecureProtocol,
+  applyConditionalHsts,
+  registerConditionalHsts,
+  isStaticAssetPath,
+  shouldServeSpaFallback,
 } from './bootstrap.utils';
+
+describe('SPA fallback routing', () => {
+  it.each([
+    '/assets/index-BMAlyH9T.js',
+    '/assets/index-D5CelejF.css',
+    '/sw.js',
+    '/manifest.webmanifest',
+    '/favicon.ico',
+    '/pwa-192x192.png',
+    '/assets/foliate/reader.js?v=2',
+  ])('treats %s as a static asset so a missing file 404s instead of returning index.html', (url) => {
+    expect(isStaticAssetPath(url)).toBe(true);
+    expect(shouldServeSpaFallback(url)).toBe(false);
+  });
+
+  it.each(['/', '/dashboard', '/book/123/files', '/library/12', '/settings/admin/audit-log', '/authors/42', '/read/1/2', '/collections?sort=name'])(
+    'serves the SPA shell for client route %s',
+    (url) => {
+      expect(shouldServeSpaFallback(url)).toBe(true);
+    },
+  );
+
+  it('ignores the query string and hash when deciding', () => {
+    expect(shouldServeSpaFallback('/assets/app-abc123.js?import&t=1')).toBe(false);
+    expect(shouldServeSpaFallback('/dashboard?tab=recent#top')).toBe(true);
+  });
+});
 
 describe('parseBooleanEnv', () => {
   it('returns fallback when value is undefined', () => {
@@ -64,19 +102,12 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('   ')).toBe('loopback,linklocal,uniquelocal');
   });
 
-  it.each(['false', '0', 'no', 'off'])('returns false for falsy string %s', (val) => {
+  it.each(['false', 'no', 'off'])('returns false for falsy string %s', (val) => {
     expect(parseTrustProxy(val)).toBe(false);
   });
 
-  it.each(['true', '1', 'yes', 'on'])('returns true for truthy string %s', (val) => {
+  it.each(['true', 'yes', 'on'])('returns true for truthy string %s', (val) => {
     expect(parseTrustProxy(val)).toBe(true);
-  });
-
-  it('parses non-negative integer hop counts', () => {
-    expect(parseTrustProxy('0')).toBe(false); // '0' is a falsy string, handled before hop-count check
-    expect(parseTrustProxy('1')).toBe(true); // '1' is a truthy string
-    expect(parseTrustProxy('2')).toBe(2);
-    expect(parseTrustProxy('10')).toBe(10);
   });
 
   it('returns the raw string for arbitrary proxy values', () => {
@@ -85,14 +116,8 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('loopback')).toBe('loopback');
   });
 
-  it('returns the raw string for decimal numbers (not valid integers)', () => {
-    expect(parseTrustProxy('1.5')).toBe('1.5');
-    expect(parseTrustProxy('2.9')).toBe('2.9');
-  });
-
-  it('returns the raw string for negative integers', () => {
-    expect(parseTrustProxy('-1')).toBe('-1');
-    expect(parseTrustProxy('-5')).toBe('-5');
+  it.each(['0', '1', '2', '10', '1.5', '2.9', '-1', '-5', '1e2'])('rejects numeric hop-count value %s', (value) => {
+    expect(() => parseTrustProxy(value)).toThrow('Numeric TRUST_PROXY hop counts are not supported; configure trusted proxy IP or CIDR ranges');
   });
 
   it('trims surrounding whitespace before evaluating', () => {
@@ -183,6 +208,12 @@ describe('buildCspDirectives', () => {
       expect(connectSrc).toContain('https://api.dictionaryapi.dev');
       expect(connectSrc).toContain('https://*.wiktionary.org');
     });
+
+    it('includes the Google Translate endpoint used by the epub reader regardless of Cloudflare Insights setting', () => {
+      expect(buildCspDirectives({ allowCloudflareInsights: false }).connectSrc).toContain('https://translate.googleapis.com');
+      expect(buildCspDirectives({ allowCloudflareInsights: true }).connectSrc).toContain('https://translate.googleapis.com');
+      expect(buildCspDirectives().connectSrc).toContain('https://translate.googleapis.com');
+    });
   });
 
   describe('scriptSrc with Cloudflare Insights', () => {
@@ -251,6 +282,24 @@ describe('buildCspDirectives', () => {
     it('upgradeInsecureRequests is null', () => {
       const { upgradeInsecureRequests } = buildCspDirectives();
       expect(upgradeInsecureRequests).toBeNull();
+    });
+  });
+
+  describe('buildHelmetOptions (integration)', () => {
+    it('emits a Content-Security-Policy header whose connect-src allows the Google Translate endpoint', async () => {
+      await withCspApp(async (app) => {
+        const response = await app.inject({ method: 'GET', url: '/ping' });
+
+        const csp = response.headers['content-security-policy'];
+        expect(csp).toBeDefined();
+
+        const connectSrcDirective = String(csp)
+          .split(';')
+          .map((directive) => directive.trim())
+          .find((directive) => directive.startsWith('connect-src'));
+
+        expect(connectSrcDirective).toContain('https://translate.googleapis.com');
+      });
     });
   });
 });
@@ -380,6 +429,106 @@ describe('empty request body bootstrap handling', () => {
   });
 });
 
+describe('isSecureProtocol', () => {
+  it('returns true only for https', () => {
+    expect(isSecureProtocol('https')).toBe(true);
+  });
+
+  it('returns false for http', () => {
+    expect(isSecureProtocol('http')).toBe(false);
+  });
+
+  it('returns false for undefined', () => {
+    expect(isSecureProtocol(undefined)).toBe(false);
+  });
+
+  it('returns false for unexpected values', () => {
+    expect(isSecureProtocol('HTTPS')).toBe(false);
+    expect(isSecureProtocol('')).toBe(false);
+    expect(isSecureProtocol('ftp')).toBe(false);
+  });
+});
+
+describe('applyConditionalHsts', () => {
+  it('sets the Strict-Transport-Security header for secure requests', () => {
+    const reply = { header: vi.fn() };
+
+    applyConditionalHsts({ protocol: 'https' }, reply);
+
+    expect(reply.header).toHaveBeenCalledTimes(1);
+    expect(reply.header).toHaveBeenCalledWith('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  });
+
+  it('does not set the header for plain HTTP requests', () => {
+    const reply = { header: vi.fn() };
+
+    applyConditionalHsts({ protocol: 'http' }, reply);
+
+    expect(reply.header).not.toHaveBeenCalled();
+  });
+});
+
+describe('registerConditionalHsts (integration)', () => {
+  it('sends HSTS when a trusted proxy forwards a secure request', async () => {
+    await withHstsApp({ trustProxy: true }, async (app) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/ping',
+        headers: { 'x-forwarded-proto': 'https' },
+      });
+
+      expect(response.headers['strict-transport-security']).toBe('max-age=31536000; includeSubDomains');
+    });
+  });
+
+  it('does not send HSTS for a plain HTTP request with no proxy involved', async () => {
+    await withHstsApp({ trustProxy: true }, async (app) => {
+      const response = await app.inject({ method: 'GET', url: '/ping' });
+
+      expect(response.headers['strict-transport-security']).toBeUndefined();
+    });
+  });
+
+  it('does not trust a forwarded-proto header when the proxy is not configured as trusted', async () => {
+    await withHstsApp({ trustProxy: false }, async (app) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/ping',
+        headers: { 'x-forwarded-proto': 'https' },
+      });
+
+      expect(response.headers['strict-transport-security']).toBeUndefined();
+    });
+  });
+});
+
+async function withHstsApp(options: { trustProxy: boolean }, run: (app: FastifyInstance) => Promise<void>): Promise<void> {
+  const app = Fastify({ logger: false, trustProxy: options.trustProxy });
+  await app.register(fastifyHelmet, buildHelmetOptions());
+  registerConditionalHsts(app);
+  app.get('/ping', () => ({ ok: true }));
+
+  try {
+    await app.ready();
+    await run(app);
+  } finally {
+    await app.close();
+  }
+}
+
+async function withCspApp(run: (app: FastifyInstance) => Promise<void>): Promise<void> {
+  const app = Fastify({ logger: false });
+  await app.register(fastifyHelmet, buildHelmetOptions());
+  app.get('/ping', () => ({ ok: true }));
+
+  try {
+    await app.ready();
+    await run(app);
+  } finally {
+    await app.close();
+  }
+}
+
 async function withParserApp(run: (app: FastifyInstance) => Promise<void>): Promise<void> {
   const app = Fastify({ logger: false });
   registerEmptyBodyContentTypeParser(app);
@@ -445,3 +594,95 @@ async function requestApp(
     req.end();
   });
 }
+
+describe('applyDeclaredBodyLimit', () => {
+  it('copies a declared limit onto the route option Fastify actually reads', () => {
+    const route: { config?: unknown; bodyLimit?: number } = { config: { bodyLimit: 6 * 1024 * 1024 } };
+    applyDeclaredBodyLimit(route);
+    expect(route.bodyLimit).toBe(6 * 1024 * 1024);
+  });
+
+  it('leaves a route without a declared limit on the Fastify default', () => {
+    const routes: Array<{ config?: unknown; bodyLimit?: number }> = [
+      {},
+      { config: {} },
+      { config: { bodyLimit: 0 } },
+      { config: { bodyLimit: -1 } },
+      { config: { bodyLimit: '6mb' } },
+      { config: { bodyLimit: 1.5 } },
+    ];
+    for (const route of routes) {
+      applyDeclaredBodyLimit(route);
+      expect(route.bodyLimit).toBeUndefined();
+    }
+  });
+
+  it('does not overwrite a limit already set on the route options', () => {
+    const route: { config?: unknown; bodyLimit?: number } = { config: {}, bodyLimit: 1024 };
+    applyDeclaredBodyLimit(route);
+    expect(route.bodyLimit).toBe(1024);
+  });
+});
+
+describe('applyDeclaredCompressionOptOut', () => {
+  it('copies a declared opt-out onto the route option @fastify/compress reads', () => {
+    const route: { config?: unknown; compress?: unknown } = { config: { compress: false } };
+    applyDeclaredCompressionOptOut(route);
+    expect(route.compress).toBe(false);
+  });
+
+  it('leaves routes without an explicit opt-out on the global compression setting', () => {
+    const routes: Array<{ config?: unknown; compress?: unknown }> = [
+      {},
+      { config: {} },
+      { config: { compress: true } },
+      { config: { compress: 'no' } },
+    ];
+    for (const route of routes) {
+      applyDeclaredCompressionOptOut(route);
+      expect(route.compress).toBeUndefined();
+    }
+  });
+});
+
+describe('registerDeclaredCompressionOptOuts (integration)', () => {
+  const fb2Body = `<?xml version="1.0"?><FictionBook>${'<p>text</p>'.repeat(500)}</FictionBook>`;
+
+  async function withCompressApp(run: (app: FastifyInstance) => Promise<void>): Promise<void> {
+    const app = Fastify({ logger: false });
+    registerDeclaredCompressionOptOuts(app);
+    await app.register(fastifyCompress, { encodings: ['gzip', 'br'] });
+    app.route({
+      method: 'GET',
+      url: '/raw',
+      config: { compress: false },
+      handler: (_request, reply) => reply.type('application/x-fictionbook+xml').send(fb2Body),
+    });
+    app.route({ method: 'GET', url: '/default', handler: (_request, reply) => reply.type('application/x-fictionbook+xml').send(fb2Body) });
+
+    try {
+      await app.ready();
+      await run(app);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('serves a route that opted out byte for byte with its Content-Length', async () => {
+    await withCompressApp(async (app) => {
+      const response = await app.inject({ method: 'GET', url: '/raw', headers: { 'accept-encoding': 'gzip, br' } });
+
+      expect(response.headers['content-encoding']).toBeUndefined();
+      expect(response.headers['content-length']).toBe(String(Buffer.byteLength(fb2Body)));
+      expect(response.body).toBe(fb2Body);
+    });
+  });
+
+  it('keeps compressing routes that did not opt out', async () => {
+    await withCompressApp(async (app) => {
+      const response = await app.inject({ method: 'GET', url: '/default', headers: { 'accept-encoding': 'gzip' } });
+
+      expect(response.headers['content-encoding']).toBe('gzip');
+    });
+  });
+});

@@ -12,20 +12,25 @@ function validDisplayPreferences(overrides: Partial<DisplayPreferences> = {}): D
     squareGridGap: 20,
     viewMode: 'grid',
     cardOverlays: ['progress-bar', 'format', 'rating'],
+    showJumpRails: true,
     smartScopeFilterExpanded: true,
     authorCoverSize: 140,
     authorCoverShape: 'circle',
+    authorRowDensity: 'comfortable',
+    authorCoverFallback: false,
     tableZebraStriping: false,
     tableDensity: 'comfortable',
     bookSpineOverlay: 'subtle',
     showSpineOnComics: false,
     bookShadowStrength: 'strong',
     bookCoverDisplayMode: 'blurred-fit',
+    bookDetailCoverTint: 'duotone',
     cardInfoMode: 'hover-overlay',
     seriesCardCoverMode: 'stack',
     gridCardPrimaryLabel: 'hidden',
     gridCardSecondaryLabel: 'hidden',
     thumbnailClickAction: 'reader',
+    placeholderCoverStyle: 'bauhaus',
     ...overrides,
   }
 }
@@ -146,9 +151,18 @@ describe('useDisplaySettingsSync', () => {
       '/api/v1/user-preferences/display',
       expect.objectContaining({
         method: 'PUT',
-        body: expect.stringContaining('"bookCoverDisplayMode":"fill-crop"'),
+        body: expect.any(String),
       }),
     )
+
+    const request = apiMock.mock.calls[0]?.[1] as RequestInit
+    expect(JSON.parse(request.body as string)).toMatchObject({
+      settings: {
+        authorRowDensity: 'comfortable',
+        authorCoverFallback: false,
+        bookCoverDisplayMode: 'fill-crop',
+      },
+    })
   })
 
   it('cancels a pending debounced save', async () => {
@@ -189,6 +203,60 @@ describe('useDisplaySettingsSync', () => {
       '/api/v1/user-preferences/display',
       expect.objectContaining({
         body: expect.stringContaining('"bookShadowStrength":"strong"'),
+      }),
+    )
+  })
+
+  it('syncs showJumpRails changes to the server', async () => {
+    vi.useFakeTimers()
+    const { apiMock, displaySettings, sync } = await loadModules()
+    apiMock.mockResolvedValue({ ok: true })
+
+    sync.initDisplaySettingsSync()
+    displaySettings.useDisplaySettings().showJumpRails.value = false
+    await vi.advanceTimersByTimeAsync(1500)
+
+    expect(apiMock).toHaveBeenCalledWith(
+      '/api/v1/user-preferences/display',
+      expect.objectContaining({
+        method: 'PUT',
+        body: expect.stringContaining('"showJumpRails":false'),
+      }),
+    )
+  })
+
+  it('syncs authorRowDensity changes to the server', async () => {
+    vi.useFakeTimers()
+    const { apiMock, displaySettings, sync } = await loadModules()
+    apiMock.mockResolvedValue({ ok: true })
+
+    sync.initDisplaySettingsSync()
+    displaySettings.useDisplaySettings().authorRowDensity.value = 'compact'
+    await vi.advanceTimersByTimeAsync(1500)
+
+    expect(apiMock).toHaveBeenCalledWith(
+      '/api/v1/user-preferences/display',
+      expect.objectContaining({
+        method: 'PUT',
+        body: expect.stringContaining('"authorRowDensity":"compact"'),
+      }),
+    )
+  })
+
+  it('syncs authorCoverFallback changes to the server', async () => {
+    vi.useFakeTimers()
+    const { apiMock, displaySettings, sync } = await loadModules()
+    apiMock.mockResolvedValue({ ok: true })
+
+    sync.initDisplaySettingsSync()
+    displaySettings.useDisplaySettings().authorCoverFallback.value = true
+    await vi.advanceTimersByTimeAsync(1500)
+
+    expect(apiMock).toHaveBeenCalledWith(
+      '/api/v1/user-preferences/display',
+      expect.objectContaining({
+        method: 'PUT',
+        body: expect.stringContaining('"authorCoverFallback":true'),
       }),
     )
   })

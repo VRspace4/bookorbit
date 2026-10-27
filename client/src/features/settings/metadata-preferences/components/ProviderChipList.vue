@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { VueDraggable } from 'vue-draggable-plus'
-import { GripVertical, X } from '@lucide/vue'
-import type { MetadataProviderKey, ProviderStatus } from '@bookorbit/types'
+import { GripVertical, Slash, X } from '@lucide/vue'
+import type { MetadataField, MetadataProviderKey, ProviderStatus } from '@bookorbit/types'
 import { providerChipStyle, PROVIDER_SHORT_LABELS } from '@/lib/provider-colors'
 import { PROVIDER_DND_GROUP, toProviderDragItems } from '../lib/provider-drag'
+import { isProviderUsable, providerHasOtherShape, providerRank, skipReasonFor } from '../lib/field-rules'
 
 const { t } = useI18n()
 
@@ -13,6 +14,8 @@ const props = defineProps<{
   providers: MetadataProviderKey[]
   statuses: ProviderStatus[]
   disabled?: boolean
+  /** The rule these chips order, so a provider that never fills it shows as skipped. */
+  field?: MetadataField
 }>()
 
 const emit = defineEmits<{ 'update:providers': [value: MetadataProviderKey[]] }>()
@@ -26,11 +29,6 @@ function statusFor(key: MetadataProviderKey) {
   return props.statuses.find((s) => s.key === key)
 }
 
-function isUsable(key: MetadataProviderKey) {
-  const s = statusFor(key)
-  return s ? s.enabled && s.configured : true
-}
-
 const localProviders = ref<ProviderChipItem[]>([])
 const isDragging = ref(false)
 
@@ -42,6 +40,38 @@ watch(
   },
   { immediate: true },
 )
+
+/**
+ * A chip carries its rank only when the provider will actually run. Skipped providers keep
+ * their place in the order but show a slash, because numbering them implies a turn they
+ * never take.
+ */
+const chips = computed(() =>
+  localProviders.value.map((item, index) => {
+    const status = statusFor(item.key)
+    const skipReason = skipReasonFor(status, props.field, item.key)
+    return {
+      ...item,
+      skipReason,
+      otherShape: !skipReason && providerHasOtherShape(item.key, props.field),
+      rank: providerRank(
+        localProviders.value.map((entry) => entry.key),
+        index,
+        props.statuses,
+        props.field,
+      ),
+      label: status?.label ?? item.key,
+      short: PROVIDER_SHORT_LABELS[item.key] ?? item.key,
+      usable: isProviderUsable(item.key, props.statuses, props.field),
+    }
+  }),
+)
+
+function chipTitle(chip: (typeof chips.value)[number]) {
+  if (chip.skipReason) return t(`settings.metadata.fieldRules.providerState.${chip.skipReason}Detail`, { provider: chip.label })
+  if (chip.otherShape) return t('settings.metadata.fieldRules.providerState.otherShapeDetail', { provider: chip.label })
+  return chip.label
+}
 
 function sameOrder(a: MetadataProviderKey[], b: MetadataProviderKey[]) {
   return a.length === b.length && a.every((value, index) => value === b[index])
@@ -86,7 +116,7 @@ function removeProvider(index: number) {
       v-model="localProviders"
       item-key="dragId"
       tag="div"
-      class="flex flex-wrap gap-1.5 min-h-[26px] items-center"
+      class="flex min-h-[26px] flex-wrap items-center gap-1.5"
       :animation="150"
       :group="{ name: PROVIDER_DND_GROUP, pull: false, put: true }"
       handle=".provider-chip-handle"
@@ -99,29 +129,36 @@ function removeProvider(index: number) {
       @end="onDragEnd"
     >
       <div
-        v-for="(item, index) in localProviders"
-        :key="item.dragId"
-        :title="statusFor(item.key)?.label ?? item.key"
-        class="flex items-center gap-1 h-6 pl-1.5 pr-1 rounded text-xs font-medium select-none transition-transform"
-        :style="providerChipStyle(item.key, !isUsable(item.key))"
-        :class="!disabled ? 'provider-chip-handle cursor-grab active:cursor-grabbing' : 'cursor-default'"
+        v-for="(chip, index) in chips"
+        :key="chip.dragId"
+        :title="chipTitle(chip)"
+        class="flex h-6 select-none items-center gap-1 rounded-xs pl-1.5 pr-1 text-xs font-medium transition-transform"
+        :class="[
+          chip.usable ? 'provider-chip' : 'provider-chip-skipped',
+          !disabled ? 'provider-chip-handle cursor-grab active:cursor-grabbing' : 'cursor-default',
+        ]"
+        :style="chip.usable ? providerChipStyle(chip.key) : undefined"
       >
-        <GripVertical v-if="!disabled" :size="10" class="opacity-50 shrink-0" />
-        <span class="opacity-70 tabular-nums leading-none">{{ index + 1 }}</span>
-        <span>{{ PROVIDER_SHORT_LABELS[item.key] ?? item.key }}</span>
+        <GripVertical v-if="!disabled" :size="10" class="shrink-0 opacity-50" aria-hidden="true" />
+        <Slash v-if="chip.skipReason" :size="10" class="shrink-0" aria-hidden="true" />
+        <span v-else class="tabular-nums leading-none opacity-70">{{ chip.rank }}</span>
+        <span>{{ chip.short }}</span>
+        <span class="sr-only" v-if="chip.skipReason || chip.otherShape">{{ chipTitle(chip) }}</span>
         <button
           v-if="!disabled"
-          class="ml-0.5 h-4 w-4 flex items-center justify-center rounded-sm opacity-60 hover:opacity-100 hover:bg-white/20 transition-opacity"
+          type="button"
+          :aria-label="t('settings.metadata.fieldRules.field.removeProvider', { provider: chip.label })"
+          class="ml-0.5 flex h-4 w-4 items-center justify-center rounded-sm opacity-60 transition-opacity hover:bg-foreground/15 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-current focus-visible:opacity-100"
           @click.stop="removeProvider(index)"
           @mousedown.stop
         >
-          <X :size="12" :stroke-width="3" />
+          <X :size="12" :stroke-width="3" aria-hidden="true" />
         </button>
       </div>
     </VueDraggable>
 
-    <span v-if="localProviders.length === 0 && !disabled" class="text-xs text-muted-foreground/60 italic h-6 flex items-center px-1">
-      {{ t('settings.metadata.fieldRules.dragProviderHere') }}
+    <span v-if="chips.length === 0" class="flex h-6 items-center px-1 text-xs text-muted-foreground">
+      {{ t('settings.metadata.fieldRules.field.noProvidersYet') }}
     </span>
   </div>
 </template>

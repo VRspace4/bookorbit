@@ -1,5 +1,5 @@
 import { Transform, Type } from 'class-transformer';
-import { ICON_VALUE_MAX_LENGTH, type GroupRule } from '@bookorbit/types';
+import { ICON_VALUE_MAX_LENGTH, type SmartScopeFilter } from '@bookorbit/types';
 import { IsArray, IsBoolean, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength, ValidateIf, ValidateNested } from 'class-validator';
 import { SortSpecDto } from './create-smart-scope.dto';
 
@@ -22,7 +22,7 @@ export class UpdateSmartScopeDto {
 
   @IsOptional()
   @IsObject()
-  filter?: GroupRule | null;
+  filter?: SmartScopeFilter;
 
   @IsOptional()
   @IsArray()
@@ -30,11 +30,11 @@ export class UpdateSmartScopeDto {
   @Type(() => SortSpecDto)
   defaultSort?: SortSpecDto[];
 
-  @IsOptional()
+  @ValidateIf((_, value) => value !== undefined)
   @IsBoolean()
   isPublic?: boolean;
 
-  @IsOptional()
+  @ValidateIf((_, value) => value !== undefined)
   @IsBoolean()
   syncToKobo?: boolean;
 }

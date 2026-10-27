@@ -14,14 +14,15 @@ type SeriesMembershipReadExecutor = Pick<Db, 'select'> | DbTransaction;
 
 export type SeriesMembershipInput = {
   seriesName: string | null;
-  seriesIndex?: number | null;
+  seriesIndex?: string | null;
 };
 
 export type SeriesMembershipRef = {
   seriesId: number;
   seriesName: string;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   displayOrder: number;
+  expectedBookCount: number | null;
 };
 
 @Injectable()
@@ -110,6 +111,7 @@ export class SeriesMembershipService {
         seriesName: bookSeries.name,
         seriesIndex: bookSeriesMemberships.seriesIndex,
         displayOrder: bookSeriesMemberships.displayOrder,
+        expectedBookCount: bookSeries.expectedBookCount,
       })
       .from(bookSeriesMemberships)
       .innerJoin(bookSeries, eq(bookSeries.id, bookSeriesMemberships.seriesId))
@@ -123,6 +125,7 @@ export class SeriesMembershipService {
         seriesName: row.seriesName,
         seriesIndex: row.seriesIndex,
         displayOrder: row.displayOrder,
+        expectedBookCount: row.expectedBookCount ?? null,
       });
       result.set(row.bookId, list);
     }
@@ -184,6 +187,7 @@ export class SeriesMembershipService {
         seriesName: displayName,
         seriesIndex: membership.seriesIndex ?? null,
         displayOrder: normalized.length,
+        expectedBookCount: null,
       });
     }
 

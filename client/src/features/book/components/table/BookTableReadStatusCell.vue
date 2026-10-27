@@ -66,12 +66,12 @@ function handleTab(e: KeyboardEvent) {
       <DropdownMenuTrigger as-child :disabled="isReadOnly">
         <button
           type="button"
-          class="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-xs transition-colors"
+          class="flex w-full items-center gap-1.5 rounded-xs px-1 py-0.5 text-xs transition-colors"
           :class="[currentColor, isReadOnly ? 'cursor-default' : 'hover:bg-primary/5 cursor-pointer']"
         >
           <component :is="CurrentIcon" :size="12" />
           <span class="truncate">{{ currentLabel }}</span>
-          <ChevronDown v-if="!isReadOnly" :size="10" class="ml-auto shrink-0 text-muted-foreground/50" />
+          <ChevronDown v-if="!isReadOnly" :size="10" class="ml-auto shrink-0 text-muted-foreground" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" class="min-w-[140px]" :trap-focus="false" @keydown.tab.prevent="handleTab">

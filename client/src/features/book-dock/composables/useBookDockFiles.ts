@@ -2,8 +2,11 @@ import { computed, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
 import type { BookDockFile, BookDockFilesPage, BookDockFileStatus } from '@bookorbit/types'
 
-export type SortField = 'createdAt' | 'fileName' | 'format' | 'status' | 'fileSize'
+export type SortField = 'createdAt' | 'fileName' | 'format' | 'status' | 'fileSize' | 'attention'
 export type SortOrder = 'asc' | 'desc'
+
+/** The chip set above the list. Review and filing readiness are predicates, not processing statuses. */
+export type BookDockView = 'all' | 'needsReview' | 'readyToFile' | BookDockFileStatus
 
 export function useBookDockFiles() {
   const items = ref<BookDockFile[]>([])
@@ -13,10 +16,12 @@ export function useBookDockFiles() {
 
   const filters = reactive({
     status: undefined as BookDockFileStatus | undefined,
+    needsReview: false,
+    readyToFile: false,
     search: '',
     page: 1,
     limit: 20,
-    sort: 'createdAt' as SortField,
+    sort: 'attention' as SortField,
     order: 'desc' as SortOrder,
   })
 
@@ -34,6 +39,8 @@ export function useBookDockFiles() {
     try {
       const params = new URLSearchParams()
       if (filters.status) params.set('status', filters.status)
+      if (filters.needsReview) params.set('needsReview', 'true')
+      if (filters.readyToFile) params.set('readyToFile', 'true')
       if (filters.search) params.set('search', filters.search)
       params.set('page', String(filters.page))
       params.set('limit', String(filters.limit))
@@ -60,6 +67,23 @@ export function useBookDockFiles() {
   function setStatus(status: BookDockFileStatus | undefined) {
     clearSelection()
     filters.status = status
+    filters.needsReview = false
+    filters.readyToFile = false
+    filters.page = 1
+    fetchFiles()
+  }
+
+  const activeView = computed<BookDockView>(() => {
+    if (filters.needsReview) return 'needsReview'
+    if (filters.readyToFile) return 'readyToFile'
+    return filters.status ?? 'all'
+  })
+
+  function setView(view: BookDockView) {
+    clearSelection()
+    filters.needsReview = view === 'needsReview'
+    filters.readyToFile = view === 'readyToFile'
+    filters.status = view === 'all' || view === 'needsReview' || view === 'readyToFile' ? undefined : view
     filters.page = 1
     fetchFiles()
   }
@@ -136,6 +160,12 @@ export function useBookDockFiles() {
     lastToggledId.value = null
   }
 
+  function removeDeletedSelection(id: number) {
+    selectedIds.value.delete(id)
+    excludedIds.value.delete(id)
+    if (lastToggledId.value === id) lastToggledId.value = null
+  }
+
   function isSelected(id: number): boolean {
     if (selectAll.value) return !excludedIds.value.has(id)
     return selectedIds.value.has(id)
@@ -153,6 +183,8 @@ export function useBookDockFiles() {
     selectAll?: boolean
     excludedIds?: number[]
     status?: BookDockFileStatus
+    needsReview?: boolean
+    readyToFile?: boolean
     search?: string
   } {
     if (selectAll.value) {
@@ -160,6 +192,8 @@ export function useBookDockFiles() {
         selectAll: true,
         excludedIds: [...excludedIds.value],
         ...(filters.status ? { status: filters.status } : {}),
+        ...(filters.needsReview ? { needsReview: true } : {}),
+        ...(filters.readyToFile ? { readyToFile: true } : {}),
         ...(filters.search ? { search: filters.search } : {}),
       }
     }
@@ -175,12 +209,15 @@ export function useBookDockFiles() {
     pageCount,
     fetchFiles,
     setStatus,
+    activeView,
+    setView,
     setSearch,
     setSort,
     setPage,
     toggleSelect,
     toggleSelectAll,
     clearSelection,
+    removeDeletedSelection,
     isSelected,
     selectAll,
     selectionCount,

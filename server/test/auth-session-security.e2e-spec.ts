@@ -5,6 +5,7 @@ import { Test } from '@nestjs/testing';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import { hash } from 'bcryptjs';
+import { Permission } from '@bookorbit/types';
 
 import { AppModule } from '../src/app.module';
 import { DB } from '../src/db';
@@ -241,7 +242,7 @@ describe('Auth session security (e2e)', () => {
       });
 
       expect(statusAfter.statusCode).toBe(200);
-      expect(statusAfter.json()).toEqual({ needsSetup: false });
+      expect(statusAfter.json()).toEqual({ needsSetup: false, allowRegistration: false });
     });
 
     it('rejects setup when already completed', async () => {
@@ -292,6 +293,158 @@ describe('Auth session security (e2e)', () => {
 
       expect(invalidLoginResponse.statusCode).toBe(401);
       expect(getSetCookieLines(invalidLoginResponse.headers)).toHaveLength(0);
+    });
+  });
+
+  describe('dashboard shelf settings', () => {
+    it.each([false, true])(
+      'rejects shelf sync writes for demo-restricted accounts with isSuperuser=%s',
+      async (isSuperuser) => {
+        const demo = await createLocalUser(context.db);
+        await context.db.update(schema.users).set({ isSuperuser }).where(eq(schema.users.id, demo.userId));
+        await context.db.insert(schema.userPermissions).values({ userId: demo.userId, permissionName: Permission.DemoRestricted });
+        const session = await login(context.app, demo.username, demo.password);
+        const headers = { authorization: `Bearer ${session.accessToken}` };
+
+        for (const dashboardShelfConfig of [{ syncAcrossSessions: true }, { syncAcrossSessions: false }, null]) {
+          const response = await context.app.inject({
+            method: 'PATCH',
+            url: '/api/v1/users/me/settings',
+            headers,
+            payload: { settings: { dashboardShelfConfig } },
+          });
+          expect(response.statusCode).toBe(403);
+        }
+
+        const legacySave = await context.app.inject({
+          method: 'PATCH',
+          url: '/api/v1/users/me/settings',
+          headers,
+          payload: { settings: { dashboardConfig: { readingGoal: 24 } } },
+        });
+        expect(legacySave.statusCode).toBe(200);
+        expect(legacySave.json().settings.dashboardConfig.readingGoal).toBe(24);
+        expect(legacySave.json().settings.dashboardShelfConfig).toBeUndefined();
+      },
+      15_000,
+    );
+
+    it('persists opt-in shelves across sessions, preserves them through legacy saves, and isolates accounts', async () => {
+      const owner = await createLocalUser(context.db);
+      const session = await login(context.app, owner.username, owner.password);
+      const shelfConfig = {
+        syncAcrossSessions: true,
+        shelfLayout: 'two-columns',
+        scrollers: [{ id: '1', type: 'random', label: 'Discover Something New', enabled: true, order: 1, limit: 20, rows: 2 }],
+      };
+      const save = await context.app.inject({
+        method: 'PATCH',
+        url: '/api/v1/users/me/settings',
+        headers: { authorization: `Bearer ${session.accessToken}` },
+        payload: { settings: { dashboardShelfConfig: shelfConfig } },
+      });
+      expect(save.statusCode).toBe(200);
+
+      const legacySave = await context.app.inject({
+        method: 'PATCH',
+        url: '/api/v1/users/me/settings',
+        headers: { authorization: `Bearer ${session.accessToken}` },
+        payload: { settings: { dashboardConfig: { readingGoal: 24, widgets: [], libraryIds: [1] } } },
+      });
+      expect(legacySave.statusCode).toBe(200);
+      expect(legacySave.json().settings.dashboardShelfConfig).toEqual(shelfConfig);
+
+      const fresh = await login(context.app, owner.username, owner.password);
+      const me = await context.app.inject({
+        method: 'GET',
+        url: '/api/v1/auth/me',
+        headers: { authorization: `Bearer ${fresh.accessToken}` },
+      });
+      expect(me.statusCode).toBe(200);
+      expect(me.json().settings.dashboardShelfConfig).toEqual(shelfConfig);
+      expect(me.json().settings.dashboardConfig.readingGoal).toBe(24);
+
+      const other = await createLocalUser(context.db);
+      const otherSession = await login(context.app, other.username, other.password);
+      const otherMe = await context.app.inject({
+        method: 'GET',
+        url: '/api/v1/auth/me',
+        headers: { authorization: `Bearer ${otherSession.accessToken}` },
+      });
+      expect(otherMe.statusCode).toBe(200);
+      expect(otherMe.json().settings.dashboardShelfConfig).toBeUndefined();
+
+      const optOut = await context.app.inject({
+        method: 'PATCH',
+        url: '/api/v1/users/me/settings',
+        headers: { authorization: `Bearer ${fresh.accessToken}` },
+        payload: { settings: { dashboardShelfConfig: { ...shelfConfig, syncAcrossSessions: false } } },
+      });
+      expect(optOut.statusCode).toBe(200);
+      expect(optOut.json().settings.dashboardShelfConfig.syncAcrossSessions).toBe(false);
+      expect(optOut.json().settings.dashboardConfig.readingGoal).toBe(24);
+    }, 15_000);
+  });
+
+  describe('login lockout', () => {
+    async function attemptLogin(username: string, password: string) {
+      return context.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { username, password } });
+    }
+
+    async function lockAccount(credentials: LocalUserCredentials) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const response = await attemptLogin(credentials.username, 'DefinitelyWrong123');
+        expect(response.statusCode).toBe(401);
+      }
+      const locked = await context.db.query.users.findFirst({ where: eq(schema.users.id, credentials.userId) });
+      expect(locked?.lockedUntil).toBeInstanceOf(Date);
+    }
+
+    it('tells the owner of a correct password that the account is locked, with a retry window', async () => {
+      const credentials = await createLocalUser(context.db, { password: 'LockoutPass123' });
+      await lockAccount(credentials);
+
+      const response = await attemptLogin(credentials.username, credentials.password);
+
+      expect(response.statusCode).toBe(401);
+      const body = response.json() as { errorCode?: string; retryAfterSeconds?: number };
+      expect(body.errorCode).toBe('account_locked');
+      expect(body.retryAfterSeconds).toBeGreaterThan(0);
+      expect(body.retryAfterSeconds).toBeLessThanOrEqual(15 * 60);
+      expect(getSetCookieLines(response.headers)).toHaveLength(0);
+    });
+
+    it('does not reveal the lockout to someone who does not know the password', async () => {
+      const credentials = await createLocalUser(context.db, { password: 'LockoutPass123' });
+      await lockAccount(credentials);
+
+      const response = await attemptLogin(credentials.username, 'StillWrong123');
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).not.toHaveProperty('errorCode');
+      expect(response.json()).not.toHaveProperty('retryAfterSeconds');
+    });
+
+    it('lets a completed password reset unlock the account immediately', async () => {
+      const credentials = await createLocalUser(context.db, { password: 'LockoutPass123' });
+      await lockAccount(credentials);
+
+      const rawToken = randomUUID();
+      await context.db.insert(schema.passwordResetTokens).values({
+        userId: credentials.userId,
+        tokenHash: sha256(rawToken),
+        expiresAt: new Date(Date.now() + 15 * 60_000),
+      });
+
+      const resetResponse = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/reset-password',
+        payload: { token: rawToken, newPassword: 'UnlockedPass123' },
+      });
+      expect(resetResponse.statusCode).toBe(204);
+
+      const afterReset = await attemptLogin(credentials.username, 'UnlockedPass123');
+      expect(afterReset.statusCode).toBe(200);
     });
   });
 

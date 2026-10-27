@@ -1,13 +1,20 @@
-import { Body, Controller, Get, Header, Headers, Param, ParseIntPipe, Put, Query, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, Headers, Param, ParseEnumPipe, ParseIntPipe, Put, Query, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 
+import { KOREADER_DASHBOARD_SECTION_TYPE } from '@bookorbit/types';
+import type { KoreaderDashboardSectionType } from '@bookorbit/types';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { RequestUser } from '../../common/types/request-user';
 import { KoreaderAuthGuard } from './koreader-auth.guard';
 import { KoreaderCatalogService } from './koreader-catalog.service';
 import {
+  KoreaderCatalogBookDetailQueryDto,
+  KoreaderCatalogDownloadQueryDto,
   KoreaderCatalogBooksQueryDto,
+  KoreaderCatalogDashboardQueryDto,
+  KoreaderCatalogDashboardSectionQueryDto,
+  KoreaderCatalogManifestQueryDto,
   KoreaderCatalogSectionQueryDto,
   KoreaderCatalogSetRatingDto,
   KoreaderCatalogSetReadStatusDto,
@@ -27,14 +34,25 @@ export class KoreaderCatalogController {
 
   @Get('dashboard')
   @Header('Cache-Control', 'private, max-age=30')
-  dashboard(@CurrentUser() user: RequestUser) {
-    return this.catalogService.getDashboard(user);
+  dashboard(@CurrentUser() user: RequestUser, @Query() query: KoreaderCatalogDashboardQueryDto) {
+    const section = query.section ? { type: query.section, ...(query.smartScopeId ? { smartScopeId: query.smartScopeId } : {}) } : undefined;
+    return this.catalogService.getDashboard(user, section);
   }
 
   @Get('dashboard/discover')
   @Header('Cache-Control', 'no-store')
   discover(@CurrentUser() user: RequestUser) {
     return this.catalogService.getDiscover(user);
+  }
+
+  @Get('dashboard/sections/:type')
+  @Header('Cache-Control', 'no-store')
+  dashboardSection(
+    @CurrentUser() user: RequestUser,
+    @Param('type', new ParseEnumPipe(KOREADER_DASHBOARD_SECTION_TYPE)) type: KoreaderDashboardSectionType,
+    @Query() query: KoreaderCatalogDashboardSectionQueryDto,
+  ) {
+    return this.catalogService.getDashboardSection(user, { type, ...(query.smartScopeId ? { smartScopeId: query.smartScopeId } : {}) });
   }
 
   @Get('sections/:section')
@@ -49,10 +67,16 @@ export class KoreaderCatalogController {
     return this.catalogService.getBooksPage(user, query);
   }
 
+  @Get('manifest')
+  @Header('Cache-Control', 'no-store')
+  manifest(@CurrentUser() user: RequestUser, @Query() query: KoreaderCatalogManifestQueryDto) {
+    return this.catalogService.getBulkManifest(user, query);
+  }
+
   @Get('books/:bookId')
   @Header('Cache-Control', 'private, max-age=30')
-  bookDetail(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number) {
-    return this.catalogService.getBookDetail(user, bookId);
+  bookDetail(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number, @Query() query: KoreaderCatalogBookDetailQueryDto) {
+    return this.catalogService.getBookDetail(user, bookId, query.deviceId, query.variant);
   }
 
   @Put('books/:bookId/read-status')
@@ -75,8 +99,23 @@ export class KoreaderCatalogController {
     return this.catalogService.streamThumbnail(user, bookId, reply, ifNoneMatch);
   }
 
+  @Get('authors/:authorId/photo')
+  authorPhoto(
+    @CurrentUser() user: RequestUser,
+    @Param('authorId', ParseIntPipe) authorId: number,
+    @Res() reply: FastifyReply,
+    @Headers('if-none-match') ifNoneMatch?: string,
+  ) {
+    return this.catalogService.streamAuthorPhoto(user, authorId, reply, ifNoneMatch);
+  }
+
   @Get('files/:fileId/download')
-  download(@CurrentUser() user: RequestUser, @Param('fileId', ParseIntPipe) fileId: number, @Res() reply: FastifyReply) {
-    return this.catalogService.streamFile(user, fileId, reply);
+  download(
+    @CurrentUser() user: RequestUser,
+    @Param('fileId', ParseIntPipe) fileId: number,
+    @Res() reply: FastifyReply,
+    @Query() query: KoreaderCatalogDownloadQueryDto = {},
+  ) {
+    return this.catalogService.streamFile(user, fileId, reply, query.variant, query.selection);
   }
 }

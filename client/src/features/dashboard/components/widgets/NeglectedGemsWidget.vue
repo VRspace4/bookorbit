@@ -41,14 +41,14 @@ async function addToQueue() {
 <template>
   <div class="flex h-full flex-col p-3">
     <div class="mb-3 flex items-center gap-2 self-start">
-      <Gem :size="16" class="text-primary/90" />
+      <Gem :size="16" class="text-primary" />
       <span class="text-[15px] font-semibold text-foreground">{{ t('dashboard.widgets.neglectedGems.title') }}</span>
     </div>
 
     <!-- Loading -->
     <div v-if="loading" class="flex flex-1 flex-col items-center justify-center gap-3">
-      <div class="h-16 w-12 animate-pulse rounded bg-muted" />
-      <div class="h-3 w-20 animate-pulse rounded bg-muted" />
+      <div class="h-16 w-12 animate-pulse rounded-xs bg-muted" />
+      <div class="h-3 w-20 animate-pulse rounded-xs bg-muted" />
     </div>
 
     <!-- Error -->
@@ -59,7 +59,7 @@ async function addToQueue() {
     <!-- Empty -->
     <div v-else-if="!data || data.gems.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2">
       <div class="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-        <Gem :size="16" class="text-muted-foreground/60" />
+        <Gem :size="16" class="text-muted-foreground" />
       </div>
       <p class="text-center text-xs text-muted-foreground">{{ t('dashboard.widgets.neglectedGems.empty') }}</p>
     </div>
@@ -70,7 +70,7 @@ async function addToQueue() {
         tag="button"
         type="button"
         size="mini"
-        class="book-cover-surface--spine-fitted h-19 w-13 cursor-pointer overflow-hidden rounded transition-opacity hover:opacity-80"
+        class="book-cover-surface--spine-fitted h-19 w-13 cursor-pointer overflow-hidden rounded-xs transition-opacity hover:opacity-80"
         @click="goToBook"
       >
         <BookCoverArtwork

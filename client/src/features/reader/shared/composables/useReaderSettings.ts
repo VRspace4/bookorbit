@@ -12,8 +12,20 @@ import {
 import { useReaderDeviceFormFactor, getReaderDeviceFormFactor } from '@/features/reader/shared/lib/device-form-factor'
 import {
   CBX_READER_DEFAULTS,
+  CBX_SPREAD_GAP_MAX,
+  CBX_SPREAD_GAP_MIN,
   EPUB_DEVICE_SETTING_KEYS,
+  EPUB_FONT_SIZE_MAX,
+  EPUB_FONT_SIZE_MIN,
+  EPUB_LETTER_SPACING_MAX,
+  EPUB_LETTER_SPACING_MIN,
+  EPUB_PARAGRAPH_SPACING_MAX,
+  EPUB_PARAGRAPH_SPACING_MIN,
   EPUB_READER_DEFAULTS,
+  EPUB_TEXT_INDENT_MAX,
+  EPUB_TEXT_INDENT_MIN,
+  EPUB_WORD_SPACING_MAX,
+  EPUB_WORD_SPACING_MIN,
   PDF_READER_DEFAULTS,
   READER_DEVICE_FORM_FACTORS,
   type CbxReaderSettings,
@@ -33,6 +45,7 @@ import {
   migrateFlatEpubDefaultsToV2,
   pickEpubDeviceSettings,
   pickEpubSharedSettings,
+  isCssFontWeight,
 } from '@bookorbit/types'
 
 // -- Shared localStorage helpers --
@@ -69,23 +82,72 @@ function isIntegerInRange(value: unknown, min: number, max: number): value is nu
   return Number.isInteger(value) && isNumberInRange(value, min, max)
 }
 
+function isNullableNumberInRange(value: unknown, min: number, max: number): value is number | null {
+  return value === null || isNumberInRange(value, min, max)
+}
+
 function sanitizeEpubPartialSettings(settings: unknown): Partial<EpubReaderSettings> | null {
   if (!isRecord(settings)) return null
 
   const out: Partial<EpubReaderSettings> = {}
 
-  if (typeof settings.theme === 'string') out.theme = settings.theme as EpubReaderSettings['theme']
-  if (settings.fontFamily === null || typeof settings.fontFamily === 'string') out.fontFamily = settings.fontFamily as string | null
-  if (isNumberInRange(settings.fontSize, 8, 48)) out.fontSize = settings.fontSize
-  if (isNumberInRange(settings.lineHeight, 1, 3)) out.lineHeight = settings.lineHeight
-  if (isIntegerInRange(settings.maxColumnCount, 1, 3)) out.maxColumnCount = settings.maxColumnCount
-  if (isNumberInRange(settings.gap, 0, 0.5)) out.gap = settings.gap
-  if (isIntegerInRange(settings.maxInlineSize, 400, 1600)) out.maxInlineSize = settings.maxInlineSize
-  if (isIntegerInRange(settings.maxBlockSize, 600, 2400)) out.maxBlockSize = settings.maxBlockSize
-  if (typeof settings.justify === 'boolean') out.justify = settings.justify
-  if (typeof settings.hyphenate === 'boolean') out.hyphenate = settings.hyphenate
-  if (settings.flow === 'paginated' || settings.flow === 'scrolled') out.flow = settings.flow
-  if (typeof settings.overrideBookFormatting === 'boolean') out.overrideBookFormatting = settings.overrideBookFormatting
+  if (typeof settings.themeName === 'string' && settings.themeName.length > 0) {
+    out.themeName = settings.themeName
+  }
+  if (typeof settings.isDark === 'boolean') {
+    out.isDark = settings.isDark
+  }
+  if ((typeof settings.fontFamily === 'string' && settings.fontFamily.length > 0) || settings.fontFamily === null) {
+    out.fontFamily = settings.fontFamily
+  }
+  if (isCssFontWeight(settings.fontWeight)) {
+    out.fontWeight = settings.fontWeight
+  }
+  if (settings.fontStyle === 'normal' || settings.fontStyle === 'italic') {
+    out.fontStyle = settings.fontStyle
+  }
+  if (isNumberInRange(settings.fontSize, EPUB_FONT_SIZE_MIN, EPUB_FONT_SIZE_MAX)) {
+    out.fontSize = settings.fontSize
+  }
+  if (isNumberInRange(settings.lineHeight, 0.8, 3)) {
+    out.lineHeight = settings.lineHeight
+  }
+  if (isNumberInRange(settings.paragraphSpacing, EPUB_PARAGRAPH_SPACING_MIN, EPUB_PARAGRAPH_SPACING_MAX)) {
+    out.paragraphSpacing = settings.paragraphSpacing
+  }
+  if (isNullableNumberInRange(settings.letterSpacing, EPUB_LETTER_SPACING_MIN, EPUB_LETTER_SPACING_MAX)) {
+    out.letterSpacing = settings.letterSpacing
+  }
+  if (isNullableNumberInRange(settings.wordSpacing, EPUB_WORD_SPACING_MIN, EPUB_WORD_SPACING_MAX)) {
+    out.wordSpacing = settings.wordSpacing
+  }
+  if (isNullableNumberInRange(settings.textIndent, EPUB_TEXT_INDENT_MIN, EPUB_TEXT_INDENT_MAX)) {
+    out.textIndent = settings.textIndent
+  }
+  if (isIntegerInRange(settings.maxColumnCount, 1, 10)) {
+    out.maxColumnCount = settings.maxColumnCount
+  }
+  if (isNumberInRange(settings.gap, 0, 0.5)) {
+    out.gap = settings.gap
+  }
+  if (isIntegerInRange(settings.maxInlineSize, 400, 1600)) {
+    out.maxInlineSize = settings.maxInlineSize
+  }
+  if (isIntegerInRange(settings.maxBlockSize, 600, 2400)) {
+    out.maxBlockSize = settings.maxBlockSize
+  }
+  if (typeof settings.justify === 'boolean') {
+    out.justify = settings.justify
+  }
+  if (typeof settings.hyphenate === 'boolean') {
+    out.hyphenate = settings.hyphenate
+  }
+  if (settings.flow === 'paginated' || settings.flow === 'scrolled') {
+    out.flow = settings.flow
+  }
+  if (typeof settings.overrideBookFormatting === 'boolean') {
+    out.overrideBookFormatting = settings.overrideBookFormatting
+  }
   if (settings.footerDisplayMode === 0 || settings.footerDisplayMode === 1 || settings.footerDisplayMode === 2) {
     out.footerDisplayMode = settings.footerDisplayMode
   }
@@ -95,10 +157,21 @@ function sanitizeEpubPartialSettings(settings: unknown): Partial<EpubReaderSetti
 
   // Preserve TTS keys when present (local feature)
   for (const key of [
-    'ttsProvider', 'ttsVoice', 'ttsRate', 'ttsPitch', 'ttsVolume',
-    'ttsGcpChirp3Voice', 'ttsAzureVoice', 'ttsXaiVoice', 'ttsKokoroVoice', 'ttsGpt4oMiniVoice',
-    'ttsSkipBackSeconds', 'ttsSkipForwardSeconds', 'themeHighlightColors',
-    'ttsSentenceHighlightColor', 'ttsWordHighlightColor',
+    'ttsProvider',
+    'ttsVoice',
+    'ttsRate',
+    'ttsPitch',
+    'ttsVolume',
+    'ttsGcpChirp3Voice',
+    'ttsAzureVoice',
+    'ttsXaiVoice',
+    'ttsKokoroVoice',
+    'ttsGpt4oMiniVoice',
+    'ttsSkipBackSeconds',
+    'ttsSkipForwardSeconds',
+    'themeHighlightColors',
+    'ttsSentenceHighlightColor',
+    'ttsWordHighlightColor',
   ] as const) {
     if (key in settings) {
       ;(out as Record<string, unknown>)[key] = (settings as Record<string, unknown>)[key]
@@ -113,6 +186,8 @@ function sanitizePdfPartialSettings(settings: unknown): Partial<PdfReaderSetting
   const out: Partial<PdfReaderSettings> = {}
   if (settings.scrollMode === 'vertical' || settings.scrollMode === 'horizontal' || settings.scrollMode === 'page') {
     out.scrollMode = settings.scrollMode
+  } else if (settings.scrollMode === 'wrapped') {
+    out.scrollMode = 'vertical'
   }
   if (settings.spread === 'none' || settings.spread === 'odd' || settings.spread === 'even' || settings.spread === 'auto') {
     out.spread = settings.spread
@@ -126,8 +201,6 @@ function sanitizePdfPartialSettings(settings: unknown): Partial<PdfReaderSetting
   }
   return out
 }
-
-
 
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
@@ -227,6 +300,9 @@ function sanitizeCbxPartialSettings(settings: unknown): Partial<CbxReaderSetting
   if (settings.spreadAlignment === 'normal' || settings.spreadAlignment === 'shifted') {
     out.spreadAlignment = settings.spreadAlignment
   }
+  if (isIntegerInRange(settings.spreadGap, CBX_SPREAD_GAP_MIN, CBX_SPREAD_GAP_MAX)) {
+    out.spreadGap = settings.spreadGap
+  }
   if (typeof settings.forceTwoPage === 'boolean') {
     out.forceTwoPage = settings.forceTwoPage
   }
@@ -235,6 +311,9 @@ function sanitizeCbxPartialSettings(settings: unknown): Partial<CbxReaderSetting
   }
   if (settings.bgColor === 'black' || settings.bgColor === 'gray' || settings.bgColor === 'white') {
     out.bgColor = settings.bgColor
+  }
+  if (typeof settings.autoAdvance === 'boolean') {
+    out.autoAdvance = settings.autoAdvance
   }
 
   return out
@@ -573,7 +652,10 @@ export function useReaderSettings(bookFileId: number, format: string) {
 
   // Merges only the changed field(s) into the existing delta — never saves a full snapshot.
   function updateBookSettings(patch: Partial<ReaderSettings>) {
-    const next = { ...(bookDelta.value ?? undefined), ...patch } as Partial<ReaderSettings>
+    const next = {
+      ...(bookDelta.value ?? undefined),
+      ...patch,
+    } as Partial<ReaderSettings>
     bookDelta.value = next
     isCustomized.value = Object.keys(next).length > 0
     writeLs(lsBookKey(bookFileId), next)
@@ -590,7 +672,9 @@ export function useReaderSettings(bookFileId: number, format: string) {
     removeLs(lsBookKey(bookFileId))
 
     if (syncEnabled.value) {
-      api(`/api/v1/reader/preferences/${bookFileId}`, { method: 'DELETE' }).catch(() => {})
+      api(`/api/v1/reader/preferences/${bookFileId}`, {
+        method: 'DELETE',
+      }).catch(() => {})
     }
   }
 
@@ -762,7 +846,7 @@ export function useReaderDefaultSettings<T extends ReaderSettings>(format: strin
       let nextPatch = patch as Partial<ReaderSettings>
       const epubEffective = effective.value as EpubReaderSettings
 
-      if ('themeName' in patch && patch.themeName) {
+      if ('themeName' in patch && typeof patch.themeName === 'string' && patch.themeName) {
         nextPatch = {
           ...(buildThemeSwitchHighlightPatch(epubEffective, patch.themeName) as Partial<ReaderSettings>),
           ...patch,

@@ -1,17 +1,23 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { readdir, stat } from 'fs/promises';
 import type { BigIntStats } from 'fs';
 import { dirname, join, relative } from 'path';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { pathsReferToSameEntry } from '../../common/utils/path-identity.utils';
+import { selectPrimaryFile } from '../../common/utils/primary-file-selection.utils';
 
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
+import { CoverSlotReconciler } from '../metadata/cover-slot-reconciler.service';
 import { classifyFile, DEFAULT_FORMAT_PRIORITY } from './lib/classify';
 import { ScannerRepository } from './scanner.repository';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
 
 export type FileEventResult =
   | { type: 'book-missing'; libraryId: number; bookIds: number[] }
   | { type: 'book-restored'; libraryId: number; bookIds: number[] }
   | { type: 'book-moved'; libraryId: number; bookIds: number[] }
   | { type: 'book-transferred'; fromLibraryId: number; toLibraryId: number; bookIds: number[] }
+  | { type: 'scan-required'; scope: 'file' | 'directory' }
   | { type: 'noop' };
 
 type FsStat = BigIntStats;
@@ -22,7 +28,20 @@ const DUPLICATE_MOVE_REPAIR_WINDOW_MS = 30 * 60 * 1000;
 export class FileEventProcessorService {
   private readonly logger = new Logger(FileEventProcessorService.name);
 
-  constructor(private readonly scannerRepo: ScannerRepository) {}
+  constructor(
+    private readonly scannerRepo: ScannerRepository,
+    private readonly coverStore: BookCoverStore,
+    @Optional() private readonly coverReconciler?: CoverSlotReconciler,
+  ) {}
+
+  private async inspectMediaOverlayFields(absolutePath: string, format: string | null) {
+    return inspectEpubMediaOverlayFields(absolutePath, format, (err) => {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[scanner.file_event.media_overlay_capability] [fail] path="${sanitizeLogValue(absolutePath)}" errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - EPUB media-overlay inspection failed`,
+      );
+    });
+  }
 
   async handleUnlink(absolutePath: string, scopeLibraryId?: number): Promise<FileEventResult> {
     const row = await this.scannerRepo.findBookFileByAbsolutePath(absolutePath, scopeLibraryId);
@@ -38,6 +57,7 @@ export class FileEventProcessorService {
 
     if (!shouldReevaluate) {
       await this.scannerRepo.deleteBookFile(file.id);
+      if (file.role === 'content') void this.coverReconciler?.enqueue([file.bookId], { filesChanged: true });
       this.logger.log(
         `[scanner.file_event.unlink] [end] libraryId=${rowLibraryId} bookId=${file.bookId} path="${sanitizeLogValue(absolutePath)}" action=remove_non_selected - non-selected file removed`,
       );
@@ -46,7 +66,14 @@ export class FileEventProcessorService {
 
     const allFiles = await this.scannerRepo.findBookFilesByBookId(file.bookId);
     const remaining = allFiles.filter((f) => f.id !== file.id);
-    const remainingContent = remaining.filter((f) => f.role === 'content').map((f) => ({ id: f.id, format: f.format, sizeBytes: f.sizeBytes }));
+    const remainingContent = remaining
+      .filter((f) => f.role === 'content')
+      .map((f) => ({
+        id: f.id,
+        format: f.format,
+        sizeBytes: f.sizeBytes,
+        mediaOverlayAvailable: f.mediaOverlayAvailable,
+      }));
 
     if (remainingContent.length === 0) {
       // Keep the file record so inode-based rename detection in handleCreate still works.
@@ -96,14 +123,20 @@ export class FileEventProcessorService {
     if (fileStat.isDirectory()) return this.handleCreateDir(absolutePath, scopeLibraryId);
 
     const { role, format } = classifyFile(absolutePath);
+    if (role === 'cover') return this.handleFolderImageChange(absolutePath, scopeLibraryId);
     if (role !== 'content') return { type: 'noop' };
 
     const existing = await this.scannerRepo.findBookFileByAbsolutePath(absolutePath, scopeLibraryId);
     if (existing) {
+      const currentRelPath = relative(existing.libraryFolderPath, absolutePath);
       // Check the file's own book first before searching for any missing book
       const ownBook = await this.scannerRepo.findBookById(existing.file.bookId);
       if (ownBook?.status === 'missing') {
-        await this.scannerRepo.updateBookFile(existing.file.id, this.statToFileInfo(fileStat));
+        await this.scannerRepo.updateBookFile(existing.file.id, {
+          ...this.statToFileInfo(fileStat),
+          relPath: currentRelPath,
+          ...(await this.inspectMediaOverlayFields(absolutePath, format)),
+        });
         await this.refreshPrimaryFile(ownBook.id, existing.libraryId);
         await this.scannerRepo.markBooksAsPresent([ownBook.id]);
         this.logger.log(
@@ -116,9 +149,19 @@ export class FileEventProcessorService {
       const book =
         (await this.scannerRepo.findMissingBookByFolderPath(dirname(absolutePath), scopeLibraryId)) ??
         (await this.scannerRepo.findMissingBookByFolderPath(absolutePath, scopeLibraryId));
-      if (!book) return { type: 'noop' };
+      if (!book) {
+        if (!this.fileStateMatches(existing.file, fileStat)) return { type: 'scan-required', scope: 'file' };
+        if (existing.file.relPath !== currentRelPath) {
+          await this.scannerRepo.updateBookFile(existing.file.id, { relPath: currentRelPath });
+        }
+        return { type: 'noop' };
+      }
 
-      await this.scannerRepo.updateBookFile(existing.file.id, this.statToFileInfo(fileStat));
+      await this.scannerRepo.updateBookFile(existing.file.id, {
+        ...this.statToFileInfo(fileStat),
+        relPath: currentRelPath,
+        ...(await this.inspectMediaOverlayFields(absolutePath, format)),
+      });
       await this.refreshPrimaryFile(book.id, book.libraryId);
       await this.scannerRepo.markBooksAsPresent([book.id]);
       this.logger.log(
@@ -141,6 +184,7 @@ export class FileEventProcessorService {
         ...this.statToFileInfo(fileStat),
         format,
         role: 'content',
+        ...(await this.inspectMediaOverlayFields(absolutePath, format)),
       });
 
       await this.refreshPrimaryFile(book.id, book.libraryId);
@@ -169,6 +213,7 @@ export class FileEventProcessorService {
             ...this.statToFileInfo(fileStat),
             format,
             role: 'content',
+            ...(await this.inspectMediaOverlayFields(absolutePath, format)),
           });
           await this.refreshPrimaryFile(ownBook.id, ownBook.libraryId);
           await this.scannerRepo.markBooksAsPresent([ownBook.id]);
@@ -180,7 +225,20 @@ export class FileEventProcessorService {
       }
     }
 
-    return this.detectMovedFile(absolutePath, fileStat, scopeLibraryId);
+    const moveResult = await this.detectMovedFile(absolutePath, fileStat, scopeLibraryId);
+    return moveResult.type === 'noop' ? { type: 'scan-required', scope: 'file' } : moveResult;
+  }
+
+  /**
+   * A folder image can fill an empty cover slot or replace one that came from a folder image, so a
+   * new or edited one inside a known book folder is registered by rescanning that folder.
+   */
+  private async handleFolderImageChange(absolutePath: string, scopeLibraryId?: number): Promise<FileEventResult> {
+    const folderPath = dirname(absolutePath);
+    const books = await this.scannerRepo.findBooksByFolderPath(folderPath, scopeLibraryId);
+    return books.some((book) => book.folderPath === folderPath && book.status !== 'missing')
+      ? { type: 'scan-required', scope: 'file' }
+      : { type: 'noop' };
   }
 
   async reconcileMissingBooks(libraryIds: number[]): Promise<FileEventResult[]> {
@@ -213,7 +271,15 @@ export class FileEventProcessorService {
         const cached = settingsCache.get(book.libraryId)!;
         const result =
           (await this.tryResolveDuplicateMove(book.id)) ??
-          (await this.tryRestoreBook(book as { id: number; libraryId: number; libraryFolderId: number; folderPath: string }, cached.formatPriority));
+          (await this.tryRestoreBook(
+            book as {
+              id: number;
+              libraryId: number;
+              libraryFolderId: number;
+              folderPath: string;
+            },
+            cached.formatPriority,
+          ));
         if (result.type !== 'noop') results.push(result);
       }
 
@@ -232,12 +298,23 @@ export class FileEventProcessorService {
   }
 
   private async tryRestoreBook(
-    book: { id: number; libraryId: number; libraryFolderId: number; folderPath: string },
+    book: {
+      id: number;
+      libraryId: number;
+      libraryFolderId: number;
+      folderPath: string;
+    },
     cachedFormatPriority?: string[],
   ): Promise<FileEventResult> {
     const files = (await this.scannerRepo.findBookFilesByBookId(book.id))
       .filter((f) => f.role === 'content')
-      .map((f) => ({ id: f.id, absolutePath: f.absolutePath, format: f.format, sizeBytes: f.sizeBytes }));
+      .map((f) => ({
+        id: f.id,
+        absolutePath: f.absolutePath,
+        format: f.format,
+        sizeBytes: f.sizeBytes,
+        mediaOverlayAvailable: f.mediaOverlayAvailable,
+      }));
     const existingContent: ((typeof files)[number] & { stat: FsStat })[] = [];
 
     for (const file of files) {
@@ -249,7 +326,12 @@ export class FileEventProcessorService {
     if (existingContent.length === 0) return { type: 'noop' };
 
     for (const file of existingContent) {
-      await this.scannerRepo.updateBookFile(file.id, this.statToFileInfo(file.stat));
+      const mediaOverlayFields = await this.inspectMediaOverlayFields(file.absolutePath, file.format);
+      await this.scannerRepo.updateBookFile(file.id, {
+        ...this.statToFileInfo(file.stat),
+        ...mediaOverlayFields,
+      });
+      file.mediaOverlayAvailable = mediaOverlayFields.mediaOverlayAvailable;
     }
 
     // Use cached formatPriority when available
@@ -300,6 +382,7 @@ export class FileEventProcessorService {
         duplicateFileId: candidate.file.id,
       });
       if (!moved) continue;
+      await this.coverStore.removeCoverDirectory(moved.duplicateBookId).catch(() => undefined);
 
       this.logger.log(
         `[scanner.file_event.duplicate_move] [end] libraryId=${moved.libraryId} bookId=${bookId} duplicateBookId=${moved.duplicateBookId} from="${sanitizeLogValue(sourceFile.absolutePath)}" to="${sanitizeLogValue(candidate.file.absolutePath)}" - duplicate import reconciled as moved book`,
@@ -325,10 +408,13 @@ export class FileEventProcessorService {
     // Partial move guard - for multi-file books, verify the old file is
     // actually gone before reassigning. During a folder move, multiple events fire
     // and some files may not have been unlinked yet.
-    const oldFileStillExists = await stat(file.absolutePath).then(
+    let oldFileStillExists = await stat(file.absolutePath).then(
       (s) => s.isFile(),
       () => false,
     );
+    if (oldFileStillExists && (await pathsReferToSameEntry(file.absolutePath, newAbsolutePath))) {
+      oldFileStillExists = false;
+    }
     if (oldFileStillExists) {
       this.logger.log(
         `[scanner.file_event.move] [end] libraryId=${rowLibraryId} bookId=${file.bookId} from="${sanitizeLogValue(file.absolutePath)}" to="${sanitizeLogValue(newAbsolutePath)}" action=skip_old_still_exists - old file still exists, deferring to scan`,
@@ -354,10 +440,13 @@ export class FileEventProcessorService {
       }
     }
 
+    const { format } = classifyFile(newAbsolutePath);
     await this.scannerRepo.updateBookFile(file.id, {
       absolutePath: newAbsolutePath,
       relPath: relative(libraryFolderPath, newAbsolutePath),
       ...this.statToFileInfo(fileStat),
+      format,
+      ...(await this.inspectMediaOverlayFields(newAbsolutePath, format)),
     });
 
     if (newFolderPath !== oldFolderPath) {
@@ -373,6 +462,10 @@ export class FileEventProcessorService {
 
   private statToFileInfo(s: FsStat): { ino: bigint; sizeBytes: number; mtime: Date } {
     return { ino: s.ino, sizeBytes: Number(s.size), mtime: s.mtime };
+  }
+
+  private fileStateMatches(file: { ino: bigint; sizeBytes: number | null; mtime: Date | null }, fileStat: FsStat): boolean {
+    return file.ino === fileStat.ino && file.sizeBytes === Number(fileStat.size) && file.mtime?.getTime() === fileStat.mtime.getTime();
   }
 
   private async pathIsFile(path: string): Promise<boolean> {
@@ -395,44 +488,72 @@ export class FileEventProcessorService {
   }
 
   private async detectMovedBooksInDir(dirPath: string, scopeLibraryId?: number): Promise<FileEventResult> {
-    const entries = await readdir(dirPath, { recursive: true, withFileTypes: true }).catch(() => []);
+    const entries = await readdir(dirPath, { recursive: true, withFileTypes: true }).catch(() => null);
+    if (!entries) return { type: 'scan-required', scope: 'directory' };
+
     const movedBookIds: number[] = [];
     let detectedLibraryId: number | null = null;
+    let contentFound = false;
+    let scanRequired = false;
+    const knownBooks = await this.scannerRepo.findBooksByFolderPath(dirPath, scopeLibraryId);
+    const knownFiles = await this.scannerRepo.findBookFilesByBookIds(knownBooks.map((book) => book.id));
+    const knownFileByPath = new Map(knownFiles.map((file) => [file.absolutePath, file]));
 
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       const fullPath = join(entry.parentPath ?? dirPath, entry.name);
       const { role } = classifyFile(fullPath);
       if (role !== 'content') continue;
+      contentFound = true;
 
       const s = await stat(fullPath, { bigint: true }).catch(() => null);
-      if (!s) continue;
+      if (!s) {
+        scanRequired = true;
+        continue;
+      }
+
+      const existing = knownFileByPath.get(fullPath);
+      if (existing) {
+        if (!this.fileStateMatches(existing, s)) scanRequired = true;
+        continue;
+      }
 
       const result = await this.detectMovedFile(fullPath, s, scopeLibraryId);
       if (result.type === 'book-moved') {
         movedBookIds.push(...result.bookIds);
         detectedLibraryId = result.libraryId;
+      } else if (result.type === 'noop') {
+        scanRequired = true;
       }
     }
 
-    if (movedBookIds.length === 0 || !detectedLibraryId) return { type: 'noop' };
+    if (movedBookIds.length === 0 || !detectedLibraryId) {
+      return !contentFound || scanRequired ? { type: 'scan-required', scope: 'directory' } : { type: 'noop' };
+    }
     this.logger.log(
       `[scanner.file_event.move_dir] [end] libraryId=${detectedLibraryId} dirPath="${sanitizeLogValue(dirPath)}" movedCount=${movedBookIds.length} - moved books detected in directory`,
     );
     return { type: 'book-moved', libraryId: detectedLibraryId, bookIds: movedBookIds };
   }
 
-  private pickPrimaryFile<T extends { id: number; format: string | null; sizeBytes: number | null }>(files: T[], formatPriority: string[]): T | null {
-    if (files.length === 0) return null;
-    const candidates = files.filter((f) => (f.sizeBytes ?? 0) > 0);
-    const pool = candidates.length > 0 ? candidates : files;
-    return formatPriority.reduce<T | null>((found, fmt) => found ?? pool.find((f) => f.format === fmt) ?? null, null) ?? pool[0] ?? null;
+  private pickPrimaryFile<T extends { id: number; format: string | null; sizeBytes: number | null; mediaOverlayAvailable?: boolean | null }>(
+    files: T[],
+    formatPriority: string[],
+  ): T | null {
+    return selectPrimaryFile(files, formatPriority, {
+      allowZeroByteFallback: true,
+    });
   }
 
   private async refreshPrimaryFile(bookId: number, libraryId: number): Promise<void> {
     const files = (await this.scannerRepo.findBookFilesByBookId(bookId))
       .filter((f) => f.role === 'content')
-      .map((f) => ({ id: f.id, format: f.format, sizeBytes: f.sizeBytes }));
+      .map((f) => ({
+        id: f.id,
+        format: f.format,
+        sizeBytes: f.sizeBytes,
+        mediaOverlayAvailable: f.mediaOverlayAvailable,
+      }));
     const settings = await this.scannerRepo.findLibrarySettings(libraryId);
     const formatPriority = settings?.formatPriority ?? DEFAULT_FORMAT_PRIORITY;
     const winner = this.pickPrimaryFile(files, formatPriority);
@@ -446,7 +567,14 @@ export class FileEventProcessorService {
       const matchedLibraryId = missingBooks[0].libraryId;
 
       for (const book of missingBooks) {
-        const result = await this.tryRestoreBook(book as { id: number; libraryId: number; libraryFolderId: number; folderPath: string });
+        const result = await this.tryRestoreBook(
+          book as {
+            id: number;
+            libraryId: number;
+            libraryFolderId: number;
+            folderPath: string;
+          },
+        );
         if (result.type !== 'noop') restoredIds.push(book.id);
       }
 

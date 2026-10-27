@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@/lib/api', () => ({
-  getAccessToken: vi.fn<() => string>().mockReturnValue('test-token'),
+  getValidToken: vi.fn<() => Promise<string>>().mockResolvedValue('test-token'),
 }))
 
 vi.mock('@/features/settings/composables/useAppInfo', () => ({
@@ -22,6 +22,12 @@ interface MockXhrInstance {
 }
 
 const mockXhrInstances: MockXhrInstance[] = []
+
+/** The upload resolves a valid token before opening the request, so the XHR appears a tick later. */
+async function nextXhr(): Promise<MockXhrInstance> {
+  await vi.waitFor(() => expect(mockXhrInstances[0]).toBeDefined())
+  return mockXhrInstances[0]!
+}
 
 const defaultResponseText = JSON.stringify({
   id: 55,
@@ -78,6 +84,13 @@ describe('useAddBookFile', () => {
       expect(files.value).toHaveLength(1)
       expect(files.value[0].status).toBe('pending')
       expect(files.value[0].file.name).toBe('book.epub')
+    })
+
+    it('accepts DjVu as an additional edition regardless of extension case', () => {
+      const { files, addFiles } = useAddBookFile()
+      addFiles([makeFile('scanned-book.DJVU')])
+      expect(files.value[0].status).toBe('pending')
+      expect(files.value[0].validationError).toBe(false)
     })
 
     it('marks unsupported format as error without attempting upload', () => {
@@ -153,7 +166,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onerror?.()
       await uploadPromise
 
@@ -215,7 +228,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onload?.()
       await uploadPromise
 
@@ -227,7 +240,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onload?.()
       await uploadPromise
 
@@ -239,7 +252,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 201
       xhr.onload?.()
       await uploadPromise
@@ -253,7 +266,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 409
       xhr.responseText = JSON.stringify({ message: 'File already attached' })
       xhr.onload?.()
@@ -268,7 +281,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onerror?.()
       await uploadPromise
 
@@ -281,7 +294,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('bad.xyz'), makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onload?.()
       await uploadPromise
 
@@ -294,7 +307,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 } as ProgressEvent)
 
       expect(files.value[0].progress).toBe(50)
@@ -315,7 +328,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 201
       xhr.responseText = 'not-json'
       xhr.onload?.()
@@ -330,7 +343,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(7)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 500
       xhr.responseText = 'Internal Server Error'
       xhr.onload?.()
@@ -347,7 +360,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42, { renameAfter: true })
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 201
       xhr.onload?.()
       await uploadPromise
@@ -360,7 +373,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42, { renameAfter: false })
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onload?.()
       await uploadPromise
 
@@ -372,7 +385,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42)
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.onload?.()
       await uploadPromise
 
@@ -384,7 +397,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42, { renameAfter: true })
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 409
       xhr.responseText = JSON.stringify({ message: 'Already exists' })
       xhr.onload?.()
@@ -400,7 +413,7 @@ describe('useAddBookFile', () => {
       addFiles([makeFile('book.epub')])
 
       const uploadPromise = startUpload(42, { renameAfter: true })
-      const xhr = mockXhrInstances[0]
+      const xhr = await nextXhr()
       xhr.status = 201
       xhr.onload?.()
 

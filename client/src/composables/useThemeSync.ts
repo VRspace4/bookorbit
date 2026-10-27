@@ -1,6 +1,19 @@
-import { ACCENT_IDS, BACKGROUND_IDS, RADIUS_IDS, THEME_IDS, type ThemePreferences } from '@bookorbit/types'
+import {
+  ACCENT_IDS,
+  BACKGROUND_IDS,
+  GLOW_REACH_MAX,
+  GLOW_REACH_MIN,
+  RADIUS_IDS,
+  STYLE_IDS,
+  SURFACE_OPACITY_MAX,
+  SURFACE_OPACITY_MIN,
+  SURFACE_PALETTE_IDS,
+  THEME_IDS,
+  type ThemePreferences,
+} from '@bookorbit/types'
 import { watch } from 'vue'
 import { toast } from 'vue-sonner'
+import { i18n } from '@/i18n'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { api, getAccessToken } from '@/lib/api'
 import { useThemeStore } from '@/stores/theme'
@@ -19,6 +32,10 @@ function getCurrentPrefs(): ThemePreferences {
     radius: store.radius,
     background: store.background,
     brightness: store.brightness,
+    surfaceOpacity: store.surfaceOpacity,
+    style: store.style,
+    surfacePalette: store.surfacePalette,
+    glowReach: store.glowReach,
   }
 }
 
@@ -39,6 +56,21 @@ function sanitizeServerPrefs(raw: unknown): Partial<ThemePreferences> {
   if (BACKGROUND_IDS.includes(obj.background as ThemePreferences['background'])) out.background = obj.background as ThemePreferences['background']
   if (typeof obj.brightness === 'number' && Number.isInteger(obj.brightness) && obj.brightness >= 0 && obj.brightness <= 100) {
     out.brightness = obj.brightness
+  }
+  if (
+    typeof obj.surfaceOpacity === 'number' &&
+    Number.isInteger(obj.surfaceOpacity) &&
+    obj.surfaceOpacity >= SURFACE_OPACITY_MIN &&
+    obj.surfaceOpacity <= SURFACE_OPACITY_MAX
+  ) {
+    out.surfaceOpacity = obj.surfaceOpacity
+  }
+  if (STYLE_IDS.includes(obj.style as NonNullable<ThemePreferences['style']>)) out.style = obj.style as ThemePreferences['style']
+  if (SURFACE_PALETTE_IDS.includes(obj.surfacePalette as NonNullable<ThemePreferences['surfacePalette']>)) {
+    out.surfacePalette = obj.surfacePalette as ThemePreferences['surfacePalette']
+  }
+  if (typeof obj.glowReach === 'number' && Number.isInteger(obj.glowReach) && obj.glowReach >= GLOW_REACH_MIN && obj.glowReach <= GLOW_REACH_MAX) {
+    out.glowReach = obj.glowReach
   }
 
   return out
@@ -83,6 +115,10 @@ export async function loadFromServer(): Promise<void> {
       if (prefs.radius !== undefined) store.setRadius(prefs.radius)
       if (prefs.background !== undefined) store.setBackground(prefs.background)
       if (prefs.brightness !== undefined) store.setBrightness(prefs.brightness)
+      if (prefs.surfaceOpacity !== undefined) store.setSurfaceOpacity(prefs.surfaceOpacity)
+      if (prefs.style !== undefined) store.setStyle(prefs.style)
+      if (prefs.surfacePalette !== undefined) store.setSurfacePalette(prefs.surfacePalette)
+      if (prefs.glowReach !== undefined) store.setGlowReach(prefs.glowReach)
     } finally {
       isApplyingServerPrefs = false
     }
@@ -113,11 +149,9 @@ export async function saveToServer(prefs: ThemePreferences): Promise<void> {
       body: JSON.stringify({ settings: prefs }),
     })
 
-    if (!res.ok) {
-      toast.error('Failed to save theme preferences')
-    }
+    if (!res.ok) toast.error(i18n.global.t('settings.appearance.theme.syncSaveFailed'))
   } catch {
-    toast.error('Failed to save theme preferences')
+    toast.error(i18n.global.t('settings.appearance.theme.syncSaveFailed'))
   }
 }
 
@@ -135,7 +169,18 @@ export function initThemeSync(): void {
   const store = useThemeStore()
 
   watch(
-    () => [store.theme, store.accent, store.radius, store.background, store.brightness] as const,
+    () =>
+      [
+        store.theme,
+        store.accent,
+        store.radius,
+        store.background,
+        store.brightness,
+        store.surfaceOpacity,
+        store.style,
+        store.surfacePalette,
+        store.glowReach,
+      ] as const,
     () => {
       if (isApplyingServerPrefs || !isSyncEnabled()) return
 

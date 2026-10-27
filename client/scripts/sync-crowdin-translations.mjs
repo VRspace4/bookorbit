@@ -1,0 +1,569 @@
+import { Buffer } from 'node:buffer'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { isIP } from 'node:net'
+import { pathToFileURL } from 'node:url'
+import path from 'node:path'
+import { TARGET_CATALOGS, assertCrowdinTargetConfiguration } from './locale-configuration.mjs'
+import { findInvalidTargetMessages, flattenCatalog, validateCatalogs } from './locale-catalog-validation.mjs'
+import { collectSourceMessageKeys } from './locale-source-keys.mjs'
+import { PROTECTED_SOURCE_TERMS, findProtectedTermDrift } from './locale-protected-terms.mjs'
+import { findExportRepairs } from './locale-export-repairs.mjs'
+
+const API = 'https://api.crowdin.com/api/v2'
+const SOURCE_PATH_SUFFIX = '/client/src/locales/en.json'
+const MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024
+const MAX_CATALOG_BYTES = 10 * 1024 * 1024
+const REQUEST_TIMEOUT_MS = 30_000
+const SOURCE_SYNC_RETRY_DELAYS_MS = [0, 1_000, 2_000, 5_000, 10_000, 20_000, 30_000]
+const scriptDirectory = import.meta.dirname ?? path.join(process.cwd(), 'scripts')
+const clientRoot = path.resolve(scriptDirectory, '..')
+const localesDirectory = path.join(clientRoot, 'src/locales')
+
+export { TARGET_CATALOGS }
+
+const TARGET_LOCALES = new Set(TARGET_CATALOGS.map(({ locale }) => locale))
+
+async function responseText(response, maxBytes) {
+  const contentLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error(`Response exceeds ${maxBytes} bytes`)
+  }
+
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel()
+      throw new Error(`Response exceeds ${maxBytes} bytes`)
+    }
+    chunks.push(Buffer.from(value))
+  }
+
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+function parseJson(text, context) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`${context} returned invalid JSON`)
+  }
+}
+
+function ipv4Value(hostname) {
+  return hostname.split('.').reduce((value, octet) => value * 256 + Number(octet), 0) >>> 0
+}
+
+function isInIpv4Range(value, network, prefixLength) {
+  const mask = prefixLength === 0 ? 0 : (0xffffffff << (32 - prefixLength)) >>> 0
+  return (value & mask) === (network & mask)
+}
+
+function isBlockedIpv4(hostname) {
+  const value = ipv4Value(hostname)
+  return [
+    [ipv4Value('0.0.0.0'), 8],
+    [ipv4Value('10.0.0.0'), 8],
+    [ipv4Value('100.64.0.0'), 10],
+    [ipv4Value('127.0.0.0'), 8],
+    [ipv4Value('169.254.0.0'), 16],
+    [ipv4Value('172.16.0.0'), 12],
+    [ipv4Value('192.0.0.0'), 24],
+    [ipv4Value('192.0.2.0'), 24],
+    [ipv4Value('192.168.0.0'), 16],
+    [ipv4Value('198.18.0.0'), 15],
+    [ipv4Value('198.51.100.0'), 24],
+    [ipv4Value('203.0.113.0'), 24],
+    [ipv4Value('224.0.0.0'), 4],
+    [ipv4Value('240.0.0.0'), 4],
+  ].some(([network, prefixLength]) => isInIpv4Range(value, network, prefixLength))
+}
+
+function ipv6Groups(hostname) {
+  const [head, tail = ''] = hostname.split('::')
+  const headGroups = head ? head.split(':').map((group) => Number.parseInt(group, 16)) : []
+  const tailGroups = tail ? tail.split(':').map((group) => Number.parseInt(group, 16)) : []
+  return [...headGroups, ...Array(8 - headGroups.length - tailGroups.length).fill(0), ...tailGroups]
+}
+
+function isBlockedIpv6(hostname) {
+  const groups = ipv6Groups(hostname)
+  const first = groups[0]
+  const ipv4Mapped = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff
+  if (ipv4Mapped) {
+    const embedded = `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`
+    return isBlockedIpv4(embedded)
+  }
+
+  return (
+    groups.every((group) => group === 0) ||
+    (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) ||
+    groups.slice(0, 6).every((group) => group === 0) ||
+    (first & 0xfe00) === 0xfc00 ||
+    (first & 0xffc0) === 0xfe80 ||
+    (first & 0xffc0) === 0xfec0 ||
+    (first & 0xff00) === 0xff00
+  )
+}
+
+export function assertSafeDownloadUrl(value) {
+  const url = new URL(value)
+  if (url.protocol !== 'https:') throw new Error('Crowdin export URL must use HTTPS')
+
+  const hostname = url.hostname
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+    .toLowerCase()
+  const addressType = isIP(hostname)
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) {
+    throw new Error('Crowdin export URL must not target a local network host')
+  }
+  if ((addressType === 4 && isBlockedIpv4(hostname)) || (addressType === 6 && isBlockedIpv6(hostname))) {
+    throw new Error('Crowdin export URL must not target a local network host')
+  }
+
+  return url
+}
+
+async function downloadCatalog(fetchImpl, value) {
+  let url = assertSafeDownloadUrl(value)
+
+  for (let redirect = 0; redirect <= 3; redirect += 1) {
+    const response = await fetchImpl(url, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      if (!location || redirect === 3) throw new Error('Crowdin export exceeded the redirect limit')
+      url = assertSafeDownloadUrl(new URL(location, url).href)
+      continue
+    }
+    if (!response.ok) throw new Error(`Crowdin export download failed with HTTP ${response.status}`)
+    return parseJson(await responseText(response, MAX_CATALOG_BYTES), 'Crowdin export')
+  }
+
+  throw new Error('Crowdin export exceeded the redirect limit')
+}
+
+export function createCrowdinClient({ token, projectId, fetchImpl = fetch }) {
+  async function request(endpoint, init = {}) {
+    const response = await fetchImpl(`${API}${endpoint}`, {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+      redirect: 'error',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    const body = await responseText(response, MAX_API_RESPONSE_BYTES)
+    if (!response.ok) throw new Error(`Crowdin API ${endpoint} failed with HTTP ${response.status}: ${body.slice(0, 300)}`)
+    return body ? parseJson(body, `Crowdin API ${endpoint}`) : null
+  }
+
+  return {
+    async sourceFileId() {
+      for (let offset = 0; offset < 10_000; offset += 500) {
+        const page = await request(`/projects/${projectId}/files?limit=500&offset=${offset}`)
+        const match = page.data.find((entry) => entry.data.path.endsWith(SOURCE_PATH_SUFFIX))
+        if (match) return match.data.id
+        if (page.data.length < 500) break
+      }
+      throw new Error(`Crowdin source file ending in ${SOURCE_PATH_SUFFIX} was not found`)
+    },
+
+    async sourceCatalog(fileId) {
+      const download = await request(`/projects/${projectId}/files/${fileId}/download`)
+      return downloadCatalog(fetchImpl, download.data.url)
+    },
+
+    async uploadSource(filename, content) {
+      const storage = await request('/storages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Crowdin-API-FileName': filename,
+        },
+        body: content,
+      })
+      return storage.data.id
+    },
+
+    async updateSourceFile(fileId, storageId) {
+      await request(`/projects/${projectId}/files/${fileId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storageId, updateOption: 'keep_translations' }),
+      })
+    },
+
+    async exportedCatalog(fileId, languageId) {
+      const build = await request(`/projects/${projectId}/translations/builds/files/${fileId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetLanguageId: languageId, skipUntranslatedStrings: true }),
+      })
+      return downloadCatalog(fetchImpl, build.data.url)
+    },
+  }
+}
+
+function orderedSparseCatalog(reference, messages, prefix = '') {
+  const output = {}
+  for (const [key, child] of Object.entries(reference)) {
+    const messageKey = prefix ? `${prefix}.${key}` : key
+    if (typeof child === 'string') {
+      const translated = messages.get(messageKey)
+      if (translated !== undefined) output[key] = translated
+      continue
+    }
+
+    const nested = orderedSparseCatalog(child, messages, messageKey)
+    if (Object.keys(nested).length > 0) output[key] = nested
+  }
+  return output
+}
+
+export function normalizeCrowdinCatalog(exported, reference) {
+  const referenceMessages = flattenCatalog(reference)
+  const exportedMessages = flattenCatalog(exported)
+
+  for (const key of exportedMessages.keys()) {
+    if (!referenceMessages.has(key)) throw new Error(`Crowdin export contains unknown key ${key}`)
+  }
+  for (const [key, message] of exportedMessages) {
+    if (message.length === 0) exportedMessages.delete(key)
+  }
+
+  return orderedSparseCatalog(reference, exportedMessages)
+}
+
+async function mapWithConcurrency(values, concurrency, operation) {
+  const results = new Array(values.length)
+  let nextIndex = 0
+
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await operation(values[index])
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker))
+  return results
+}
+
+export function sourceDrift(referenceMessages, crowdinMessages) {
+  const missing = [...referenceMessages.keys()].filter((key) => !crowdinMessages.has(key))
+  const unexpected = [...crowdinMessages.keys()].filter((key) => !referenceMessages.has(key))
+  const changed = [...referenceMessages]
+    .filter(([key, message]) => crowdinMessages.has(key) && crowdinMessages.get(key) !== message)
+    .map(([key]) => key)
+  return { missing, unexpected, changed }
+}
+
+export function parseAllowedTranslationLosses(value = '') {
+  const allowed = new Set()
+  for (const entry of value.split(/[\s,]+/).filter(Boolean)) {
+    const separator = entry.indexOf(':')
+    const locale = entry.slice(0, separator)
+    const key = entry.slice(separator + 1)
+    if (separator < 1 || !TARGET_LOCALES.has(locale) || !/^[A-Za-z0-9_.-]+$/.test(key)) {
+      throw new Error(`Invalid translation loss acknowledgement ${entry}; expected locale:message.key`)
+    }
+    if (allowed.has(entry)) throw new Error(`Duplicate translation loss acknowledgement ${entry}`)
+    allowed.add(entry)
+  }
+  return allowed
+}
+
+// Exports are built with skipUntranslatedStrings, so Crowdin drops a key entirely once it stops
+// carrying a translation. Retention therefore compares presence, never message content: a translation
+// that equals the English source, such as Spanish "Error" or a product name, is a real translation.
+// A message this sync rejected is absent by our own decision and is reported as a rejection instead.
+export function findTranslationLosses({ locale, reference, current, exported, rejected = new Set() }) {
+  const losses = []
+
+  for (const key of current.keys()) {
+    if (!reference.has(key) || exported.has(key) || rejected.has(key)) continue
+    losses.push({ locale, key })
+  }
+
+  return losses
+}
+
+// Single translations leave Crowdin as a matter of course: a reviewer unapproves a string, or an
+// English edit invalidates the translation attached to it. Failing the whole sync on that churn
+// blocks every other locale over one message and demands a hand-typed acknowledgement that only a
+// manual run can supply, which is why this guard kept stalling the nightly export. It now watches for
+// the accident it was built to catch, an export that arrives empty or truncated, and lets ordinary
+// churn through to the pull request body.
+const RETENTION_LOSS_FLOOR = 25
+const RETENTION_LOSS_RATIO = 0.01
+
+export function retentionLossLimit(translatedKeyCount) {
+  return Math.max(RETENTION_LOSS_FLOOR, Math.ceil(translatedKeyCount * RETENTION_LOSS_RATIO))
+}
+
+export function assertTranslationRetention({
+  reference,
+  currentCatalogs,
+  exportedCatalogs,
+  allowedLosses = new Set(),
+  targetCatalogs = TARGET_CATALOGS,
+  rejections = [],
+}) {
+  const rejectedByLocale = new Map()
+  for (const { locale, key } of rejections) {
+    if (!rejectedByLocale.has(locale)) rejectedByLocale.set(locale, new Set())
+    rejectedByLocale.get(locale).add(key)
+  }
+
+  const losses = []
+  const excessive = []
+  for (const { locale } of targetCatalogs) {
+    const current = currentCatalogs.get(locale)
+    const exported = exportedCatalogs.get(locale)
+    if (!current || !exported) throw new Error(`Translation retention comparison is missing the ${locale} catalog`)
+
+    const detected = findTranslationLosses({ locale, reference, current, exported, rejected: rejectedByLocale.get(locale) })
+    const unacknowledged = detected.filter(({ key }) => !allowedLosses.has(`${locale}:${key}`))
+    const limit = retentionLossLimit(current.size)
+    if (unacknowledged.length > limit) excessive.push({ locale, count: unacknowledged.length, limit })
+    losses.push(...unacknowledged)
+  }
+
+  if (excessive.length > 0) {
+    const details = excessive.map(({ locale, count, limit }) => `${locale}: ${count} translations dropped, more than the ${limit} allowed`)
+    throw new Error(`Crowdin export would lose existing translations:\n${details.join('\n')}`)
+  }
+
+  return losses
+}
+
+const MAX_REPORTED_REJECTIONS = 50
+
+export function formatRejectionReport(rejections) {
+  if (rejections.length === 0) return ''
+
+  const listed = rejections.slice(0, MAX_REPORTED_REJECTIONS)
+  const lines = [
+    `### Rejected Crowdin messages (${rejections.length})`,
+    '',
+    'These translations did not pass catalog validation and were omitted, so the English source renders instead. Fix them in Crowdin.',
+    '',
+    ...listed.map(({ errors }) => `- ${errors[0]}`),
+  ]
+  if (rejections.length > listed.length) lines.push(`- ...and ${rejections.length - listed.length} more`)
+  return `${lines.join('\n')}\n`
+}
+
+export function formatProtectedTermReport(corrections) {
+  if (corrections.length === 0) return ''
+
+  return `${[
+    `### Restored protected terms (${corrections.length})`,
+    '',
+    'These messages keep the English source text in their software context. Crowdin returned a translation, so the source was restored. Fix them in Crowdin.',
+    '',
+    ...corrections.map(({ locale, key, message }) => `- ${locale}: ${key} was "${message}"`),
+    '',
+  ].join('\n')}\n`
+}
+
+export function formatTranslationLossReport(losses) {
+  if (losses.length === 0) return ''
+
+  const listed = losses.slice(0, MAX_REPORTED_REJECTIONS)
+  const lines = [
+    `### Translations no longer in Crowdin (${losses.length})`,
+    '',
+    'Crowdin stopped returning a translation for these messages, so the English source renders instead.',
+    '',
+    ...listed.map(({ locale, key }) => `- ${locale}: ${key}`),
+  ]
+  if (losses.length > listed.length) lines.push(`- ...and ${losses.length - listed.length} more`)
+  return `${lines.join('\n')}\n`
+}
+
+async function reportSyncIssues({ rejections, corrections, repairs, losses, reportPath }) {
+  if (repairs.length > 0) {
+    const kinds = repairs.flatMap(({ kinds: repaired }) => repaired)
+    const counts = [...new Set(kinds)].map((kind) => `${kind}=${kinds.filter((entry) => entry === kind).length}`)
+    console.log(`Repaired ${repairs.length} Crowdin messages before validation: ${counts.join(' ')}`)
+  }
+
+  if (losses.length > 0) {
+    console.log(`Crowdin no longer translates ${losses.length} messages; the English source renders instead:`)
+    for (const { locale, key } of losses.slice(0, MAX_REPORTED_REJECTIONS)) console.log(`  ${locale}: ${key}`)
+    if (losses.length > MAX_REPORTED_REJECTIONS) console.log(`  ...and ${losses.length - MAX_REPORTED_REJECTIONS} more`)
+  }
+
+  if (corrections.length > 0) {
+    console.log(`Restored ${corrections.length} protected terms to the English source:`)
+    for (const { locale, key, message } of corrections) console.log(`  ${locale}: ${key} was "${message}"`)
+  }
+
+  if (rejections.length > 0) {
+    console.log(`Rejected ${rejections.length} invalid Crowdin messages; the English source renders instead:`)
+    for (const { errors } of rejections.slice(0, MAX_REPORTED_REJECTIONS)) console.log(`  ${errors[0]}`)
+    if (rejections.length > MAX_REPORTED_REJECTIONS) console.log(`  ...and ${rejections.length - MAX_REPORTED_REJECTIONS} more`)
+  }
+
+  if (reportPath) {
+    await writeFile(reportPath, `${formatProtectedTermReport(corrections)}${formatRejectionReport(rejections)}${formatTranslationLossReport(losses)}`)
+  }
+}
+
+function hasSourceDrift({ missing, unexpected, changed }) {
+  return missing.length > 0 || unexpected.length > 0 || changed.length > 0
+}
+
+function formatSourceDrift(drift) {
+  return [
+    ...drift.missing.slice(0, 10).map((key) => `missing in Crowdin: ${key}`),
+    ...drift.unexpected.slice(0, 10).map((key) => `missing in Git: ${key}`),
+    ...drift.changed.slice(0, 10).map((key) => `different source text: ${key}`),
+  ].join('\n')
+}
+
+async function prepareCrowdinSource({ token, projectId, fetchImpl, catalogDirectory, assertTargetConfiguration, wait }) {
+  if (!token) throw new Error('CROWDIN_TOKEN is required')
+  await assertTargetConfiguration()
+
+  const sourcePath = path.join(catalogDirectory, 'en.json')
+  const sourceContent = await readFile(sourcePath, 'utf8')
+  const reference = JSON.parse(sourceContent)
+  const referenceMessages = flattenCatalog(reference)
+  const client = createCrowdinClient({ token, projectId, fetchImpl })
+  const fileId = await client.sourceFileId()
+  let drift = sourceDrift(referenceMessages, flattenCatalog(await client.sourceCatalog(fileId)))
+  let updated = false
+
+  if (hasSourceDrift(drift)) {
+    const storageId = await client.uploadSource(path.basename(sourcePath), sourceContent)
+    await client.updateSourceFile(fileId, storageId)
+    updated = true
+
+    for (const delayMs of SOURCE_SYNC_RETRY_DELAYS_MS) {
+      if (delayMs > 0) await wait(delayMs)
+      drift = sourceDrift(referenceMessages, flattenCatalog(await client.sourceCatalog(fileId)))
+      if (!hasSourceDrift(drift)) break
+    }
+  }
+
+  if (hasSourceDrift(drift)) {
+    throw new Error(`Crowdin source did not match en.json after update\n${formatSourceDrift(drift)}`)
+  }
+
+  return { client, fileId, reference, referenceMessages, updated }
+}
+
+export async function syncCrowdinSource({
+  token,
+  projectId = '912891',
+  fetchImpl = fetch,
+  catalogDirectory = localesDirectory,
+  assertTargetConfiguration = assertCrowdinTargetConfiguration,
+  wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+}) {
+  const { fileId, referenceMessages, updated } = await prepareCrowdinSource({
+    token,
+    projectId,
+    fetchImpl,
+    catalogDirectory,
+    assertTargetConfiguration,
+    wait,
+  })
+  console.log(`${updated ? 'Synchronized' : 'Verified'} ${referenceMessages.size} English source messages in Crowdin`)
+  return { fileId, messageCount: referenceMessages.size, updated }
+}
+
+export async function syncCrowdinTranslations({
+  token,
+  projectId = '912891',
+  fetchImpl = fetch,
+  catalogDirectory = localesDirectory,
+  outputDirectory = catalogDirectory,
+  allowedLosses = new Set(),
+  targetCatalogs = TARGET_CATALOGS,
+  assertTargetConfiguration = assertCrowdinTargetConfiguration,
+  collectMessageKeys = collectSourceMessageKeys,
+  protectedTerms = PROTECTED_SOURCE_TERMS,
+  reportPath = process.env.CROWDIN_REJECTION_REPORT || '',
+  wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+}) {
+  const { client, fileId, reference, referenceMessages, updated } = await prepareCrowdinSource({
+    token,
+    projectId,
+    fetchImpl,
+    catalogDirectory,
+    assertTargetConfiguration,
+    wait,
+  })
+  console.log(`${updated ? 'Synchronized' : 'Verified'} ${referenceMessages.size} English source messages in Crowdin`)
+  const currentCatalogs = new Map(
+    await Promise.all(
+      targetCatalogs.map(async ({ locale }) => {
+        const catalog = JSON.parse(await readFile(path.join(catalogDirectory, `${locale}.json`), 'utf8'))
+        return [locale, flattenCatalog(catalog)]
+      }),
+    ),
+  )
+
+  const downloaded = await mapWithConcurrency(targetCatalogs, 4, async ({ languageId, locale }) => ({
+    locale,
+    catalog: normalizeCrowdinCatalog(await client.exportedCatalog(fileId, languageId), reference),
+  }))
+  const catalogs = new Map([['en', referenceMessages]])
+  for (const { locale, catalog } of downloaded) catalogs.set(locale, flattenCatalog(catalog))
+
+  const corrections = findProtectedTermDrift({ catalogs, terms: protectedTerms })
+  for (const { locale, key, source } of corrections) catalogs.get(locale).set(key, source)
+
+  const repairs = findExportRepairs({ catalogs })
+  for (const { locale, key, message } of repairs) catalogs.get(locale).set(key, message)
+
+  const { slotCountKeys } = await collectMessageKeys()
+  const rejections = findInvalidTargetMessages({ catalogs, slotCountKeys })
+  for (const { locale, key } of rejections) catalogs.get(locale).delete(key)
+  const rewrittenLocales = new Set([...rejections, ...corrections, ...repairs].map(({ locale }) => locale))
+  for (const entry of downloaded) {
+    if (rewrittenLocales.has(entry.locale)) entry.catalog = orderedSparseCatalog(reference, catalogs.get(entry.locale))
+  }
+
+  const errors = validateCatalogs({ catalogs, slotCountKeys })
+  if (errors.length > 0) throw new Error(`Crowdin export validation failed:\n${errors.join('\n')}`)
+  const losses = assertTranslationRetention({
+    reference: referenceMessages,
+    currentCatalogs,
+    exportedCatalogs: catalogs,
+    allowedLosses,
+    targetCatalogs,
+    rejections,
+  })
+
+  await mkdir(outputDirectory, { recursive: true })
+  await Promise.all(
+    downloaded.map(({ locale, catalog }) => writeFile(path.join(outputDirectory, `${locale}.json`), `${JSON.stringify(catalog, null, 2)}\n`)),
+  )
+  await reportSyncIssues({ rejections, corrections, repairs, losses, reportPath })
+  console.log(`Synchronized ${downloaded.length} sparse translation catalogs from Crowdin`)
+  return { rejections, corrections, repairs, losses }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  syncCrowdinTranslations({
+    token: process.env.CROWDIN_TOKEN,
+    projectId: process.env.CROWDIN_PROJECT_ID || undefined,
+    allowedLosses: parseAllowedTranslationLosses(process.env.CROWDIN_ALLOWED_TRANSLATION_LOSSES),
+  }).catch((error) => {
+    console.error(error.message)
+    process.exitCode = 1
+  })
+}

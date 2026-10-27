@@ -1,5 +1,6 @@
+import { recordBookFileHashHistory } from '../../db/book-file-hash-history';
 import { Inject, Injectable } from '@nestjs/common';
-import { and, asc, desc, eq, isNull, ne } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import type { WriteResult, WriteLogEntry } from '@bookorbit/types';
@@ -39,10 +40,24 @@ export class FileWriteRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         fileHash: bookFiles.fileHash,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryId: books.libraryId,
+        fileWriteAllFiles: libraries.fileWriteAllFiles,
       })
       .from(books)
       .innerJoin(bookFiles, eq(bookFiles.id, books.primaryFileId))
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
+      .where(eq(books.id, bookId))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /** The library scope of a book that may have no primary file, which only the all-files mode can still write. */
+  async findFileWriteScopeForBook(bookId: number): Promise<{ libraryId: number; fileWriteAllFiles: boolean } | null> {
+    const [row] = await this.db
+      .select({ libraryId: books.libraryId, fileWriteAllFiles: libraries.fileWriteAllFiles })
+      .from(books)
+      .innerJoin(libraries, eq(libraries.id, books.libraryId))
       .where(eq(books.id, bookId))
       .limit(1);
     return row ?? null;
@@ -68,12 +83,19 @@ export class FileWriteRepository {
         fileWriteWriteCover: libraries.fileWriteWriteCover,
         fileWriteEpubEnabled: libraries.fileWriteEpubEnabled,
         fileWriteEpubMaxFileSizeMb: libraries.fileWriteEpubMaxFileSizeMb,
+        fileWriteFb2Enabled: libraries.fileWriteFb2Enabled,
+        fileWriteFb2MaxFileSizeMb: libraries.fileWriteFb2MaxFileSizeMb,
         fileWritePdfEnabled: libraries.fileWritePdfEnabled,
         fileWritePdfMaxFileSizeMb: libraries.fileWritePdfMaxFileSizeMb,
         fileWriteCbxEnabled: libraries.fileWriteCbxEnabled,
         fileWriteCbxMaxFileSizeMb: libraries.fileWriteCbxMaxFileSizeMb,
+        fileWriteKindleEnabled: libraries.fileWriteKindleEnabled,
+        fileWriteKindleMaxFileSizeMb: libraries.fileWriteKindleMaxFileSizeMb,
         fileWriteAudioEnabled: libraries.fileWriteAudioEnabled,
         fileWriteAudioMaxFileSizeMb: libraries.fileWriteAudioMaxFileSizeMb,
+        fileWriteAllFiles: libraries.fileWriteAllFiles,
+        fileWriteReadAlongEnabled: libraries.fileWriteReadAlongEnabled,
+        fileWriteReadAlongMaxFileSizeMb: libraries.fileWriteReadAlongMaxFileSizeMb,
       })
       .from(libraries)
       .where(eq(libraries.id, libraryId))
@@ -89,6 +111,9 @@ export class FileWriteRepository {
         format: bookFiles.format,
         sizeBytes: bookFiles.sizeBytes,
         fileHash: bookFiles.fileHash,
+        role: bookFiles.role,
+        sortOrder: bookFiles.sortOrder,
+        mediaOverlayAvailable: bookFiles.mediaOverlayAvailable,
         libraryId: books.libraryId,
       })
       .from(bookFiles)
@@ -112,12 +137,46 @@ export class FileWriteRepository {
       .orderBy(asc(books.id));
   }
 
-  async updateFileHash(bookFileId: number, fileHash: string): Promise<void> {
-    await this.db.update(bookFiles).set({ fileHash, updatedAt: new Date() }).where(eq(bookFiles.id, bookFileId));
+  async updateFileStateAfterMetadataWrite(
+    bookId: number,
+    bookFileId: number,
+    previousFileHash: string | null,
+    fields: { fileHash?: string; mtime?: Date; sizeBytes?: number; ino?: bigint },
+  ): Promise<void> {
+    const updateFile = (db: Pick<Db, 'update'>) =>
+      db
+        .update(bookFiles)
+        .set({ ...fields, updatedAt: new Date() })
+        .where(and(eq(bookFiles.id, bookFileId), eq(bookFiles.bookId, bookId)));
+
+    if (fields.fileHash === undefined || fields.fileHash === previousFileHash) {
+      await updateFile(this.db);
+      return;
+    }
+
+    // Embedding metadata rewrites the file, so its hash moves even though the book itself is
+    // unchanged. Kobo reconcile reads a moved hash as new content and re-delivers the book as a
+    // NewEntitlement, which makes the device discard its on-device annotations. Carrying the new
+    // hash into snapshots that recorded the pre-write one keeps reconcile on the metadata-only
+    // path. The device keeps the bytes it already has; it never receives the rewritten file.
+    await this.db.transaction(async (tx) => {
+      await updateFile(tx);
+      await tx.execute(sql`
+        UPDATE ${schema.koboSnapshotBooks} AS snapshot
+        SET file_hash = ${fields.fileHash}
+        FROM ${schema.books} AS book
+        WHERE book.id = ${bookId}
+          AND book.primary_file_id = ${bookFileId}
+          AND snapshot.book_id = book.id
+          AND snapshot.pending_delete = false
+          AND snapshot.removed_by_device = false
+          AND snapshot.file_hash IS NOT DISTINCT FROM ${previousFileHash}
+      `);
+    });
   }
 
   async recordHashHistory(bookFileId: number, fileHash: string, reason: string): Promise<void> {
-    await this.db.insert(schema.bookFileHashHistory).values({ bookFileId, fileHash, reason }).onConflictDoNothing();
+    await recordBookFileHashHistory(this.db, bookFileId, fileHash, reason);
   }
 
   async loadPayload(bookId: number) {
@@ -211,6 +270,7 @@ export class FileWriteRepository {
       openLibraryId: meta.openLibraryId,
       ranobedbId: meta.ranobedbId,
       koboId: meta.koboId,
+      comicvineId: meta.comicvineId,
       lubimyczytacId: meta.lubimyczytacId,
       aladinId: meta.aladinId,
       itunesId: meta.itunesId,

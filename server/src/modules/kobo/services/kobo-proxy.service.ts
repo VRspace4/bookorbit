@@ -1,78 +1,214 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
-const KOBO_API_BASE = 'https://storeapi.kobo.com';
-const KOBO_API_HOSTNAME = 'storeapi.kobo.com';
+import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
+import { decodeSyncToken } from './kobo-sync-token';
 
-const FORWARD_HEADERS = [
-  'accept',
-  'accept-language',
-  'authorization',
-  'content-type',
-  'user-agent',
-  'x-kobo-affiliatename',
-  'x-kobo-appversion',
-  'x-kobo-deviceid',
-  'x-kobo-devicemodel',
-  'x-kobo-deviceos',
-  'x-kobo-deviceosversion',
-  'x-kobo-platformid',
-  'x-kobo-synctokenversion',
-];
+/** The Kobo services a device is relayed to: its store API, and the reading services that hold its notebooks. */
+export type KoboUpstream = 'store' | 'readingServices';
+
+const KOBO_UPSTREAMS: Record<KoboUpstream, { base: string; hostname: string }> = {
+  store: { base: 'https://storeapi.kobo.com', hostname: 'storeapi.kobo.com' },
+  readingServices: { base: 'https://readingservices.kobo.com', hostname: 'readingservices.kobo.com' },
+};
+
+// Headers that must never be forwarded. Connection-specific headers are defined by RFC 7230 as
+// scoped to a single hop and reset by every proxy, and `host` would otherwise point Kobo at the
+// BookOrbit host that the device just spoke to. Everything else the device sends (including
+// `x-kobo-userkey`, which authorizes most Kobo API calls, and `x-kobo-synctoken`, which carries
+// the upstream cursor) is forwarded, with two escape hatches callers can use:
+//   * `extraHeaders` overrides a forwarded value (the sync-token-aware entry points use this to
+//     hand Kobo its own cursor instead of the BookOrbit composite).
+//   * `omitHeaders` strips a forwarded header (used to drop our composite when we have no Kobo
+//     cursor to substitute).
+const DROP_HEADERS = new Set([
+  'host',
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'content-length',
+  'content-encoding',
+  // Added by the operator's reverse proxy; describes our hop, not the device's, and tells Kobo
+  // about the deployment's internal addressing.
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+]);
+
+const SYNC_TOKEN_HEADER = 'x-kobo-synctoken';
+
+// BookOrbit's own session cookies. The device token in the path is the credential for these
+// routes, so a browser that carries a BookOrbit session to one must not hand it to Kobo.
+const BOOKORBIT_COOKIE_NAMES = new Set(['access_token', 'refresh_token']);
+
+/** Drops BookOrbit's session cookies from a Cookie header, keeping any the device set itself. */
+function stripBookOrbitCookies(cookieHeader: string): string {
+  return cookieHeader
+    .split(';')
+    .filter((pair) => !BOOKORBIT_COOKIE_NAMES.has(pair.split('=')[0].trim()))
+    .join(';')
+    .trim();
+}
+
+export type KoboProxyResponse = {
+  status: number;
+  headers: Record<string, string>;
+  body: Buffer;
+};
+
+export type KoboProxyRequestOptions = {
+  extraHeaders?: Record<string, string>;
+  /** Drops headers the device would otherwise copy. */
+  omitHeaders?: string[];
+  timeoutMs?: number;
+  upstream?: KoboUpstream;
+};
+
+/**
+ * Reads the `Connection` header from a header bag, splits it on commas, lowercases each field
+ * name, and returns the result. RFC 7230 §6.1 says every field listed in `Connection` is
+ * hop-specific: a proxy must remove those fields before forwarding the message.
+ */
+function readConnectionFieldNames(headers: Record<string, string | string[] | undefined>): string[] {
+  const raw = headers['connection'];
+  if (raw === undefined) return [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  return values
+    .flatMap((v) => v.split(','))
+    .map((name) => name.trim().toLowerCase())
+    .filter((name) => name.length > 0);
+}
 
 @Injectable()
 export class KoboProxyService {
   private readonly logger = new Logger(KoboProxyService.name);
 
-  async forward(req: FastifyRequest, reply: FastifyReply, deviceToken: string) {
-    const rawUrl = req.url;
-    const prefix = `/api/v1/kobo/${deviceToken}`;
-    const koboPath = rawUrl.startsWith(prefix) ? rawUrl.slice(prefix.length) : rawUrl;
+  /** Calls Kobo with the device's own credentials and hands the response back instead of piping it. */
+  async request(req: FastifyRequest, deviceToken: string, options: KoboProxyRequestOptions = {}): Promise<KoboProxyResponse> {
+    const targetUrl = this.resolveTargetUrl(req, deviceToken, options.upstream);
 
-    const targetUrl = this.buildTargetUrl(koboPath);
-
+    // Fastify lowercases header keys, but defensive: lowercase the lookup keys too.
+    const sourceHeaders = req.headers as Record<string, string | string[] | undefined>;
+    const connectionFields = new Set(readConnectionFieldNames(sourceHeaders));
     const headers: Record<string, string> = {};
-    for (const key of FORWARD_HEADERS) {
-      const val = req.headers[key];
-      if (val) headers[key] = Array.isArray(val) ? val[0] : val;
-    }
+    for (const [key, value] of Object.entries(sourceHeaders)) {
+      if (value === undefined) continue;
+      const lowerKey = key.toLowerCase();
+      if (DROP_HEADERS.has(lowerKey)) continue;
+      if (connectionFields.has(lowerKey)) continue;
+      const raw = Array.isArray(value) ? (value[0] ?? '') : value;
 
-    try {
-      let body: string | undefined;
-      if (!['GET', 'HEAD'].includes(req.method) && req.body != null) {
-        body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+      // Kobo cannot read the BookOrbit composite token, so it gets its own cursor or nothing.
+      // Applied before omitHeaders and extraHeaders so callers can still override either way.
+      if (lowerKey === SYNC_TOKEN_HEADER) {
+        const koboCursor = decodeSyncToken(raw).koboSyncToken;
+        if (koboCursor !== undefined) headers[lowerKey] = koboCursor;
+        continue;
       }
 
-      // codeql[js/request-forgery] - hostname validated by buildTargetUrl() to KOBO_API_HOSTNAME
-      const upstream = await fetch(targetUrl, {
-        method: req.method,
-        headers,
-        body,
-      });
+      if (lowerKey === 'cookie') {
+        const kept = stripBookOrbitCookies(raw);
+        if (kept.length > 0) headers[lowerKey] = kept;
+        continue;
+      }
 
-      reply.status(upstream.status);
-      upstream.headers.forEach((value, key) => {
-        if (!['transfer-encoding', 'connection', 'content-encoding', 'content-length'].includes(key.toLowerCase())) {
-          reply.header(key, value);
-        }
-      });
+      headers[lowerKey] = raw;
+    }
 
-      const responseBody = await upstream.arrayBuffer();
-      reply.send(Buffer.from(responseBody));
-    } catch (err) {
-      this.logger.warn(`Proxy failed for ${targetUrl}: ${(err as Error).message}`);
+    for (const key of options.omitHeaders ?? []) {
+      delete headers[key.toLowerCase()];
+    }
+    for (const [key, value] of Object.entries(options.extraHeaders ?? {})) {
+      headers[key.toLowerCase()] = value;
+    }
+
+    let body: string | undefined;
+    if (!['GET', 'HEAD'].includes(req.method) && req.body != null) {
+      body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    }
+
+    // codeql[js/request-forgery] - hostname validated by buildTargetUrl() to the chosen Kobo upstream
+    const upstream = await fetch(targetUrl, {
+      method: req.method,
+      headers,
+      body,
+      ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
+    });
+
+    const responseHeaders: Record<string, string> = {};
+    upstream.headers.forEach((value, key) => {
+      responseHeaders[key.toLowerCase()] = value;
+    });
+
+    return { status: upstream.status, headers: responseHeaders, body: Buffer.from(await upstream.arrayBuffer()) };
+  }
+
+  /**
+   * Relays a request to Kobo, dropping the connection-specific headers and replacing the device's
+   * BookOrbit composite sync token with the Kobo cursor it carries. Kobo's API does not understand
+   * `PX.<base64>` and treats it as a fresh cursor, so a borrow call that uses it lands Kobo in a
+   * state where the device has an entitlement BookOrbit never sees on this iteration.
+   */
+  async forward(req: FastifyRequest, reply: FastifyReply, deviceToken: string, upstream: KoboUpstream = 'store'): Promise<void> {
+    const startedAt = Date.now();
+    const targetUrl = this.resolveTargetUrl(req, deviceToken, upstream);
+    const deviceId = (req as unknown as { koboDevice?: { deviceId: number } }).koboDevice?.deviceId;
+
+    this.logger.debug(`[kobo.proxy] [start] deviceId=${deviceId ?? 'unknown'} - upstream Kobo relay started`);
+
+    try {
+      const response = await this.request(req, deviceToken, { upstream });
+      this.sendUpstream(reply, response);
+      this.logger.debug(
+        `[kobo.proxy] [end] deviceId=${deviceId ?? 'unknown'} durationMs=${Date.now() - startedAt} upstreamStatus=${response.status} - upstream Kobo relay completed`,
+      );
+    } catch (err: unknown) {
+      const errorClass = err instanceof Error ? err.name : 'UnknownError';
+      const errorMessage = sanitizeLogValue(err instanceof Error ? err.message : 'unknown error');
+      const sanitizedUrl = sanitizeLogValue(targetUrl);
+      this.logger.warn(
+        `[kobo.proxy] [fail] deviceId=${deviceId ?? 'unknown'} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" targetUrl="${sanitizedUrl}" - upstream Kobo relay failed`,
+      );
       reply.status(502).send({ message: 'Upstream Kobo API unavailable' });
     }
   }
 
-  private buildTargetUrl(koboPath: string): string {
+  /** Relays an upstream response to the device, dropping the headers that must not be forwarded. */
+  sendUpstream(reply: FastifyReply, response: KoboProxyResponse): void {
+    reply.status(response.status);
+    const connectionFields = new Set(readConnectionFieldNames(response.headers));
+    for (const [key, value] of Object.entries(response.headers)) {
+      const lowerKey = key.toLowerCase();
+      if (DROP_HEADERS.has(lowerKey)) continue;
+      if (connectionFields.has(lowerKey)) continue;
+      reply.header(lowerKey, value);
+    }
+    reply.send(response.body);
+  }
+
+  private resolveTargetUrl(req: FastifyRequest, deviceToken: string, upstream: KoboUpstream = 'store'): string {
+    const rawUrl = req.url;
+    const prefix = `/api/v1/kobo/${deviceToken}`;
+    const koboPath = rawUrl.startsWith(prefix) ? rawUrl.slice(prefix.length) : rawUrl;
+    return this.buildTargetUrl(koboPath, upstream);
+  }
+
+  private buildTargetUrl(koboPath: string, upstream: KoboUpstream = 'store'): string {
+    const { base, hostname } = KOBO_UPSTREAMS[upstream];
     let parsed: URL;
     try {
-      parsed = new URL(koboPath, KOBO_API_BASE);
+      parsed = new URL(koboPath, base);
     } catch {
       throw new BadRequestException('Invalid proxy path');
     }
-    if (parsed.hostname !== KOBO_API_HOSTNAME) {
+    if (parsed.hostname !== hostname) {
       throw new BadRequestException('Invalid proxy path');
     }
     return parsed.toString();

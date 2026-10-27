@@ -36,7 +36,10 @@ function sanitizeProgress(value: unknown): CachedReaderProgress | null {
   if (!(typeof raw.cfi === 'string' || raw.cfi === null || raw.cfi === undefined)) return null
   if (!isNumberOrNull(raw.pageNumber ?? null) || !isNumberOrNull(raw.positionSeconds ?? null)) return null
   const sectionFraction = raw.sectionFraction ?? null
-  if (sectionFraction !== null && (typeof sectionFraction !== 'number' || !Number.isFinite(sectionFraction) || sectionFraction < 0 || sectionFraction > 1)) {
+  if (
+    sectionFraction !== null &&
+    (typeof sectionFraction !== 'number' || !Number.isFinite(sectionFraction) || sectionFraction < 0 || sectionFraction > 1)
+  ) {
     return null
   }
   const ttsSectionIndex = raw.ttsSectionIndex ?? null

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Ban, Loader2, Plus, Search, Trash2 } from '@lucide/vue'
@@ -37,7 +38,7 @@ const filteredBlocklist = computed(() => {
   return draftBlocklist.value.filter((genre) => genre.toLowerCase().includes(filterToken.value))
 })
 const visibleCountLabel = computed(() => {
-  if (!filterToken.value) return t('settings.metadata.genreBlocklist.entryCount', { count: draftBlocklist.value.length }, draftBlocklist.value.length)
+  if (!filterToken.value) return t('settings.metadata.genreBlocklist.entryCount', { count: draftBlocklist.value.length })
   return t('settings.metadata.genreBlocklist.filteredCount', { shown: filteredBlocklist.value.length, total: draftBlocklist.value.length })
 })
 
@@ -62,8 +63,10 @@ function withBlocklist(prefs: MetadataFetchPreferences, blocklist: string[]): Me
       genres: {
         mode: prefs.options?.genres.mode ?? 'merge',
         blocklist,
+        maxCount: prefs.options?.genres.maxCount ?? null,
       },
       saveProviderIds: prefs.options?.saveProviderIds ?? true,
+      providerIdMode: prefs.options?.providerIdMode ?? 'preferExisting',
     },
   }
 }
@@ -137,11 +140,11 @@ function removeGenreLabel(genre: string): string {
           />
           <p v-if="isDuplicate" class="mt-1.5 text-xs text-destructive">{{ t('settings.metadata.genreBlocklist.duplicate') }}</p>
         </div>
-        <button class="settings-btn-primary h-9 px-3 justify-center md:min-w-24" type="button" :disabled="!canAdd" @click="addGenre">
+        <Button size="sm" class="px-3 md:min-w-24" type="button" :disabled="!canAdd" @click="addGenre">
           <Loader2 v-if="savingGlobal" :size="14" class="animate-spin" />
           <Plus v-else :size="14" />
           <span>{{ t('settings.metadata.genreBlocklist.add') }}</span>
-        </button>
+        </Button>
       </div>
 
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -160,15 +163,16 @@ function removeGenreLabel(genre: string): string {
         <div v-if="filteredBlocklist.length" class="divide-y divide-border">
           <div v-for="genre in filteredBlocklist" :key="genre" class="flex items-center justify-between gap-3 px-3 py-2.5 bg-background">
             <span class="min-w-0 truncate text-sm font-medium text-foreground">{{ genre }}</span>
-            <button
-              class="settings-btn h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/50 hover:bg-destructive/5 transition-colors"
+            <Button
+              variant="destructive-ghost"
+              size="icon-sm"
               type="button"
               :aria-label="removeGenreLabel(genre)"
               :disabled="isBusy"
               @click="removeGenre(genre)"
             >
               <Trash2 :size="13" />
-            </button>
+            </Button>
           </div>
         </div>
         <div v-else class="px-4 py-8 text-center text-sm text-muted-foreground">{{ t('settings.metadata.genreBlocklist.noFilterMatch') }}</div>

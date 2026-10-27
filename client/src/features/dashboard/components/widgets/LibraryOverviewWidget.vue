@@ -53,15 +53,15 @@ function navigate(route: StatRoute) {
 <template>
   <div class="flex h-full flex-col p-3">
     <div class="mb-2 flex items-center gap-2 self-start">
-      <Library :size="16" class="text-primary/90" />
+      <Library :size="16" class="text-primary" />
       <span class="text-[15px] font-semibold text-foreground">{{ t('dashboard.widgets.libraryOverview.title') }}</span>
     </div>
 
     <!-- Loading -->
     <div v-if="loading" class="grid flex-1 grid-cols-2 gap-2">
       <div v-for="n in 4" :key="n" class="flex flex-col items-center justify-center rounded-lg bg-muted/40 p-2">
-        <div class="h-5 w-10 animate-pulse rounded bg-muted" />
-        <div class="mt-1 h-2.5 w-8 animate-pulse rounded bg-muted" />
+        <div class="h-5 w-10 animate-pulse rounded-xs bg-muted" />
+        <div class="mt-1 h-2.5 w-8 animate-pulse rounded-xs bg-muted" />
       </div>
     </div>
 
@@ -73,7 +73,7 @@ function navigate(route: StatRoute) {
     <!-- Empty -->
     <div v-else-if="!data || data.totalBooks === 0" class="flex flex-1 flex-col items-center justify-center gap-2">
       <div class="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-        <Library :size="16" class="text-muted-foreground/60" />
+        <Library :size="16" class="text-muted-foreground" />
       </div>
       <p class="text-center text-xs text-muted-foreground">{{ t('dashboard.widgets.libraryOverview.empty') }}</p>
     </div>

@@ -1,166 +1,309 @@
-import { BadGatewayException, BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 
-import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
-import type { GcpChirp3TtsDto } from './dto/gcp-chirp3-tts.dto';
-import type { Gpt4oMiniTtsDto } from './dto/gpt-4o-mini-tts.dto';
-import type { KokoroTtsDto } from './dto/kokoro-tts.dto';
-import type { XaiTtsDto } from './dto/xai-tts.dto';
-import { TtsConfigService } from './tts-config.service';
+import type { TtsBookPreferences, TtsCaptionedSpeech, TtsChapterText, TtsEffectivePreferences, TtsUserPreferences, TtsVoice } from '@bookorbit/types';
+import type { RequestUser } from '../../common/types/request-user';
+import type { StaticVoice } from '../../db/schema';
+import { BookService } from '../book/book.service';
+import type { UpdateTtsPreferencesDto } from './dto/tts-preferences.dto';
+import type { SaveTtsPositionDto } from './dto/tts-position.dto';
+import type { SynthesizeDto } from './dto/synthesize.dto';
+import type { ITtsProvider } from './providers/tts-provider.interface';
+import { TtsProviderFactory } from './providers/tts-provider.factory';
+import { DEFAULT_TTS_AUDIO_FORMAT } from './tts-audio-format';
+import { TtsRepository } from './tts.repository';
+import { TtsSynthesisService } from './tts-synthesis.service';
+import { TtsTextExtractorService } from './tts-text-extractor.service';
 
-const GCP_TTS_ENDPOINT = 'https://texttospeech.googleapis.com/v1/text:synthesize';
-const OPENROUTER_TTS_ENDPOINT = 'https://openrouter.ai/api/v1/audio/speech';
-const KOKORO_MODEL = 'hexgrad/kokoro-82m';
-const XAI_TTS_MODEL = 'x-ai/grok-voice-tts-1.0';
-const GPT_4O_MINI_TTS_MODEL = 'openai/gpt-4o-mini-tts-2025-12-15';
-const REQUEST_TIMEOUT_MS = 120_000;
-/** Official xAI TTS speaking-rate range (see docs.x.ai text-to-speech). */
-const XAI_TTS_SPEED_MIN = 0.7;
-const XAI_TTS_SPEED_MAX = 1.5;
-const OPENROUTER_TTS_SPEED_MIN = 0.5;
-const OPENROUTER_TTS_SPEED_MAX = 2;
+/**
+ * A provider ready to synthesize, plus the allow-list it is curated to.
+ *
+ * `curatedVoiceIds` is null when the provider has no curation and is therefore trusted to accept
+ * any id it recognises, which includes ids that never appear in its own listing such as Kokoro's
+ * composite `af_sky+af_bella`.
+ */
+interface ResolvedTtsProvider {
+  provider: ITtsProvider;
+  curatedVoiceIds: Set<string> | null;
+}
 
-interface AudioProxyResult {
-  buffer: Buffer;
-  contentType: string;
+/** The curated ids of an openai-compatible provider, or null when it has not been curated. */
+function curatedVoiceIds(staticVoices: StaticVoice[] | null): Set<string> | null {
+  const curated = (staticVoices ?? []).map((voice) => voice.id).filter((id) => !!id);
+  return curated.length > 0 ? new Set(curated) : null;
 }
 
 @Injectable()
 export class TtsService {
   private readonly logger = new Logger(TtsService.name);
 
-  constructor(private readonly ttsConfig: TtsConfigService) {}
+  constructor(
+    private readonly ttsRepo: TtsRepository,
+    private readonly synthesisService: TtsSynthesisService,
+    private readonly providerFactory: TtsProviderFactory,
+    private readonly bookService: BookService,
+    private readonly textExtractor: TtsTextExtractorService,
+  ) {}
 
-  async synthesizeXai(dto: XaiTtsDto): Promise<AudioProxyResult> {
-    const apiKey = await this.ttsConfig.getApiKey('kokoro');
-    if (!apiKey) throw new BadRequestException('xAI TTS is not configured');
-    return this.synthesizeOpenRouter('xai', apiKey, {
-      model: XAI_TTS_MODEL,
-      text: dto.text,
-      voice: dto.voice || 'Eve',
-      speed: dto.speed,
-      speedMin: XAI_TTS_SPEED_MIN,
-      speedMax: XAI_TTS_SPEED_MAX,
-    });
+  // ---- Synthesis ----
+
+  async synthesize(dto: SynthesizeDto, signal?: AbortSignal): Promise<Buffer> {
+    const resolved = await this.resolveProvider(dto.providerId);
+    const voiceId = await this.resolveSynthesisVoiceId(dto.providerId, dto.voiceId, resolved);
+    return this.synthesisService.synthesize(
+      resolved.provider,
+      dto.providerId,
+      voiceId,
+      dto.speed,
+      dto.text,
+      dto.format ?? DEFAULT_TTS_AUDIO_FORMAT,
+      signal,
+    );
   }
 
-  async synthesizeGcpChirp3(dto: GcpChirp3TtsDto): Promise<AudioProxyResult> {
-    const apiKey = await this.ttsConfig.getApiKey('gcpChirp3');
-    if (!apiKey) throw new BadRequestException('Google Chirp 3 TTS is not configured');
-    const languageCode = dto.languageCode || 'en-US';
-    const speakingRate = dto.speakingRate === undefined ? 1 : Math.min(2, Math.max(0.25, dto.speakingRate));
-    const url = `${GCP_TTS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`;
-    const response = await this.fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        input: { text: dto.text },
-        voice: {
-          languageCode,
-          name: dto.voice,
-        },
-        audioConfig: {
-          audioEncoding: 'MP3',
-          speakingRate,
-        },
-      }),
-    });
+  /**
+   * Same audio as `synthesize`, plus word timings where the provider reports them. Callers that
+   * cannot use timings should keep using `synthesize`, which returns the audio bytes directly
+   * rather than paying for base64.
+   */
+  async synthesizeCaptioned(dto: SynthesizeDto): Promise<TtsCaptionedSpeech> {
+    const format = dto.format ?? DEFAULT_TTS_AUDIO_FORMAT;
+    const resolved = await this.resolveProvider(dto.providerId);
+    const voiceId = await this.resolveSynthesisVoiceId(dto.providerId, dto.voiceId, resolved);
+    const result = await this.synthesisService.synthesizeCaptioned(resolved.provider, dto.providerId, voiceId, dto.speed, dto.text, format);
+    return { audio: result.buffer.toString('base64'), format, words: result.words };
+  }
 
-    if (!response.ok) {
-      await this.throwProxyError('gcp-chirp3', response);
+  async previewVoice(providerId: string, voiceId: string): Promise<Buffer> {
+    const resolved = await this.resolveProvider(providerId);
+    const previewVoiceId = await this.resolveSynthesisVoiceId(providerId, voiceId, resolved);
+    return this.synthesisService.previewVoice(resolved.provider, providerId, previewVoiceId);
+  }
+
+  // ---- Voice listing ----
+
+  async getVoices(providerId?: string): Promise<TtsVoice[]> {
+    if (providerId) {
+      return this.getVoicesForProvider(providerId);
     }
+    return this.getAllAvailableVoices();
+  }
 
-    const payload = (await response.json()) as { audioContent?: string };
-    if (!payload.audioContent) {
-      throw new BadGatewayException('Google TTS returned no audio content');
+  private async getVoicesForProvider(providerId: string): Promise<TtsVoice[]> {
+    const numId = Number(providerId);
+    if (!Number.isSafeInteger(numId) || numId <= 0 || numId > 2147483647) {
+      throw new NotFoundException(`TTS provider ${providerId} not found or disabled`);
     }
+    const dbProvider = await this.ttsRepo.findProviderById(numId);
+    if (!dbProvider || !dbProvider.enabled) throw new NotFoundException(`TTS provider ${providerId} not found or disabled`);
+    const provider = this.providerFactory.getOpenAiProvider(dbProvider);
+    return provider.listVoices();
+  }
 
+  private async getAllAvailableVoices(): Promise<TtsVoice[]> {
+    const voices: TtsVoice[] = [];
+    const enabledProviders = await this.ttsRepo.findEnabledProviders();
+    for (const dbProvider of enabledProviders) {
+      const provider = this.providerFactory.getOpenAiProvider(dbProvider);
+      const providerVoices = await provider.listVoices().catch((err: Error) => {
+        this.logger.warn(`Failed to list voices for provider ${dbProvider.id}: ${err.message}`);
+        return [];
+      });
+      voices.push(...providerVoices);
+    }
+    return voices;
+  }
+
+  async getAvailableProviderInfos() {
+    const enabledProviders = await this.ttsRepo.findEnabledProviders();
+    return enabledProviders.map((provider) => ({ id: String(provider.id), name: provider.name, type: provider.type }));
+  }
+
+  // ---- User preferences ----
+
+  async getUserPreferences(userId: number): Promise<TtsUserPreferences | null> {
+    const row = await this.ttsRepo.findUserPreferences(userId);
+    if (!row) return null;
+    const normalized = await this.normalizePreferenceVoiceForProvider(row.providerId != null ? String(row.providerId) : null, row.voiceId ?? null);
     return {
-      buffer: Buffer.from(payload.audioContent, 'base64'),
-      contentType: 'audio/mpeg',
+      providerId: normalized.providerId,
+      voiceId: normalized.voiceId,
+      speed: row.speed,
     };
   }
 
-  async synthesizeKokoro(dto: KokoroTtsDto): Promise<AudioProxyResult> {
-    const apiKey = await this.ttsConfig.getApiKey('kokoro');
-    if (!apiKey) throw new BadRequestException('Kokoro TTS is not configured');
-    return this.synthesizeOpenRouter('kokoro', apiKey, {
-      model: dto.model || KOKORO_MODEL,
-      text: dto.text,
-      voice: dto.voice,
-      speed: dto.speed,
+  async saveUserPreferences(userId: number, dto: UpdateTtsPreferencesDto): Promise<TtsUserPreferences> {
+    const providerId = dto.providerId !== undefined ? await this.providerIdForWrite(dto.providerId) : undefined;
+    const row = await this.ttsRepo.upsertUserPreferences(userId, {
+      ...(providerId !== undefined && { providerId }),
+      ...(dto.voiceId !== undefined && { voiceId: dto.voiceId }),
+      // The account's speed cannot be empty, so a null leaves it as it is.
+      ...(dto.speed != null && { speed: dto.speed }),
     });
-  }
-
-  async synthesizeGpt4oMiniTts(dto: Gpt4oMiniTtsDto): Promise<AudioProxyResult> {
-    const apiKey = await this.ttsConfig.getApiKey('kokoro');
-    if (!apiKey) throw new BadRequestException('GPT TTS is not configured');
-    return this.synthesizeOpenRouter('gpt-4o-mini-tts', apiKey, {
-      model: GPT_4O_MINI_TTS_MODEL,
-      text: dto.text,
-      voice: dto.voice,
-      speed: dto.speed,
-    });
-  }
-
-  private async synthesizeOpenRouter(
-    provider: string,
-    apiKey: string,
-    dto: {
-      model: string;
-      text: string;
-      voice: string;
-      speed?: number;
-      speedMin?: number;
-      speedMax?: number;
-    },
-  ): Promise<AudioProxyResult> {
-    const min = dto.speedMin ?? OPENROUTER_TTS_SPEED_MIN;
-    const max = dto.speedMax ?? OPENROUTER_TTS_SPEED_MAX;
-    const speed = dto.speed === undefined ? 1 : Math.min(max, Math.max(min, dto.speed));
-    const response = await this.fetchWithTimeout(OPENROUTER_TTS_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://bookorbit.ridethew.com',
-        'X-Title': 'BookOrbit',
-      },
-      body: JSON.stringify({
-        model: dto.model,
-        input: dto.text,
-        voice: dto.voice,
-        response_format: 'mp3',
-        speed,
-      }),
-    });
-
-    if (!response.ok) {
-      await this.throwProxyError(provider, response);
-    }
-
     return {
-      buffer: Buffer.from(await response.arrayBuffer()),
-      contentType: response.headers.get('content-type') || 'audio/mpeg',
+      providerId: row.providerId != null ? String(row.providerId) : null,
+      voiceId: row.voiceId ?? null,
+      speed: row.speed,
     };
   }
 
-  private async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      return await fetch(url, { ...init, signal: controller.signal });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new BadGatewayException(`TTS upstream request failed: ${sanitizeLogValue(message)}`);
-    } finally {
-      clearTimeout(timeout);
+  async getEffectiveBookPreferences(userId: number, bookId: number, user: RequestUser): Promise<TtsEffectivePreferences> {
+    await this.bookService.verifyBookAccess(bookId, user);
+    const [userPrefs, bookPrefs] = await Promise.all([this.ttsRepo.findUserPreferences(userId), this.ttsRepo.findBookPreferences(userId, bookId)]);
+    if (bookPrefs) {
+      const normalized = await this.normalizePreferenceVoiceForProvider(
+        bookPrefs.providerId != null ? String(bookPrefs.providerId) : userPrefs?.providerId != null ? String(userPrefs.providerId) : null,
+        bookPrefs.voiceId ?? userPrefs?.voiceId ?? null,
+      );
+      return {
+        providerId: normalized.providerId,
+        voiceId: normalized.voiceId,
+        speed: bookPrefs.speed ?? userPrefs?.speed ?? 1.0,
+        isBookOverride: true,
+      };
+    }
+    const normalized = await this.normalizePreferenceVoiceForProvider(
+      userPrefs?.providerId != null ? String(userPrefs.providerId) : null,
+      userPrefs?.voiceId ?? null,
+    );
+    return {
+      providerId: normalized.providerId,
+      voiceId: normalized.voiceId,
+      speed: userPrefs?.speed ?? 1.0,
+      isBookOverride: false,
+    };
+  }
+
+  async saveBookPreferences(userId: number, bookId: number, dto: UpdateTtsPreferencesDto, user: RequestUser): Promise<TtsBookPreferences> {
+    await this.bookService.verifyBookAccess(bookId, user);
+    const providerId = dto.providerId !== undefined ? await this.providerIdForWrite(dto.providerId) : undefined;
+    const row = await this.ttsRepo.upsertBookPreferences(userId, bookId, {
+      ...(providerId !== undefined && { providerId }),
+      ...(dto.voiceId !== undefined && { voiceId: dto.voiceId }),
+      ...(dto.speed !== undefined && { speed: dto.speed }),
+    });
+    // The documented shape, as the account's route answers, rather than the raw row with its
+    // numeric provider id.
+    return {
+      providerId: row.providerId != null ? String(row.providerId) : null,
+      voiceId: row.voiceId ?? null,
+      speed: row.speed ?? null,
+      bookId: row.bookId,
+    };
+  }
+
+  async deleteBookPreferences(userId: number, bookId: number, user: RequestUser) {
+    await this.bookService.verifyBookAccess(bookId, user);
+    await this.ttsRepo.deleteBookPreferences(userId, bookId);
+  }
+
+  // ---- TTS position ----
+
+  async getPosition(userId: number, bookFileId: number, user: RequestUser) {
+    await this.bookService.verifyFileAccess(bookFileId, user);
+    // Nothing saved answers JSON null; an undefined result went out as an empty 200 body.
+    return (await this.ttsRepo.findPosition(userId, bookFileId)) ?? null;
+  }
+
+  async savePosition(userId: number, bookFileId: number, dto: SaveTtsPositionDto, user: RequestUser) {
+    await this.bookService.verifyFileAccess(bookFileId, user);
+    return this.ttsRepo.upsertPosition(userId, bookFileId, dto.cfi, dto.chapterIndex ?? null);
+  }
+
+  async deletePosition(userId: number, bookFileId: number, user: RequestUser) {
+    await this.bookService.verifyFileAccess(bookFileId, user);
+    await this.ttsRepo.deletePosition(userId, bookFileId);
+  }
+
+  async getChapterText(bookFileId: number, chapterIndex: number, user: RequestUser): Promise<TtsChapterText> {
+    await this.bookService.verifyFileAccess(bookFileId, user);
+    return this.textExtractor.extractChapterText(bookFileId, chapterIndex);
+  }
+
+  // ---- Helpers ----
+
+  private async resolveProvider(providerId: string): Promise<ResolvedTtsProvider> {
+    const numId = Number(providerId);
+    if (isNaN(numId)) throw new NotFoundException(`Invalid provider ID: ${providerId}`);
+    const dbProvider = await this.ttsRepo.findProviderById(numId);
+    if (!dbProvider || !dbProvider.enabled) throw new NotFoundException(`TTS provider ${providerId} not found or disabled`);
+    return {
+      provider: this.providerFactory.getOpenAiProvider(dbProvider),
+      curatedVoiceIds: curatedVoiceIds(dbProvider.staticVoices),
+    };
+  }
+
+  private async resolveSynthesisVoiceId(providerId: string, requestedVoiceId: string | undefined, resolved: ResolvedTtsProvider): Promise<string> {
+    const trimmedVoiceId = requestedVoiceId?.trim();
+    if (trimmedVoiceId) {
+      this.assertVoiceAvailable(providerId, trimmedVoiceId, resolved);
+      return trimmedVoiceId;
+    }
+
+    const availableVoices = await resolved.provider.listVoices();
+    const fallbackVoiceId = availableVoices[0]?.id?.trim();
+    if (!fallbackVoiceId) {
+      throw new NotFoundException(`No voices available for provider ${providerId}`);
+    }
+
+    this.logger.warn(`Missing voiceId for provider ${providerId}; falling back to voice ${fallbackVoiceId}`);
+    return fallbackVoiceId;
+  }
+
+  /**
+   * Curation is what users are offered, so it also has to be what they can play. Without this a
+   * de-curated voice stays reachable through a stale saved preference and narrates with a voice the
+   * picker can no longer show.
+   *
+   * The rejection is a 400 rather than a 404 because the request named a voice that is not on
+   * offer; the route and the provider both exist. Clients probe the optional captioned-synthesis
+   * route by treating its 404 as "this server cannot caption" and latching that for the session, so
+   * answering 404 here would cost every voice its word timings over one bad voice id.
+   */
+  private assertVoiceAvailable(providerId: string, voiceId: string, resolved: ResolvedTtsProvider): void {
+    if (!resolved.curatedVoiceIds) return;
+    if (!resolved.curatedVoiceIds.has(voiceId)) {
+      throw new BadRequestException(`Voice ${voiceId} is not available for provider ${providerId}`);
     }
   }
 
-  private async throwProxyError(provider: string, response: Response): Promise<never> {
-    const body = await response.text().catch(() => '');
-    const detail = sanitizeLogValue(body.slice(0, 1000) || response.statusText);
-    this.logger.warn(`[tts.${provider}] upstream failed status=${response.status} detail="${detail}"`);
-    throw new BadGatewayException(`${provider} TTS failed with status ${response.status}: ${detail}`);
+  private async normalizePreferenceVoiceForProvider(
+    providerId: string | null,
+    voiceId: string | null,
+  ): Promise<{ providerId: string | null; voiceId: string | null }> {
+    // A voice without a provider has nothing left to resolve it against, so it is dropped rather
+    // than handed back for the client to try.
+    const trimmedVoiceId = voiceId?.trim() || null;
+    if (!providerId) return { providerId: null, voiceId: null };
+    if (!trimmedVoiceId) return { providerId, voiceId: null };
+
+    // A saved voice that curation has since withdrawn is cleared rather than handed back, so the
+    // client falls back to a voice it can actually show as selected. Only curated providers are
+    // checked, which keeps this off the network: the ids are already on the provider row.
+    const curated = await this.curatedVoiceIdsForProvider(providerId);
+    if (curated && !curated.has(trimmedVoiceId)) {
+      return { providerId, voiceId: null };
+    }
+    return { providerId, voiceId: trimmedVoiceId };
+  }
+
+  private async curatedVoiceIdsForProvider(providerId: string): Promise<Set<string> | null> {
+    const numId = Number(providerId);
+    if (isNaN(numId)) return null;
+    const dbProvider = await this.ttsRepo.findProviderById(numId);
+    return dbProvider ? curatedVoiceIds(dbProvider.staticVoices) : null;
+  }
+
+  /**
+   * The provider a preference write names. Empty or non-numeric names none, as before; a number
+   * must be a provider that exists, or the write was a database error rather than a 400.
+   */
+  private async providerIdForWrite(providerId: string | null): Promise<number | null> {
+    if (!providerId) return null;
+    const n = Number(providerId);
+    if (isNaN(n)) return null;
+    if (!Number.isSafeInteger(n) || n <= 0 || n > 2147483647 || !(await this.ttsRepo.findProviderById(n))) {
+      throw new BadRequestException(`Unknown TTS provider: ${providerId}`);
+    }
+    return n;
   }
 }

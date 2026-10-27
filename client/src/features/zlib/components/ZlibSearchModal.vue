@@ -109,7 +109,7 @@ function formatExtClass(ext: string): string {
     azw3: 'bg-orange-500/15 text-orange-600 dark:text-orange-400',
     fb2: 'bg-teal-500/15 text-teal-600 dark:text-teal-400',
   }
-  return map[ext?.toLowerCase()] ?? 'bg-muted text-muted-foreground/85'
+  return map[ext?.toLowerCase()] ?? 'bg-muted text-muted-foreground'
 }
 
 function formatResetsIn(resetsAt: string): string {
@@ -356,7 +356,7 @@ function handleKeydown(e: KeyboardEvent) {
 <template>
   <Teleport to="body">
     <div class="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4">
-      <div class="absolute inset-0 bg-black/50 backdrop-blur-[2px]" @click="emit('close')" />
+      <div class="absolute inset-0 bg-scrim backdrop-blur-[2px]" @click="emit('close')" />
 
       <div
         class="relative flex flex-col w-full max-w-2xl bg-background rounded-lg shadow-2xl border border-border overflow-hidden"
@@ -465,7 +465,7 @@ function handleKeydown(e: KeyboardEvent) {
         <div class="flex-1 overflow-y-auto p-5">
           <!-- Not connected -->
           <div v-if="notConnected" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
-            <BookOpen :size="32" class="text-muted-foreground/50" />
+            <BookOpen :size="32" class="text-muted-foreground" />
             <p class="text-sm font-medium text-foreground">Z-Library not connected</p>
             <p class="text-xs text-muted-foreground">Go to Account Settings → Integrations to connect your Z-Library account.</p>
           </div>
@@ -500,13 +500,13 @@ function handleKeydown(e: KeyboardEvent) {
 
           <!-- Empty state -->
           <div v-else-if="hasSearched && results.length === 0" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
-            <Search :size="28" class="text-muted-foreground/50" />
+            <Search :size="28" class="text-muted-foreground" />
             <p class="text-sm text-muted-foreground">No results found</p>
           </div>
 
           <!-- Prompt to search -->
           <div v-else-if="!hasSearched" class="flex flex-col items-center justify-center gap-2 py-10 text-center">
-            <Search :size="28" class="text-muted-foreground/50" />
+            <Search :size="28" class="text-muted-foreground" />
             <p class="text-sm text-muted-foreground">Enter a title or author to search</p>
           </div>
 
@@ -527,7 +527,7 @@ function handleKeydown(e: KeyboardEvent) {
                 class="w-10 h-14 object-cover rounded shrink-0 bg-muted"
               />
               <div v-else class="w-10 h-14 rounded bg-muted/50 shrink-0 flex items-center justify-center">
-                <BookOpen :size="14" class="text-muted-foreground/50" />
+                <BookOpen :size="14" class="text-muted-foreground" />
               </div>
 
               <!-- Info -->

@@ -1,7 +1,7 @@
 import { ForbiddenException, Logger, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import { Permission, type BookMetadataFetchStatusEvent } from '@bookorbit/types';
+import { Permission, type AuthenticationMethod, type BookMetadataFetchStatusEvent } from '@bookorbit/types';
 import { Server, Socket } from 'socket.io';
 
 import type { RequestUser } from '../../common/types/request-user';
@@ -9,10 +9,12 @@ import { AuthService } from '../auth/auth.service';
 import { BookMetadataFetchQueueRepository } from './book-metadata-fetch-queue.repository';
 import { BookMetadataFetchConfigService } from './book-metadata-fetch-config.service';
 import { BookMetadataFetchSessionService } from './book-metadata-fetch-session.service';
+import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { wsCorsOrigin } from '../../common/utils/ws-cors.utils';
 
 export const BOOK_METADATA_FETCH_STATUS_EVENT = 'book-metadata-fetch:status';
 
-@WebSocketGateway({ namespace: '/book-metadata-fetch', cors: { origin: process.env.CLIENT_URL ?? 'http://localhost:5173' } })
+@WebSocketGateway({ namespace: '/book-metadata-fetch', cors: { origin: wsCorsOrigin() } })
 export class BookMetadataFetchGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server: Server;
   private readonly logger = new Logger(BookMetadataFetchGateway.name);
@@ -30,8 +32,10 @@ export class BookMetadataFetchGateway implements OnGatewayConnection, OnGatewayD
       const token = client.handshake.auth?.token as string | undefined;
       if (!token) throw new UnauthorizedException('No token provided');
 
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.authService.validateUser(payload.sub, payload.ver);
+      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }>(token, {
+        algorithms: ['HS256'],
+      });
+      const user = await this.authService.validateSessionUser(payload.sub, payload.ver, payload.amr ?? 'legacy', payload.sid);
       if (!user) throw new UnauthorizedException('User not found or token revoked');
 
       this.assertCanViewStatus(user);
@@ -42,7 +46,7 @@ export class BookMetadataFetchGateway implements OnGatewayConnection, OnGatewayD
       client.emit(BOOK_METADATA_FETCH_STATUS_EVENT, { ...summary, paused, ...this.session.getSnapshot() } satisfies BookMetadataFetchStatusEvent);
     } catch (err) {
       this.logger.warn(`WS rejected: ${(err as Error).message} socket=${client.id}`);
-      client.disconnect();
+      rejectSocketConnection(client, err);
     }
   }
 

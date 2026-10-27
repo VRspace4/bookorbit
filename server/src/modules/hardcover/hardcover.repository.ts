@@ -1,15 +1,43 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Permission } from '@bookorbit/types';
+import { isAudioFormat, Permission } from '@bookorbit/types';
 import type { ContentFilterRules, ReadStatus } from '@bookorbit/types';
-import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { buildContentFilterClauses } from '../../common/utils/content-filter-sql.utils';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import type { HardcoverBookState, HardcoverUserSetting, NewHardcoverBookState, NewHardcoverUserSetting } from '../../db/schema';
+import { HARDCOVER_EXTERNAL_PROVIDER } from './hardcover-read-selection';
 
 type Db = NodePgDatabase<typeof schema>;
+
+const READING_ATTEMPT_EXTERNAL_CONSTRAINT = 'reading_attempts_external_uidx';
+
+export type HardcoverLinkOutcome = 'linked' | 'conflict';
+
+function* iterateErrorChain(error: unknown): Generator<Record<string, unknown>> {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    yield current as Record<string, unknown>;
+    current = (current as { cause?: unknown }).cause;
+  }
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function isExternalIdConflict(error: unknown): boolean {
+  for (const entry of iterateErrorChain(error)) {
+    if (entry['code'] !== '23505') continue;
+    if (asString(entry['constraint']) === READING_ATTEMPT_EXTERNAL_CONSTRAINT) return true;
+    if (asString(entry['message']).includes(READING_ATTEMPT_EXTERNAL_CONSTRAINT)) return true;
+  }
+  return false;
+}
 
 export interface BookSyncData {
   bookId: number;
@@ -18,6 +46,7 @@ export interface BookSyncData {
   title: string | null;
   authorName: string | null;
   hardcoverMetadataId: string | null;
+  hardcoverEditionId?: string | null;
   pageCount: number | null;
   format: string | null;
   status: string;
@@ -102,7 +131,7 @@ export class HardcoverRepository {
   async findBookStatesByBookIds(userId: number, bookIds: number[]): Promise<HardcoverBookState[]> {
     if (bookIds.length === 0) return [];
     return this.db.query.hardcoverBookState.findMany({
-      where: and(eq(schema.hardcoverBookState.userId, userId), inArray(schema.hardcoverBookState.bookId, bookIds)),
+      where: and(eq(schema.hardcoverBookState.userId, userId), sql`${schema.hardcoverBookState.bookId} = any(${sql.param(bookIds)}::integer[])`),
     });
   }
 
@@ -116,6 +145,64 @@ export class HardcoverRepository {
       })
       .returning();
     return row!;
+  }
+
+  // Only updates an existing link (never creates one) - used to propagate a metadata-side edition
+  // pick into a user's sync target without turning an unrelated metadata edit into a new sync link.
+  async updateEditionIfLinked(userId: number, bookId: number, hardcoverEditionId: number): Promise<boolean> {
+    const [row] = await this.db
+      .update(schema.hardcoverBookState)
+      .set({ hardcoverEditionId, updatedAt: new Date() })
+      .where(and(eq(schema.hardcoverBookState.userId, userId), eq(schema.hardcoverBookState.bookId, bookId)))
+      .returning({ id: schema.hardcoverBookState.id });
+    return row != null;
+  }
+
+  /**
+   * Moves a user's link to a different Hardcover book. The user book, read and every live attempt's
+   * read link all point into the old book's Hardcover entry, so they are released with it; reusing
+   * them would keep writing progress to the old book. Soft-deleted attempts keep their ids as
+   * import tombstones. The new book counts as never synced, so a failed first sync is retried.
+   * Returns how many attempts were released.
+   */
+  async relinkBook(input: {
+    userId: number;
+    bookId: number;
+    hardcoverBookId: number;
+    hardcoverEditionId: number | null;
+    matchMethod: string;
+    matchBasis: string;
+  }): Promise<number> {
+    return this.db.transaction(async (tx) => {
+      await tx
+        .update(schema.hardcoverBookState)
+        .set({
+          hardcoverBookId: input.hardcoverBookId,
+          hardcoverEditionId: input.hardcoverEditionId,
+          hardcoverUserBookId: null,
+          hardcoverReadId: null,
+          matchMethod: input.matchMethod,
+          matchBasis: input.matchBasis,
+          matchError: null,
+          lastSyncedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(schema.hardcoverBookState.userId, input.userId), eq(schema.hardcoverBookState.bookId, input.bookId)));
+
+      const released = await tx
+        .update(schema.readingAttempts)
+        .set({ externalProvider: null, externalId: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.readingAttempts.userId, input.userId),
+            eq(schema.readingAttempts.bookId, input.bookId),
+            eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER),
+            isNull(schema.readingAttempts.deletedAt),
+          ),
+        )
+        .returning({ id: schema.readingAttempts.id });
+      return released.length;
+    });
   }
 
   async setBookSyncOverride(userId: number, bookId: number, syncOverride: 'included' | 'excluded' | null): Promise<HardcoverBookState> {
@@ -153,11 +240,22 @@ export class HardcoverRepository {
     return row ?? null;
   }
 
+  // Bounded and ordered: this backs a settings list, not a sync run, and a library can hold far
+  // more in-progress books than anyone wants rendered at once.
+  async findCurrentReadingBooks(userId: number, limit: number): Promise<BookSyncData[]> {
+    return this.findBookSyncDataForUser(userId, undefined, false, { statuses: ['reading', 'rereading'], limit });
+  }
+
   private async findSyncableBooksForUser(userId: number, bookId?: number): Promise<BookSyncData[]> {
     return this.findBookSyncDataForUser(userId, bookId, false);
   }
 
-  private async findBookSyncDataForUser(userId: number, bookId?: number, includeUnread = true): Promise<BookSyncData[]> {
+  private async findBookSyncDataForUser(
+    userId: number,
+    bookId?: number,
+    includeUnread = true,
+    options: { statuses?: ReadStatus[]; limit?: number } = {},
+  ): Promise<BookSyncData[]> {
     const bookFilter = bookId !== undefined ? eq(schema.books.id, bookId) : undefined;
 
     const maxProgressSq = this.db
@@ -186,7 +284,9 @@ export class HardcoverRepository {
     const attemptsSq = this.db
       .select({
         bookId: schema.readingAttempts.bookId,
-        updatedAt: sql<Date | null>`max(${schema.readingAttempts.updatedAt})`.as('attempts_updated_at'),
+        // mapWith keeps the driver's raw timestamp string from reaching callers: hasChanges compares
+        // this against a mapped Date, and a string/Date comparison is silently always false.
+        updatedAt: sql<Date | null>`max(${schema.readingAttempts.updatedAt})`.mapWith(schema.readingAttempts.updatedAt).as('attempts_updated_at'),
       })
       .from(schema.readingAttempts)
       .where(and(eq(schema.readingAttempts.userId, userId), sql`${schema.readingAttempts.deletedAt} is null`))
@@ -201,13 +301,15 @@ export class HardcoverRepository {
         title: schema.bookMetadata.title,
         authorName: firstAuthorSq.authorName,
         hardcoverMetadataId: schema.bookMetadata.hardcoverId,
+        hardcoverEditionId: schema.bookMetadata.hardcoverEditionId,
         pageCount: schema.bookMetadata.pageCount,
         format: schema.bookFiles.format,
         status: includeUnread ? sql<string>`coalesce(${schema.userBookStatus.status}, 'unread')` : schema.userBookStatus.status,
         startedAt: schema.userBookStatus.startedAt,
         finishedAt: schema.userBookStatus.finishedAt,
         rating: schema.userBookRatings.rating,
-        progress: maxProgressSq.maxProgress,
+        readingProgress: maxProgressSq.maxProgress,
+        audioProgress: schema.audiobookProgress.percentage,
         attemptsUpdatedAt: attemptsSq.updatedAt,
       })
       .from(schema.books)
@@ -215,13 +317,25 @@ export class HardcoverRepository {
       .leftJoin(schema.bookMetadata, eq(schema.bookMetadata.bookId, schema.books.id))
       .leftJoin(schema.userBookRatings, and(eq(schema.userBookRatings.bookId, schema.books.id), eq(schema.userBookRatings.userId, userId)))
       .leftJoin(maxProgressSq, eq(maxProgressSq.bookId, schema.books.id))
+      .leftJoin(schema.audiobookProgress, and(eq(schema.audiobookProgress.bookId, schema.books.id), eq(schema.audiobookProgress.userId, userId)))
       .leftJoin(firstAuthorSq, eq(firstAuthorSq.bookId, schema.books.id))
       .leftJoin(attemptsSq, eq(attemptsSq.bookId, schema.books.id))
       .leftJoin(schema.bookFiles, eq(schema.bookFiles.id, schema.books.primaryFileId));
 
-    const rows = includeUnread ? await query.where(bookFilter) : await query.where(and(bookFilter, ne(schema.userBookStatus.status, 'unread')));
+    const statusFilter = options.statuses ? inArray(schema.userBookStatus.status, options.statuses) : ne(schema.userBookStatus.status, 'unread');
+    const filtered = includeUnread ? query.where(bookFilter) : query.where(and(bookFilter, statusFilter));
 
-    return rows as BookSyncData[];
+    // Sync callers stay unordered and unbounded; only the bounded list needs a stable window.
+    const rows =
+      options.limit === undefined
+        ? await filtered
+        : await filtered.orderBy(asc(schema.bookMetadata.title), asc(schema.books.id)).limit(options.limit);
+
+    return rows.map(({ readingProgress, audioProgress, ...row }) => ({
+      ...row,
+      status: row.status as string,
+      progress: row.format && isAudioFormat(row.format) ? audioProgress : readingProgress,
+    }));
   }
 
   async findReadingAttempts(userId: number, bookId: number) {
@@ -234,11 +348,80 @@ export class HardcoverRepository {
       .orderBy(schema.readingAttempts.id);
   }
 
-  async linkReadingAttempt(userId: number, attemptId: number, hardcoverReadId: number): Promise<void> {
-    await this.db
+  /**
+   * Reports an ownership conflict instead of throwing. Another attempt - possibly a soft-deleted
+   * tombstone - can already own this read, and the caller recovers by selecting a different read
+   * rather than by merging or reassigning attempts.
+   */
+  async linkReadingAttempt(userId: number, attemptId: number, hardcoverReadId: number): Promise<HardcoverLinkOutcome> {
+    const externalId = String(hardcoverReadId);
+    try {
+      const rows = await this.db
+        .update(schema.readingAttempts)
+        .set({ externalProvider: HARDCOVER_EXTERNAL_PROVIDER, externalId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.readingAttempts.userId, userId),
+            eq(schema.readingAttempts.id, attemptId),
+            isNull(schema.readingAttempts.deletedAt),
+            or(
+              // A Hardcover provider without an id owns nothing; hand-cleared links are left in this shape.
+              and(
+                or(isNull(schema.readingAttempts.externalProvider), eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER)),
+                isNull(schema.readingAttempts.externalId),
+              ),
+              and(eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER), eq(schema.readingAttempts.externalId, externalId)),
+            ),
+          ),
+        )
+        .returning({ id: schema.readingAttempts.id });
+      return rows.length > 0 ? 'linked' : 'conflict';
+    } catch (err) {
+      if (isExternalIdConflict(err)) return 'conflict';
+      throw err;
+    }
+  }
+
+  /** Releases one attempt's link, but only while it still points at the read the caller rejected. */
+  async unlinkReadingAttempt(userId: number, attemptId: number, hardcoverReadId: number): Promise<boolean> {
+    const rows = await this.db
       .update(schema.readingAttempts)
-      .set({ externalProvider: 'hardcover', externalId: String(hardcoverReadId), updatedAt: new Date() })
-      .where(and(eq(schema.readingAttempts.userId, userId), eq(schema.readingAttempts.id, attemptId)));
+      .set({ externalProvider: null, externalId: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.readingAttempts.userId, userId),
+          eq(schema.readingAttempts.id, attemptId),
+          eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER),
+          eq(schema.readingAttempts.externalId, String(hardcoverReadId)),
+        ),
+      )
+      .returning({ id: schema.readingAttempts.id });
+    return rows.length > 0;
+  }
+
+  /**
+   * Read ids already spoken for on this book. Soft-deleted attempts are included on purpose:
+   * reading_attempts_external_uidx has no deleted_at predicate, and a deleted attempt keeping its
+   * external id is the tombstone importExternalRead relies on to avoid re-importing a removed read.
+   */
+  async findClaimedHardcoverReadIds(userId: number, bookId: number): Promise<number[]> {
+    const rows = await this.db
+      .select({ externalId: schema.readingAttempts.externalId })
+      .from(schema.readingAttempts)
+      .where(
+        and(
+          eq(schema.readingAttempts.userId, userId),
+          eq(schema.readingAttempts.bookId, bookId),
+          eq(schema.readingAttempts.externalProvider, HARDCOVER_EXTERNAL_PROVIDER),
+          isNotNull(schema.readingAttempts.externalId),
+        ),
+      );
+    const ids: number[] = [];
+    for (const row of rows) {
+      const parsed = Number(row.externalId);
+      if (Number.isInteger(parsed) && parsed > 0) ids.push(parsed);
+    }
+    return ids;
   }
 
   async findBookIdByFileId(bookFileId: number): Promise<number | null> {

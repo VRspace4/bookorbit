@@ -1,22 +1,51 @@
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
-import { SCROLLER_TYPES, type ScrollerConfig, type ScrollerType } from '@bookorbit/types'
+import {
+  APP_FEATURES,
+  SCROLLER_TYPES,
+  type DashboardShelfConfig,
+  type DashboardShelfLayout,
+  type ScrollerConfig,
+  type ScrollerType,
+} from '@bookorbit/types'
+import { useAuth } from '@/features/auth/composables/useAuth'
+import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { api } from '@/lib/api'
+import { normalizeShelfRows } from '../lib/shelf-rows'
 
 const STORAGE_KEY = 'bookorbit:dashboard:config'
 const MAX_SCROLLERS = 8
 
-export const DEFAULT_SCROLLERS: ScrollerConfig[] = [
-  { id: '2', type: 'recently-added', label: 'Recently Added', enabled: true, order: 1, limit: 20 },
-  { id: '3', type: 'random', label: 'Discover Something New', enabled: true, order: 2, limit: 20 },
-  { id: '1', type: 'continue-reading', label: 'Continue Reading', enabled: true, order: 3, limit: 20 },
-  { id: '5', type: 'continue-listening', label: 'Continue Listening', enabled: true, order: 4, limit: 20 },
-  { id: '6', type: 'want-to-read', label: 'Want to Read', enabled: false, order: 5, limit: 20 },
-  { id: '4', type: 'up-next-in-series', label: 'Up Next in Series', enabled: false, order: 6, limit: 20 },
+export const SHELF_LAYOUT = {
+  WIDE: 'wide',
+  TWO_COLUMNS: 'two-columns',
+} as const
+
+export type { DashboardShelfLayout } from '@bookorbit/types'
+
+interface StoredDashboardConfig {
+  scrollers: ScrollerConfig[]
+  shelfLayout: DashboardShelfLayout
+}
+
+const ALL_DEFAULT_SCROLLERS: ScrollerConfig[] = [
+  { id: '2', type: 'recently-added', label: 'Recently Added', enabled: true, order: 1, limit: 20, rows: 1 },
+  { id: '3', type: 'random', label: 'Discover Something New', enabled: true, order: 2, limit: 20, rows: 1 },
+  { id: '1', type: 'continue-reading', label: 'Continue Reading', enabled: true, order: 3, limit: 20, rows: 1 },
+  { id: '5', type: 'continue-listening', label: 'Continue Listening', enabled: true, order: 4, limit: 20, rows: 1 },
+  { id: '7', type: 'continue-podcasts', label: 'Continue Podcasts', enabled: false, order: 5, limit: 20, rows: 1 },
+  { id: '6', type: 'want-to-read', label: 'Want to Read', enabled: false, order: 6, limit: 20, rows: 1 },
+  { id: '4', type: 'up-next-in-series', label: 'Up Next in Series', enabled: false, order: 7, limit: 20, rows: 1 },
 ]
 
+export const DEFAULT_SCROLLERS = ALL_DEFAULT_SCROLLERS.filter((scroller) => APP_FEATURES.podcasts || scroller.type !== 'continue-podcasts')
+
+// Persisted-only. Shelf headings and the type selector resolve their text from the active
+// locale via useDashboardLabels(); these values just keep stored configs shaped as before.
 export const SCROLLER_LABELS: Record<ScrollerType, string> = {
   'continue-reading': 'Continue Reading',
   'continue-listening': 'Continue Listening',
+  'continue-podcasts': 'Continue Podcasts',
   'want-to-read': 'Want to Read',
   'up-next-in-series': 'Up Next in Series',
   'recently-added': 'Recently Added',
@@ -24,7 +53,7 @@ export const SCROLLER_LABELS: Record<ScrollerType, string> = {
   'smart-scope': 'Smart Scope',
 }
 
-const VALID_SCROLLER_TYPES = new Set<ScrollerType>(SCROLLER_TYPES)
+const VALID_SCROLLER_TYPES = new Set<ScrollerType>(SCROLLER_TYPES.filter((type) => APP_FEATURES.podcasts || type !== 'continue-podcasts'))
 
 function cloneDefaultScrollers(): ScrollerConfig[] {
   return DEFAULT_SCROLLERS.map((scroller) => ({ ...scroller }))
@@ -36,6 +65,10 @@ function parseStoredScrollers(value: unknown): unknown[] | null {
 
   const { scrollers } = value as { scrollers?: unknown }
   return Array.isArray(scrollers) ? scrollers : null
+}
+
+function normalizeShelfLayout(value: unknown): DashboardShelfLayout {
+  return value === SHELF_LAYOUT.TWO_COLUMNS ? SHELF_LAYOUT.TWO_COLUMNS : SHELF_LAYOUT.WIDE
 }
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -86,6 +119,7 @@ function normalizeScroller(value: unknown, index: number): ScrollerConfig | null
     enabled: normalizeBoolean(raw.enabled, true),
     order: index + 1,
     limit: normalizePositiveNumber(raw.limit, 20),
+    rows: normalizeShelfRows(raw.rows),
     ...(smartScopeId === undefined ? {} : { smartScopeId }),
   }
 }
@@ -103,12 +137,20 @@ function normalizeScrollers(value: unknown): ScrollerConfig[] {
   return normalized.length > 0 ? normalized : cloneDefaultScrollers()
 }
 
-function loadConfig(): ScrollerConfig[] {
+function loadConfig(): StoredDashboardConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? normalizeScrollers(JSON.parse(raw)) : cloneDefaultScrollers()
+    if (!raw) return { scrollers: cloneDefaultScrollers(), shelfLayout: SHELF_LAYOUT.WIDE }
+
+    const parsed: unknown = JSON.parse(raw)
+    const shelfLayout =
+      parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? normalizeShelfLayout((parsed as { shelfLayout?: unknown }).shelfLayout)
+        : SHELF_LAYOUT.WIDE
+
+    return { scrollers: normalizeScrollers(parsed), shelfLayout }
   } catch {
-    return cloneDefaultScrollers()
+    return { scrollers: cloneDefaultScrollers(), shelfLayout: SHELF_LAYOUT.WIDE }
   }
 }
 
@@ -124,22 +166,78 @@ function areScrollersEqual(left: ScrollerConfig[], right: ScrollerConfig[]): boo
       scroller.enabled === other.enabled &&
       scroller.order === other.order &&
       scroller.limit === other.limit &&
+      scroller.rows === other.rows &&
       scroller.smartScopeId === other.smartScopeId
     )
   })
 }
 
-// Module-level singleton — all callers share the same reactive ref
-const scrollers = ref<ScrollerConfig[]>(loadConfig())
+// Module-level singletons - all callers share the same reactive state
+const initialConfig = loadConfig()
+const scrollers = ref<ScrollerConfig[]>(initialConfig.scrollers)
+const shelfLayout = ref<DashboardShelfLayout>(initialConfig.shelfLayout)
+let hydratedUserId: number | undefined
+let hydratedFromServer = false
 
 export function useDashboardConfig() {
+  const { user } = useAuth()
+  const { isDemoRestrictedAccount } = usePermissions()
+  const syncAcrossSessions = computed(() => !isDemoRestrictedAccount.value && user.value?.settings?.dashboardShelfConfig?.syncAcrossSessions === true)
+
+  watch(
+    () => [user.value?.id, user.value?.settings?.dashboardShelfConfig, isDemoRestrictedAccount.value] as const,
+    ([userId, config, demoRestricted]) => {
+      if (!demoRestricted && config?.syncAcrossSessions === true) {
+        scrollers.value = normalizeScrollers(config.scrollers)
+        shelfLayout.value = normalizeShelfLayout(config.shelfLayout)
+      } else if (hydratedUserId !== userId || hydratedFromServer) {
+        const local = loadConfig()
+        scrollers.value = local.scrollers
+        shelfLayout.value = local.shelfLayout
+      }
+      hydratedUserId = userId
+      hydratedFromServer = !demoRestricted && config?.syncAcrossSessions === true
+    },
+    { immediate: true, flush: 'sync' },
+  )
+
   function save() {
     scrollers.value = normalizeScrollers(scrollers.value)
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(scrollers.value))
+    shelfLayout.value = normalizeShelfLayout(shelfLayout.value)
+    if (syncAcrossSessions.value) return
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        scrollers: scrollers.value,
+        shelfLayout: shelfLayout.value,
+      } satisfies StoredDashboardConfig),
+    )
   }
 
   function saveScrollers(newScrollers: ScrollerConfig[]) {
     scrollers.value = normalizeScrollers(newScrollers)
+    save()
+  }
+
+  async function saveShelfSettings(newScrollers: ScrollerConfig[], newShelfLayout: DashboardShelfLayout, sync = syncAcrossSessions.value) {
+    sync = sync && !isDemoRestrictedAccount.value
+    const nextScrollers = normalizeScrollers(newScrollers)
+    const nextLayout = normalizeShelfLayout(newShelfLayout)
+    if (sync || syncAcrossSessions.value) {
+      const currentUser = user.value
+      if (!currentUser) throw new Error('Sign in to sync dashboard shelves')
+      const config: DashboardShelfConfig = { syncAcrossSessions: sync, scrollers: nextScrollers, shelfLayout: nextLayout }
+      const response = await api('/api/v1/users/me/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: { dashboardShelfConfig: config } }),
+      })
+      if (!response.ok) throw new Error(`Failed to save dashboard shelves: ${response.status}`)
+      if (user.value?.id !== currentUser.id) return
+      user.value = { ...user.value, settings: { ...user.value.settings, dashboardShelfConfig: config } }
+    }
+    scrollers.value = nextScrollers
+    shelfLayout.value = nextLayout
     save()
   }
 
@@ -154,6 +252,7 @@ export function useDashboardConfig() {
       enabled: true,
       order: scrollers.value.length + 1,
       limit: 20,
+      rows: 1,
     })
     save()
   }
@@ -175,8 +274,19 @@ export function useDashboardConfig() {
 
   function reset() {
     scrollers.value = cloneDefaultScrollers()
+    shelfLayout.value = SHELF_LAYOUT.WIDE
     localStorage.removeItem(STORAGE_KEY)
   }
 
-  return { scrollers, saveScrollers, addScroller, pruneDeletedSmartScopeScrollers, reset, MAX_SCROLLERS }
+  return {
+    scrollers,
+    shelfLayout,
+    syncAcrossSessions,
+    saveScrollers,
+    saveShelfSettings,
+    addScroller,
+    pruneDeletedSmartScopeScrollers,
+    reset,
+    MAX_SCROLLERS,
+  }
 }

@@ -36,6 +36,7 @@ describe('UserController', () => {
     getLibraryIds: vi.fn(),
     setLibraries: vi.fn(),
     adminResetPassword: vi.fn(),
+    unlockUser: vi.fn(),
     getContentFilters: vi.fn(),
     setContentFilters: vi.fn(),
   };
@@ -52,11 +53,12 @@ describe('UserController', () => {
   });
 
   it('delegates list and profile update operations', async () => {
-    await controller.findAll(undefined, 25, undefined);
+    const query = { page: 0, pageSize: 25, sortBy: 'username', sortDir: 'asc' } as any;
+    await controller.findAll(query);
     await controller.findAssignable();
     await controller.updateMe({ id: 7 } as any, { name: 'Updated' } as any);
 
-    expect(userService.findAll).toHaveBeenCalledWith(undefined, 25, undefined);
+    expect(userService.findAll).toHaveBeenCalledWith(query);
     expect(userService.findAssignable).toHaveBeenCalled();
     expect(userService.updateMe).toHaveBeenCalledWith(7, { name: 'Updated' });
   });
@@ -65,9 +67,10 @@ describe('UserController', () => {
     const settings = { dashboardConfig: { readingGoal: 12 } };
     userService.updateMySettings.mockResolvedValue({ id: 7, settings });
 
-    const result = await controller.updateMySettings({ id: 7 } as any, { settings } as any);
+    const user = { id: 7, permissions: [] } as any;
+    const result = await controller.updateMySettings(user, { settings } as any);
 
-    expect(userService.updateMySettings).toHaveBeenCalledWith(7, { settings });
+    expect(userService.updateMySettings).toHaveBeenCalledWith(user, { settings });
     expect(result).toEqual({ id: 7, settings });
   });
 
@@ -169,10 +172,11 @@ describe('UserController', () => {
     await controller.updateUser(8, { name: 'updated' } as any, requester);
     await controller.deleteUser(8, requester);
     await controller.setPermissions(8, dto as any, requester);
-    await controller.setSuperuser(8, true, requester);
+    await controller.setSuperuser(8, { isSuperuser: true }, requester);
     await controller.getLibraries(8);
     await controller.setLibraries(8, setLibrariesDto as any, requester);
     await controller.adminResetPassword(8, requester);
+    await controller.unlockUser(8, requester);
 
     expect(userService.findById).toHaveBeenCalledWith(8);
     expect(userService.createUser).toHaveBeenCalledWith({ username: 'new' });
@@ -183,6 +187,7 @@ describe('UserController', () => {
     expect(userService.getLibraryIds).toHaveBeenCalledWith(8);
     expect(userService.setLibraries).toHaveBeenCalledWith(8, [1, 2], requester);
     expect(userService.adminResetPassword).toHaveBeenCalledWith(8, requester);
+    expect(userService.unlockUser).toHaveBeenCalledWith(8, requester);
   });
 
   describe('content filter endpoints', () => {
@@ -235,10 +240,13 @@ describe('UserController', () => {
     expect(deleteAudit.description({ params: { id: '16' } }, null)).toBe('Deleted user #16');
 
     const superuserAudit = Reflect.getMetadata(AUDITABLE_KEY, UserController.prototype.setSuperuser) as {
+      action: (req: { body: { isSuperuser: boolean } }, responseBody: unknown) => AuditAction;
       getResourceId: (req: { params: Record<string, string> }) => number;
       description: (req: { params: Record<string, string>; body: { isSuperuser?: boolean } }, responseBody: unknown) => string;
     };
     expect(superuserAudit.getResourceId({ params: { id: '17' } })).toBe(17);
+    expect(superuserAudit.action({ body: { isSuperuser: true } }, null)).toBe(AuditAction.UserSuperuserEnable);
+    expect(superuserAudit.action({ body: { isSuperuser: false } }, null)).toBe(AuditAction.UserSuperuserDisable);
     expect(superuserAudit.description({ params: { id: '17' }, body: { isSuperuser: true } }, null)).toBe('Enabled superuser for user #17');
     expect(superuserAudit.description({ params: { id: '17' }, body: { isSuperuser: false } }, null)).toBe('Disabled superuser for user #17');
   });

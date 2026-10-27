@@ -87,7 +87,7 @@ function formatExtClass(ext: string): string {
     azw3: 'bg-orange-500/15 text-orange-600 dark:text-orange-400',
     fb2: 'bg-teal-500/15 text-teal-600 dark:text-teal-400',
   }
-  return map[ext?.toLowerCase()] ?? 'bg-muted text-muted-foreground/85'
+  return map[ext?.toLowerCase()] ?? 'bg-muted text-muted-foreground'
 }
 
 function estimatedDays(position: number): string {
@@ -129,9 +129,9 @@ function estimatedDays(position: number): string {
 
     <!-- Empty -->
     <div v-if="!loading && items.length === 0" class="flex flex-col items-center gap-2 py-8 text-center">
-      <Clock :size="28" class="text-muted-foreground/40" />
+      <Clock :size="28" class="text-muted-foreground" />
       <p class="text-sm text-muted-foreground">No books in queue</p>
-      <p class="text-xs text-muted-foreground/70">Use "Queue" in the Z-Library search to add books</p>
+      <p class="text-xs text-muted-foreground">Use "Queue" in the Z-Library search to add books</p>
     </div>
 
     <!-- Pending / Processing -->
@@ -147,7 +147,7 @@ function estimatedDays(position: number): string {
             class="w-8 h-11 object-cover rounded shrink-0 bg-muted"
           />
           <div v-else class="w-8 h-11 rounded bg-muted/50 shrink-0 flex items-center justify-center">
-            <BookOpen :size="12" class="text-muted-foreground/50" />
+            <BookOpen :size="12" class="text-muted-foreground" />
           </div>
 
           <div class="min-w-0 flex-1">
@@ -169,7 +169,7 @@ function estimatedDays(position: number): string {
 
           <button
             v-if="item.status === 'pending'"
-            class="shrink-0 p-1.5 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/10 transition-colors"
+            class="shrink-0 p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
             :disabled="removingId === item.id"
             @click="remove(item)"
           >
@@ -192,7 +192,7 @@ function estimatedDays(position: number): string {
           <XCircle :size="16" class="text-destructive shrink-0" />
           <div class="min-w-0 flex-1">
             <p class="text-sm font-medium text-foreground truncate">{{ item.title }}</p>
-            <p v-if="item.errorMessage" class="text-xs text-destructive/80 truncate mt-0.5">{{ item.errorMessage }}</p>
+            <p v-if="item.errorMessage" class="text-xs text-destructive truncate mt-0.5">{{ item.errorMessage }}</p>
           </div>
           <div class="shrink-0 flex gap-1.5">
             <button
@@ -205,7 +205,7 @@ function estimatedDays(position: number): string {
               Retry
             </button>
             <button
-              class="p-1.5 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/10 transition-colors"
+              class="p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
               :disabled="removingId === item.id"
               @click="remove(item)"
             >
@@ -231,7 +231,7 @@ function estimatedDays(position: number): string {
             <p class="text-xs text-muted-foreground truncate">{{ item.author }}</p>
           </div>
           <button
-            class="shrink-0 p-1.5 rounded text-muted-foreground/40 hover:text-muted-foreground hover:bg-muted transition-colors"
+            class="shrink-0 p-1.5 rounded text-muted-foreground hover:text-muted-foreground hover:bg-muted transition-colors"
             :disabled="removingId === item.id"
             @click="remove(item)"
           >

@@ -9,7 +9,9 @@
     // Path mapping for cleaner imports.
     "paths": {
       "@/*": ["./src/*"],
-      "cronstrue": ["../node_modules/.pnpm/cronstrue@3.14.0/node_modules/cronstrue"]
+      "/assets/foliate/tts.js": ["./public/assets/foliate/tts.d.ts"],
+      "/assets/foliate/text-walker.js": ["./public/assets/foliate/text-walker.d.ts"],
+      "/assets/foliate/overlayer.js": ["./public/assets/foliate/overlayer.d.ts"]
     },
 
     // `vue-tsc --build` produces a .tsbuildinfo file for incremental type-checking.

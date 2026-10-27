@@ -2,18 +2,28 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { BookOpen, BookText } from '@lucide/vue'
+import { toast } from 'vue-sonner'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
 import { useDisplaySettings, type BookThumbnailClickAction } from '@/composables/useDisplaySettings'
 import { useSeriesCollapsePreference } from '@/features/book/composables/useSeriesCollapsePreference'
+import { useBookRequestVisibility } from '@/features/book-requests/composables/useBookRequestVisibility'
 
 const { t } = useI18n()
 
 const { smartScopeFilterExpanded, thumbnailClickAction } = useDisplaySettings()
 const { prefs, setPreference } = useSeriesCollapsePreference()
+const { showBookRequests, saving: savingBookRequestVisibility, setShowBookRequests } = useBookRequestVisibility()
 
 const globalCollapseEnabled = computed(() => prefs.value?.global ?? false)
 
-const thumbnailClickOptions = computed<{ id: BookThumbnailClickAction; label: string; hint: string; icon: typeof BookOpen }[]>(() => [
+const thumbnailClickOptions = computed<
+  {
+    id: BookThumbnailClickAction
+    label: string
+    hint: string
+    icon: typeof BookOpen
+  }[]
+>(() => [
   {
     id: 'reader',
     label: t('settings.appearance.behavior.thumbnailClicks.readFirst'),
@@ -32,6 +42,10 @@ async function handleGlobalCollapseToggle(value: boolean) {
   await setPreference('global', value)
 }
 
+async function handleBookRequestVisibilityToggle(value: boolean) {
+  if (!(await setShowBookRequests(value))) toast.error(t('settings.appearance.behavior.bookRequests.saveFailed'))
+}
+
 function setThumbnailClickAction(action: BookThumbnailClickAction) {
   thumbnailClickAction.value = action
 }
@@ -39,11 +53,15 @@ function setThumbnailClickAction(action: BookThumbnailClickAction) {
 
 <template>
   <div>
-    <p class="settings-group-label">{{ t('settings.appearance.behavior.title') }}</p>
-    <div class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
+    <p class="settings-group-label">
+      {{ t('settings.appearance.behavior.title') }}
+    </p>
+    <div class="settings-card">
       <div class="flex flex-col gap-3 px-4 py-3.5 md:flex-row md:items-center md:justify-between md:px-5 md:py-4 bg-card">
         <div class="min-w-0">
-          <p class="settings-label">{{ t('settings.appearance.behavior.thumbnailClicks.label') }}</p>
+          <p class="settings-label">
+            {{ t('settings.appearance.behavior.thumbnailClicks.label') }}
+          </p>
           <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
             {{ t('settings.appearance.behavior.thumbnailClicks.hint') }}
           </p>
@@ -69,7 +87,9 @@ function setThumbnailClickAction(action: BookThumbnailClickAction) {
       </div>
       <div class="flex items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-3.5 bg-card">
         <div class="min-w-0">
-          <p class="settings-label">{{ t('settings.appearance.behavior.filterPreview.label') }}</p>
+          <p class="settings-label">
+            {{ t('settings.appearance.behavior.filterPreview.label') }}
+          </p>
           <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
             {{ t('settings.appearance.behavior.filterPreview.hint') }}
           </p>
@@ -78,12 +98,26 @@ function setThumbnailClickAction(action: BookThumbnailClickAction) {
       </div>
       <div class="flex items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-3.5 bg-card">
         <div class="min-w-0">
-          <p class="settings-label">{{ t('settings.appearance.behavior.collapseSeries.label') }}</p>
+          <p class="settings-label">
+            {{ t('settings.appearance.behavior.collapseSeries.label') }}
+          </p>
           <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
             Group books in the same series into a single card in library, collection, and Smart Scope views
           </p>
         </div>
         <ToggleSwitch :model-value="globalCollapseEnabled" @update:model-value="handleGlobalCollapseToggle" />
+      </div>
+      <div class="flex items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-3.5 bg-card">
+        <div class="min-w-0">
+          <p class="settings-label">{{ t('settings.appearance.behavior.bookRequests.label') }}</p>
+          <p class="settings-hint">{{ t('settings.appearance.behavior.bookRequests.hint') }}</p>
+        </div>
+        <ToggleSwitch
+          :model-value="showBookRequests"
+          :disabled="savingBookRequestVisibility"
+          :aria-label="t('settings.appearance.behavior.bookRequests.label')"
+          @update:model-value="handleBookRequestVisibilityToggle"
+        />
       </div>
     </div>
   </div>

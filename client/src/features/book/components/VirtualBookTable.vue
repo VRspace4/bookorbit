@@ -35,12 +35,14 @@ import BookTableContextMenu from './table/BookTableContextMenu.vue'
 import BookTableHeader from './table/BookTableHeader.vue'
 import BookTableHeaderContextMenu from './table/BookTableHeaderContextMenu.vue'
 import type { BookCard, Rule, SortSpec, TableLayoutState, TableViewType } from '@bookorbit/types'
-import { BOOK_METADATA_LOCK_FIELDS } from '@bookorbit/types'
+import { BOOK_METADATA_LOCK_FIELDS, Permission } from '@bookorbit/types'
 import { isBookPlaceholder, type BookSlot } from '@/features/book/composables/useBookWindow'
 import { useNarratorSearch } from '@/features/book/composables/useNarratorSearch'
-import { SORT_FIELD_LABELS } from '@/features/book/lib/filter-labels'
+import { sortFieldLabel } from '@/features/book/lib/filter-labels'
+import { DEFAULT_SORT } from '@/features/book/lib/sort-defaults'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 import { useActiveCustomFields } from '@/features/book/composables/useActiveCustomFields'
+import { useLibraryPermissions } from '@/features/library/composables/useLibraryPermissions'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
@@ -49,6 +51,7 @@ const props = withDefaults(
   defineProps<{
     books: BookSlot[]
     sort: SortSpec[]
+    defaultSort?: SortSpec[]
     viewType: TableViewType
     libraryId?: number
     selectionMode?: boolean
@@ -65,7 +68,7 @@ const props = withDefaults(
   { sortable: true, initialized: true },
 )
 
-type BookActionType = 'quick-view' | 'add-to-collection' | 'delete'
+type BookActionType = 'quick-view' | 'add-to-collection' | 'move-to-library' | 'delete'
 const emit = defineEmits<{
   'update:sort': [value: SortSpec[]]
   action: [book: BookCard, type: BookActionType]
@@ -139,18 +142,25 @@ const { getSortDir, handleColumnSort, removeSortField } = useTableSorting(
   () => props.sort,
   () => props.sortable ?? true,
   (sort) => emit('update:sort', sort),
+  () => props.defaultSort ?? DEFAULT_SORT,
 )
 const { getQuickFilterOptions, buildQuickFilterRule } = useTableQuickFilters(props.viewType)
+const { hasLibraryPermission } = useLibraryPermissions()
+function canEditBookMetadata(book: BookCard): boolean {
+  return hasLibraryPermission(Permission.LibraryEditMetadata, book.libraryId, 'editor')
+}
 const { getCellValue, isCellLocked, isCellReadOnly, isMandatoryFieldEmpty, isBookFileMissing, getPinnedCellBackground } = useTableCellHelpers(
   locks,
   () => isReadOnly.value,
   () => combinedColumnMap.value,
+  canEditBookMetadata,
 )
 const { coverDialogBook, handleCoverClick, handleCoverDialogUpdateBook } = useTableCoverDialog(
   () => props.selectionMode ?? false,
   (updated) => emit('update:book', updated),
   () => loadedBooks.value,
 )
+const isCoverDialogReadOnly = computed(() => isReadOnly.value || (coverDialogBook.value !== null && !canEditBookMetadata(coverDialogBook.value)))
 
 function getChipsSearchFn(colId: string): (q: string) => Promise<string[]> {
   if (colId === 'authors') return searchAuthors
@@ -389,11 +399,12 @@ function handleSelectAllToggle(event: Event) {
   emit('select-all', checked)
 }
 
-function handleCheckboxClick(bookId: number, event: MouseEvent) {
+function handleCheckboxClick(book: BookCard, event: MouseEvent) {
+  if (book.collapsedSeries) return
   if (!props.selectionMode) {
     emit('enter-selection')
   }
-  emit('select', bookId, event)
+  emit('select', book.id, event)
 }
 
 // Sort strip
@@ -401,7 +412,7 @@ const activeSorts = computed(() =>
   props.sort.map((s) => ({
     field: s.field,
     dir: s.dir,
-    label: SORT_FIELD_LABELS[s.field] ?? s.field,
+    label: sortFieldLabel(s.field),
   })),
 )
 
@@ -459,7 +470,7 @@ const { focusedRowIndex, focusedColIndex, isFocusedCell, handleTableKeydown } = 
   virtualizer,
   isCellReadOnly,
   onActivate: handleActivate,
-  onSelect: (id, event) => emit('select', id, event),
+  onSelect: handleCheckboxClick,
   onCopyRow: () => {},
   columnMapGetter: () => combinedColumnMap.value,
 })
@@ -580,12 +591,18 @@ function handleNavigate(book: BookCard, colId: string, direction: 'next' | 'prev
 
 function handleRowClick(book: BookCard, e: MouseEvent) {
   if (props.selectionMode) {
+    if (book.collapsedSeries) return
     emit('select', book.id, e)
     return
   }
   if (book.collapsedSeries) {
-    if (book.seriesId != null) router.push({ name: 'series-detail', params: { seriesId: book.seriesId } })
+    handleOpenSeries(book)
   }
+}
+
+function handleOpenSeries(book: BookCard) {
+  if (book.seriesId == null) return
+  void router.push({ name: 'series-detail', params: { seriesId: book.seriesId } })
 }
 
 function emitLockStateUpdate(book: BookCard, nextFields: BookCard['lockedFields']) {
@@ -595,6 +612,7 @@ function emitLockStateUpdate(book: BookCard, nextFields: BookCard['lockedFields'
 }
 
 async function handleToggleCellLock(book: BookCard, colId: string) {
+  if (!canEditBookMetadata(book)) return
   const lockField = COLUMN_DEF_MAP.get(colId)?.lockField
   if (!lockField) return
   const beforeFields = [...locks.getFields(book.id)]
@@ -605,6 +623,7 @@ async function handleToggleCellLock(book: BookCard, colId: string) {
 }
 
 async function handleLockAllRow(book: BookCard) {
+  if (!canEditBookMetadata(book)) return
   const beforeFields = [...locks.getFields(book.id)]
   await locks.lockAll(book.id)
   const afterFields = [...locks.getFields(book.id)]
@@ -613,6 +632,7 @@ async function handleLockAllRow(book: BookCard) {
 }
 
 async function handleUnlockAllRow(book: BookCard) {
+  if (!canEditBookMetadata(book)) return
   const beforeFields = [...locks.getFields(book.id)]
   await locks.unlockAll(book.id)
   const afterFields = [...locks.getFields(book.id)]
@@ -675,7 +695,7 @@ defineExpose({
     <!-- Screen-reader live region for dynamic announcements -->
     <div aria-live="polite" aria-atomic="true" class="sr-only">
       <span v-if="selectionMode && selectedCount != null && selectedCount > 0">{{
-        t('book.tableView.booksSelected', { count: selectedCount }, selectedCount)
+        t('book.tableView.booksSelected', { count: selectedCount })
       }}</span>
       <span v-if="loading && initialized">{{ t('book.tableView.loadingMoreBooks') }}</span>
     </div>
@@ -746,7 +766,7 @@ defineExpose({
         <tbody v-if="!initialized && loading" role="rowgroup">
           <tr v-for="i in SKELETON_ROW_COUNT" :key="`skeleton-${i}`" role="row" class="border-b border-border/50">
             <td v-if="selectionMode" role="gridcell" class="px-2 align-middle" :class="rowPaddingClass" :style="{ width: '36px', minWidth: '36px' }">
-              <div class="mx-auto h-4 w-4 rounded bg-muted animate-pulse" />
+              <div class="mx-auto h-4 w-4 rounded-xs bg-muted animate-pulse" />
             </td>
             <td
               v-for="col in displayColumns"
@@ -761,8 +781,8 @@ defineExpose({
                 <div v-for="s in 5" :key="s" class="h-3 w-3 rounded-full bg-muted animate-pulse" />
               </div>
               <div v-else-if="col.cellType === 'progress'" class="h-1.5 w-full rounded-full bg-muted animate-pulse" />
-              <div v-else-if="col.cellType === 'actions'" class="h-5 w-5 rounded bg-muted animate-pulse" />
-              <div v-else class="h-4 rounded bg-muted animate-pulse" :style="{ width: `${40 + ((i * 17 + col.defaultWidth) % 60)}%` }" />
+              <div v-else-if="col.cellType === 'actions'" class="h-5 w-5 rounded-xs bg-muted animate-pulse" />
+              <div v-else class="h-4 rounded-xs bg-muted animate-pulse" :style="{ width: `${40 + ((i * 17 + col.defaultWidth) % 60)}%` }" />
             </td>
           </tr>
         </tbody>
@@ -783,7 +803,7 @@ defineExpose({
                 :class="rowPaddingClass"
                 :style="{ width: `${col.defaultWidth}px`, minWidth: `${col.minWidth}px` }"
               >
-                <div class="h-3.5 max-w-32 animate-pulse rounded bg-foreground/5" data-testid="book-row-skeleton" />
+                <div class="h-3.5 max-w-32 animate-pulse rounded-xs bg-foreground/5" data-testid="book-row-skeleton" />
               </td>
             </tr>
             <tr
@@ -812,10 +832,11 @@ defineExpose({
               >
                 <div class="flex items-center justify-center">
                   <input
+                    v-if="!rowBook(vItem.index).collapsedSeries"
                     type="checkbox"
                     class="accent-primary h-3.5 w-3.5 cursor-pointer"
                     :checked="isSelected?.(rowBook(vItem.index).id) ?? false"
-                    @click.stop="handleCheckboxClick(rowBook(vItem.index).id, $event)"
+                    @click.stop="handleCheckboxClick(rowBook(vItem.index), $event)"
                   />
                 </div>
               </td>
@@ -867,7 +888,12 @@ defineExpose({
                 @click="focusTableCell(vItem.index, colIdx, $event, rowBook(vItem.index).id, col.id)"
               >
                 <template v-if="rowBook(vItem.index).collapsedSeries">
-                  <BookTableCollapsedSeriesCell :book="rowBook(vItem.index)" :col-id="col.id" />
+                  <BookTableCollapsedSeriesCell
+                    :book="rowBook(vItem.index)"
+                    :col-id="col.id"
+                    :link-fn="getChipsLinkFn(col.id)"
+                    @open-series="handleOpenSeries(rowBook(vItem.index))"
+                  />
                 </template>
                 <template v-else>
                   <BookTableCellDispatcher
@@ -878,6 +904,7 @@ defineExpose({
                     :is-locked="isCellLocked(rowBook(vItem.index), col.id)"
                     :is-active="editor.isActive(rowBook(vItem.index).id, col.id)"
                     :is-read-only="isCellReadOnly(rowBook(vItem.index), col)"
+                    :can-edit-metadata="canEditBookMetadata(rowBook(vItem.index))"
                     :is-fully-locked="isRowFullyLocked(rowBook(vItem.index))"
                     :locked-field-count="getRowLockedFieldCount(rowBook(vItem.index))"
                     :selection-mode="props.selectionMode ?? false"
@@ -980,25 +1007,25 @@ defineExpose({
       <div class="flex items-center gap-2">
         <span v-if="selectionMode && selectedCount">
           {{ t('book.tableView.selectedStatus', { count: formatNumber(selectedCount) }) }}
-          <span class="text-muted-foreground/60">/ </span>
+          <span class="text-muted-foreground">/ </span>
         </span>
         <span v-if="filterActive" class="flex items-center gap-1 text-primary">
           <span class="h-1.5 w-1.5 rounded-full bg-primary" />
           {{ t('book.tableView.filtered') }}
         </span>
         <span v-if="hasMore">{{ t('book.tableView.loadedStatus', { loaded: formatNumber(books.length), total: formatNumber(total ?? 0) }) }}</span>
-        <span v-else>{{ t('book.tableView.bookCount', { count: formatNumber(total ?? books.length) }, total ?? books.length) }}</span>
+        <span v-else>{{ t('book.tableView.bookCount', { count: total ?? books.length }) }}</span>
       </div>
       <div class="flex items-center gap-3">
         <button
-          class="inline-flex h-5 w-5 items-center justify-center rounded border border-border/70 bg-background text-[11px] font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          class="inline-flex h-5 w-5 items-center justify-center rounded-xs border border-border/70 bg-background text-[11px] font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           :title="t('book.tableView.keyboardShortcutsTitle')"
           :aria-label="t('book.tableView.showKeyboardShortcuts')"
           @click="shortcutOverlayOpen = true"
         >
           ?
         </button>
-        <span class="hidden lg:inline text-[11px] text-muted-foreground/80">{{ t('book.tableView.copyHint') }}</span>
+        <span class="hidden lg:inline text-[11px] text-muted-foreground">{{ t('book.tableView.copyHint') }}</span>
         <span v-if="loading" class="flex items-center gap-1">
           <Loader2 :size="11" class="animate-spin" />
           {{ t('common.loading') }}
@@ -1034,7 +1061,12 @@ defineExpose({
     />
   </div>
 
-  <BookCoverDialog :book="coverDialogBook" :read-only="isReadOnly" @close="coverDialogBook = null" @update:book="handleCoverDialogUpdateBook" />
+  <BookCoverDialog
+    :book="coverDialogBook"
+    :read-only="isCoverDialogReadOnly"
+    @close="coverDialogBook = null"
+    @update:book="handleCoverDialogUpdateBook"
+  />
   <KeyboardShortcutOverlay v-model:open="shortcutOverlayOpen" />
 </template>
 

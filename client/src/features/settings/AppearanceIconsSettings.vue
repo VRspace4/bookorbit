@@ -267,7 +267,7 @@ async function removeIcon(icon: CustomIcon) {
 async function deleteSelected() {
   if (bulkDeleting.value || selected.value.size === 0) return
   const slugs = [...selected.value]
-  if (!window.confirm(t('settings.appearance.icons.confirm.deleteMany', { count: slugs.length }, slugs.length))) return
+  if (!window.confirm(t('settings.appearance.icons.confirm.deleteMany', { count: slugs.length }))) return
   bulkDeleting.value = true
   try {
     const result = await bulkDeleteCustomIcons(slugs)
@@ -275,7 +275,7 @@ async function deleteSelected() {
     expandedSlug.value = null
     if (result.failed.length > 0)
       toast.warning(t('settings.appearance.icons.toasts.bulkDeletePartial', { deleted: result.deleted.length, failed: result.failed.length }))
-    else toast.success(t('settings.appearance.icons.toasts.bulkDeleted', { count: result.deleted.length }, result.deleted.length))
+    else toast.success(t('settings.appearance.icons.toasts.bulkDeleted', { count: result.deleted.length }))
     await loadPage()
   } catch (err) {
     toast.error(err instanceof Error ? err.message : t('settings.appearance.icons.errors.bulkDelete'))
@@ -290,9 +290,9 @@ function handleUploaded() {
 
 function usageSummary(usage: CustomIconUsage): string {
   const parts: string[] = []
-  if (usage.libraries) parts.push(t('settings.appearance.icons.usage.libraries', { count: usage.libraries }, usage.libraries))
-  if (usage.collections) parts.push(t('settings.appearance.icons.usage.collections', { count: usage.collections }, usage.collections))
-  if (usage.smartScopes) parts.push(t('settings.appearance.icons.usage.smartScopes', { count: usage.smartScopes }, usage.smartScopes))
+  if (usage.libraries) parts.push(t('settings.appearance.icons.usage.libraries', { count: usage.libraries }))
+  if (usage.collections) parts.push(t('settings.appearance.icons.usage.collections', { count: usage.collections }))
+  if (usage.smartScopes) parts.push(t('settings.appearance.icons.usage.smartScopes', { count: usage.smartScopes }))
   return parts.join(', ')
 }
 </script>
@@ -302,7 +302,7 @@ function usageSummary(usage: CustomIconUsage): string {
     <input ref="replaceInputRef" type="file" accept="image/svg+xml,.svg" class="hidden" @change="handleReplaceInput" />
     <IconUploadDialog v-if="canManageIcons" v-model:open="uploadOpen" @uploaded="handleUploaded" />
 
-    <section class="space-y-3">
+    <section class="space-y-2">
       <div class="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
         <Button v-if="canManageIcons" type="button" class="h-9 gap-2 self-start sm:self-auto" @click="openUpload">
           <UploadCloud :size="15" />
@@ -310,7 +310,7 @@ function usageSummary(usage: CustomIconUsage): string {
         </Button>
         <div class="sm:text-right">
           <p class="settings-group-label mb-0">{{ t('settings.appearance.icons.title') }}</p>
-          <p class="text-xs text-muted-foreground">{{ t('settings.appearance.icons.uploadedCount', { count: total }, total) }}</p>
+          <p class="text-xs text-muted-foreground">{{ t('settings.appearance.icons.uploadedCount', { count: total }) }}</p>
         </div>
       </div>
 
@@ -321,18 +321,18 @@ function usageSummary(usage: CustomIconUsage): string {
             v-model="query"
             type="text"
             :placeholder="t('settings.appearance.icons.searchPlaceholder')"
-            class="w-full min-w-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground/70 focus:outline-none"
+            class="w-full min-w-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
           />
-          <button v-if="query" type="button" class="shrink-0 text-muted-foreground hover:text-foreground" @click="clearQuery">
+          <Button variant="ghost" size="icon-sm" v-if="query" type="button" class="shrink-0" @click="clearQuery">
             <X :size="13" />
-          </button>
+          </Button>
         </div>
 
         <div class="flex items-center gap-2">
           <div class="flex h-9 items-center rounded-md border border-input bg-background p-0.5 text-xs">
             <button
               type="button"
-              class="h-8 rounded px-2.5 font-medium transition-colors"
+              class="h-8 rounded-xs px-2.5 font-medium transition-colors"
               :class="sort === 'newest' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
               @click="setSort('newest')"
             >
@@ -340,7 +340,7 @@ function usageSummary(usage: CustomIconUsage): string {
             </button>
             <button
               type="button"
-              class="h-8 rounded px-2.5 font-medium transition-colors"
+              class="h-8 rounded-xs px-2.5 font-medium transition-colors"
               :class="sort === 'name' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
               @click="setSort('name')"
             >
@@ -401,7 +401,7 @@ function usageSummary(usage: CustomIconUsage): string {
               <button
                 v-if="canManageIcons"
                 type="button"
-                class="absolute left-1.5 top-1.5 flex size-5 items-center justify-center rounded border bg-background/90 transition-opacity"
+                class="absolute left-1.5 top-1.5 flex size-5 items-center justify-center rounded-xs border bg-background/90 transition-opacity"
                 :class="
                   selected.has(icon.slug)
                     ? 'border-primary bg-primary text-primary-foreground opacity-100'
@@ -445,7 +445,7 @@ function usageSummary(usage: CustomIconUsage): string {
                         <template v-else-if="expandedUsage">
                           <template v-if="expandedUsage.total > 0">
                             {{ t('settings.appearance.icons.usedBy', { count: expandedUsage.total }) }}
-                            <span class="text-muted-foreground/70">({{ usageSummary(expandedUsage) }})</span>
+                            <span class="text-muted-foreground">({{ usageSummary(expandedUsage) }})</span>
                           </template>
                           <template v-else>{{ t('settings.appearance.icons.notUsedYet') }}</template>
                         </template>
@@ -453,13 +453,9 @@ function usageSummary(usage: CustomIconUsage): string {
                     </template>
                   </div>
 
-                  <button
-                    type="button"
-                    class="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    @click="collapseExpanded"
-                  >
+                  <Button variant="ghost" size="icon-sm" type="button" class="shrink-0" @click="collapseExpanded">
                     <X :size="15" />
-                  </button>
+                  </Button>
                 </div>
 
                 <div v-if="canManageIcons" class="mt-3 flex flex-wrap justify-end gap-2">
@@ -481,9 +477,9 @@ function usageSummary(usage: CustomIconUsage): string {
                     </Button>
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="destructive-outline"
                       size="sm"
-                      class="h-8 gap-1.5 text-destructive hover:border-destructive/40 hover:bg-destructive/5"
+                      class="h-8"
                       :disabled="deletingSlug === expandedIcon.slug"
                       @click="removeIcon(expandedIcon)"
                     >

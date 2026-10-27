@@ -13,7 +13,7 @@ function makeRouter(options: { backStepsToExit?: number; exitTarget?: string } =
 
   return {
     currentRoute,
-    back: vi.fn(async () => {
+    back: vi.fn<() => Promise<void>>(async () => {
       backCalls++
       const stepsToExit = options.backStepsToExit ?? 1
       if (backCalls >= stepsToExit) {
@@ -25,8 +25,8 @@ function makeRouter(options: { backStepsToExit?: number; exitTarget?: string } =
       }
       currentRoute.value = { path: '/read/1/1', fullPath: '/read/1/1?format=epub' }
     }),
-    isReady: vi.fn(() => Promise.resolve()),
-    replace: vi.fn(() => Promise.resolve()),
+    isReady: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+    replace: vi.fn<(...args: unknown[]) => Promise<void>>(() => Promise.resolve()),
   } as unknown as Router
 }
 

@@ -2,14 +2,13 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { CheckCircle2, FileUp, Loader2, Plus, Upload, X, XCircle, RotateCcw } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
-import { Permission } from '@bookorbit/types'
 import { SUPPORTED_FORMATS_ACCEPT, useAddBookFile } from '@/features/book/composables/useAddBookFile'
-import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 import { formatBytes } from '@/lib/formatting'
 
 const props = defineProps<{
   bookId: number
+  canRenameFiles: boolean
 }>()
 
 const emit = defineEmits<{
@@ -18,7 +17,6 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { hasPermission } = usePermissions()
 const { maxUploadSizeMb } = useAppInfo()
 
 const isDragging = ref(false)
@@ -91,7 +89,7 @@ function onFileInputChange(e: Event) {
 
 async function handleUpload() {
   if (pendingCount.value === 0 || isUploading.value) return
-  await startUpload(props.bookId, { renameAfter: renameAfter.value })
+  await startUpload(props.bookId, { renameAfter: props.canRenameFiles && renameAfter.value })
 }
 
 function fileRowClass(status: string): string {
@@ -118,14 +116,14 @@ function formatPillClass(filename: string): string {
     cb7: 'bg-sky-500/15 text-sky-600 dark:text-sky-400',
     fb2: 'bg-teal-500/15 text-teal-600 dark:text-teal-400',
   }
-  return map[ext] ?? 'bg-muted text-muted-foreground/85'
+  return map[ext] ?? 'bg-muted text-muted-foreground'
 }
 </script>
 
 <template>
   <Teleport to="body">
     <div class="fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4">
-      <div class="absolute inset-0 bg-black/50 backdrop-blur-[2px]" @click="handleClose" />
+      <div class="absolute inset-0 bg-scrim" @click="handleClose" />
 
       <div
         class="relative flex flex-col w-full max-w-2xl bg-background rounded-lg shadow-2xl border border-border overflow-hidden"
@@ -195,9 +193,7 @@ function formatPillClass(filename: string): string {
           <div v-if="hasFiles" class="flex flex-col gap-2">
             <!-- Summary line -->
             <div v-if="fileSummary" class="flex items-center gap-1.5 flex-wrap text-xs text-muted-foreground">
-              <span class="font-medium text-foreground tabular-nums">{{
-                t('book.detail.addFile.fileCount', { count: fileSummary.total }, fileSummary.total)
-              }}</span>
+              <span class="font-medium text-foreground tabular-nums">{{ t('book.detail.addFile.fileCount', { count: fileSummary.total }) }}</span>
               <span>·</span>
               <span>{{ formatBytes(fileSummary.totalBytes) }}</span>
               <span>·</span>
@@ -228,7 +224,7 @@ function formatPillClass(filename: string): string {
                   <p class="text-xs font-medium text-foreground truncate">{{ item.file.name }}</p>
                   <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
                     <span class="text-[11px] text-muted-foreground">{{ formatBytes(item.file.size) }}</span>
-                    <span class="text-[10px] font-semibold px-1.5 py-px rounded uppercase tracking-wide" :class="formatPillClass(item.file.name)">
+                    <span class="text-[10px] font-semibold px-1.5 py-px rounded-xs uppercase tracking-wide" :class="formatPillClass(item.file.name)">
                       {{ getFormat(item.file.name) }}
                     </span>
                     <span v-if="item.status === 'error'" class="text-[11px] text-destructive truncate">{{ item.error }}</span>
@@ -248,7 +244,7 @@ function formatPillClass(filename: string): string {
                 <div class="shrink-0 flex items-center gap-0.5">
                   <button
                     v-if="item.status === 'error'"
-                    class="flex items-center justify-center w-6 h-6 rounded text-muted-foreground/85 hover:text-primary hover:bg-primary/10 transition-colors"
+                    class="flex items-center justify-center w-6 h-6 rounded-xs text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
                     :title="t('book.detail.addFile.retry')"
                     @click="retryFile(item.id)"
                   >
@@ -256,7 +252,7 @@ function formatPillClass(filename: string): string {
                   </button>
                   <button
                     v-if="item.status !== 'uploading'"
-                    class="flex items-center justify-center w-6 h-6 rounded text-muted-foreground/70 hover:text-foreground hover:bg-muted transition-colors"
+                    class="flex items-center justify-center w-6 h-6 rounded-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                     @click="removeFile(item.id)"
                   >
                     <X :size="12" />
@@ -271,7 +267,7 @@ function formatPillClass(filename: string): string {
         <div v-if="allSuccess" class="shrink-0 px-5 py-4 border-t border-border flex items-center justify-between gap-3">
           <div class="flex items-center gap-2">
             <CheckCircle2 class="size-4 text-emerald-500 shrink-0" />
-            <span class="text-sm font-medium text-foreground">{{ t('book.detail.addFile.filesAdded', { count: doneCount }, doneCount) }}</span>
+            <span class="text-sm font-medium text-foreground">{{ t('book.detail.addFile.filesAdded', { count: doneCount }) }}</span>
           </div>
           <button
             class="px-3 py-1.5 rounded-md border border-border text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -290,11 +286,11 @@ function formatPillClass(filename: string): string {
             <span v-else-if="isUploading" class="text-xs text-muted-foreground tabular-nums">{{
               t('book.detail.addFile.uploadingProgress', { done: doneCount, total: files.length })
             }}</span>
-            <label v-else-if="hasPermission(Permission.LibraryEditMetadata)" class="flex items-center gap-2 cursor-pointer select-none">
+            <label v-else-if="canRenameFiles" class="flex items-center gap-2 cursor-pointer select-none">
               <input
                 v-model="renameAfter"
                 type="checkbox"
-                class="w-3.5 h-3.5 rounded border-border accent-primary cursor-pointer"
+                class="w-3.5 h-3.5 rounded-xs border-border accent-primary cursor-pointer"
                 :disabled="isUploading"
               />
               <span class="text-xs text-muted-foreground">{{ t('book.detail.addFile.renameAfter') }}</span>

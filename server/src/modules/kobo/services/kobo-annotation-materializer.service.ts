@@ -109,61 +109,9 @@ export class KoboAnnotationMaterializerService {
         if (!koboSpan?.pos0) continue;
         if (!this.needsCanonical(formats?.cfi) && !this.needsCanonical(formats?.xpointer)) continue;
 
-        const location = (koboSpan.extras as { koboLocation?: unknown } | null)?.koboLocation;
-        const outcome = await this.koboSpanConverter.koboSpanToCanonical({
-          bookFileId: file.id,
-          ctx,
-          location,
-          text: annotation.text || null,
-        });
-
-        // The device's own position belongs to the current rendition by definition;
-        // stamping the hash keeps the materializer from re-synthesizing the verbatim
-        // location the device uploaded.
-        if (outcome.renditionHash) {
-          await this.annotationSync.upsertGeneratedPosition({
-            annotationId: annotation.id,
-            userId,
-            bookFileId: file.id,
-            format: 'kobo_span',
-            pos0: koboSpan.pos0,
-            pos1: koboSpan.pos1,
-            status: koboSpan.status as 'exact' | 'repaired' | 'failed' | 'pending',
-            converterVersion: this.koboSpanConverter.version,
-            extras: { ...(koboSpan.extras ?? {}), chapterIndex: outcome.chapterIndex, renditionHash: outcome.renditionHash },
-          });
-        }
-
-        if (outcome.status === 'failed' || !outcome.cfi || !outcome.xpointerPos0) {
-          failed += 1;
-          await this.storeFailure(userId, annotation.id, file.id, 'cfi', outcome.chapterIndex ?? null, outcome.reason ?? 'conversion_failed');
-          await this.storeFailure(userId, annotation.id, file.id, 'xpointer', outcome.chapterIndex ?? null, outcome.reason ?? 'conversion_failed');
-          continue;
-        }
-
-        converted += 1;
-        await this.annotationSync.upsertGeneratedPosition({
-          annotationId: annotation.id,
-          userId,
-          bookFileId: file.id,
-          format: 'cfi',
-          pos0: outcome.cfi,
-          pos1: null,
-          status: outcome.status,
-          converterVersion: this.positionConverter.version,
-          extras: { chapterIndex: outcome.chapterIndex },
-        });
-        await this.annotationSync.upsertGeneratedPosition({
-          annotationId: annotation.id,
-          userId,
-          bookFileId: file.id,
-          format: 'xpointer',
-          pos0: outcome.xpointerPos0,
-          pos1: outcome.xpointerPos1 ?? null,
-          status: outcome.status,
-          converterVersion: this.positionConverter.version,
-          extras: { chapterIndex: outcome.chapterIndex },
-        });
+        const outcome = await this.convertFromKoboSpan(userId, annotation, koboSpan, file, ctx);
+        if (outcome.converted) converted += 1;
+        else failed += 1;
       }
 
       if (converted > 0 || failed > 0) {
@@ -177,6 +125,136 @@ export class KoboAnnotationMaterializerService {
         `[${CONVERT_EVENT}] [fail] userId=${userId} bookId=${bookId} durationMs=${Date.now() - startedAtMs} errorClass=${errorClass} error="${sanitizeLogValue(error instanceof Error ? error.message : 'unknown error')}" - incoming kobo position conversion failed`,
       );
     }
+  }
+
+  /**
+   * A highlight made elsewhere reaches the Kobo as a span converted on the fly and never stored, so
+   * an upload that changes its range (a tap that re-saves it shorter, a dragged handle) has nothing
+   * to be compared with and would land as new text on the old range (D-12). Stores the span the
+   * device was served for each uploaded, already-known highlight that has no Kobo position yet, so
+   * ingest sees the device's range move like any other.
+   */
+  async recordServedSpans(userId: number, bookId: number, file: KepubReaderFile, ctx: KepubContext, externalKeys: string[]): Promise<number> {
+    if (externalKeys.length === 0) return 0;
+    const wanted = new Set(externalKeys);
+    const states = (await this.annotationSync.listStatesBySourceForBook(userId, 'kobo', bookId)).filter(
+      (row) => wanted.has(row.state.externalKey) && row.annotation.deletedAt === null,
+    );
+    if (states.length === 0) return 0;
+
+    const positions = this.groupPositions(
+      await this.annotationSync.findPositions(
+        states.map((row) => row.annotation.id),
+        ['kobo_span', 'cfi', 'xpointer'],
+      ),
+    );
+
+    let recorded = 0;
+    for (const { annotation } of states) {
+      const formats = positions.get(annotation.id);
+      if (formats?.koboSpan) continue;
+      const cfi = formats?.cfi;
+      if (!cfi?.pos0 || cfi.status === 'failed' || cfi.status === 'pending') continue;
+
+      const outcome = await this.koboSpanConverter.canonicalToKoboSpan({
+        bookFileId: file.id,
+        ctx,
+        cfi: cfi.pos0,
+        text: annotation.text || null,
+        chapterTitle: annotation.chapterTitle,
+      });
+      if (outcome.status === 'failed' || !outcome.pos0 || !outcome.pos1 || !outcome.location) continue;
+
+      await this.annotationSync.upsertGeneratedPosition({
+        annotationId: annotation.id,
+        userId,
+        bookFileId: file.id,
+        format: 'kobo_span',
+        pos0: outcome.pos0,
+        pos1: outcome.pos1,
+        status: outcome.status,
+        converterVersion: this.koboSpanConverter.version,
+        extras: {
+          chapterIndex: outcome.chapterIndex,
+          chapterFilename: outcome.location.span.chapterFilename,
+          chapterProgress: outcome.location.span.chapterProgress,
+          renditionHash: outcome.renditionHash,
+          koboLocation: outcome.location,
+          sourceCfi: cfi.pos0,
+        },
+      });
+      recorded += 1;
+    }
+    return recorded;
+  }
+
+  /**
+   * Converts one stored kobo_span position to cfi + xpointer, recording a failure on
+   * both canonical formats when it cannot resolve. Shared by device sync and by hub
+   * position retry, which is the only way an already-failed conversion is redone.
+   */
+  async convertFromKoboSpan(
+    userId: number,
+    annotation: { id: number; text: string | null },
+    koboSpan: AnnotationPosition,
+    file: KepubReaderFile,
+    ctx: KepubContext,
+  ): Promise<{ converted: boolean; reason?: string }> {
+    const location = (koboSpan.extras as { koboLocation?: unknown } | null)?.koboLocation;
+    const outcome = await this.koboSpanConverter.koboSpanToCanonical({
+      bookFileId: file.id,
+      ctx,
+      location,
+      text: annotation.text || null,
+    });
+
+    // The device's own position belongs to the current rendition by definition;
+    // stamping the hash keeps the materializer from re-synthesizing the verbatim
+    // location the device uploaded.
+    if (outcome.renditionHash && koboSpan.pos0) {
+      await this.annotationSync.upsertGeneratedPosition({
+        annotationId: annotation.id,
+        userId,
+        bookFileId: file.id,
+        format: 'kobo_span',
+        pos0: koboSpan.pos0,
+        pos1: koboSpan.pos1,
+        status: koboSpan.status as 'exact' | 'repaired' | 'failed' | 'pending',
+        converterVersion: this.koboSpanConverter.version,
+        extras: { ...(koboSpan.extras ?? {}), chapterIndex: outcome.chapterIndex, renditionHash: outcome.renditionHash, sourceCfi: outcome.cfi },
+      });
+    }
+
+    if (outcome.status === 'failed' || !outcome.cfi || !outcome.xpointerPos0) {
+      const reason = outcome.reason ?? 'conversion_failed';
+      await this.storeFailure(userId, annotation.id, file.id, 'cfi', outcome.chapterIndex ?? null, reason);
+      await this.storeFailure(userId, annotation.id, file.id, 'xpointer', outcome.chapterIndex ?? null, reason);
+      return { converted: false, reason };
+    }
+
+    await this.annotationSync.upsertGeneratedPosition({
+      annotationId: annotation.id,
+      userId,
+      bookFileId: file.id,
+      format: 'cfi',
+      pos0: outcome.cfi,
+      pos1: null,
+      status: outcome.status,
+      converterVersion: this.positionConverter.version,
+      extras: { chapterIndex: outcome.chapterIndex },
+    });
+    await this.annotationSync.upsertGeneratedPosition({
+      annotationId: annotation.id,
+      userId,
+      bookFileId: file.id,
+      format: 'xpointer',
+      pos0: outcome.xpointerPos0,
+      pos1: outcome.xpointerPos1 ?? null,
+      status: outcome.status,
+      converterVersion: this.positionConverter.version,
+      extras: { chapterIndex: outcome.chapterIndex },
+    });
+    return { converted: true };
   }
 
   private async materializeOne(

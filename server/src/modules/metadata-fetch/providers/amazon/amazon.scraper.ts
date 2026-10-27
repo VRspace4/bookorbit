@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 import type { CheerioAPI } from 'cheerio';
 
 import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../../common/utils/published-date.utils';
+import { normalizeSeriesTotalBooks } from '../../../../common/utils/series-total-books.utils';
 
 export interface AmazonBookData {
   title?: string;
@@ -16,8 +17,11 @@ export interface AmazonBookData {
   language?: string;
   pageCount?: number;
   seriesName?: string;
-  seriesIndex?: number;
+  seriesIndex?: string;
+  seriesTotalBooks?: number;
   coverUrl?: string;
+  coverWidth?: number;
+  coverHeight?: number;
   tags?: string[];
   communityRating?: number;
   communityRatingCount?: number;
@@ -43,7 +47,8 @@ export function parseBookPage(html: string): AmazonBookData {
     pageCount: extractPageCount($),
     seriesName: extractSeriesName($),
     seriesIndex: extractSeriesIndex($),
-    coverUrl: extractCoverUrl($),
+    seriesTotalBooks: extractSeriesTotalBooks($),
+    ...extractCover($),
     tags: extractCategories($),
     communityRating: extractCommunityRating($),
     communityRatingCount: extractCommunityRatingCount($),
@@ -61,7 +66,8 @@ export function extractAsins(html: string, limit: number): string[] {
   $('div[data-component-type="s-search-result"]').each((_, el) => {
     if (results.length >= limit) return false;
 
-    const titleText = $(el).find('[data-cy=title-recipe]').text().toLowerCase();
+    const titleText = $(el).find('[data-cy=title-recipe]').text().trim().toLowerCase();
+    if (titleText.startsWith('sponsored')) return;
     if (SKIP_TITLE_PATTERNS.test(titleText)) return;
 
     // Collect all /dp/ASIN links with their visible label within this result block.
@@ -219,19 +225,30 @@ function extractSeriesName($: CheerioAPI): string | undefined {
   return $('#rpi-attribute-book_details-series .rpi-attribute-value a span').first().text().trim() || undefined;
 }
 
-function extractSeriesIndex($: CheerioAPI): number | undefined {
-  const label = $('#rpi-attribute-book_details-series .rpi-attribute-label span').first().text();
-  const match = label.match(/book\s+(\d+(?:\.\d+)?)\s+of/i);
-  if (!match) return undefined;
-  const n = parseFloat(match[1]);
-  return Number.isNaN(n) ? undefined : n;
+function seriesLabel($: CheerioAPI): string {
+  return $('#rpi-attribute-book_details-series .rpi-attribute-label span').first().text();
 }
 
-function extractCoverUrl($: CheerioAPI): string | undefined {
+function extractSeriesIndex($: CheerioAPI): string | undefined {
+  const match = seriesLabel($).match(/book\s+(\d+(?:\.\d+)?)\s+of/i);
+  return match?.[1];
+}
+
+/**
+ * The same "Book 3 of 7" label that yields the index also states the series length. Optional
+ * trailing group so a label that stops after "of" simply yields no total.
+ */
+function extractSeriesTotalBooks($: CheerioAPI): number | undefined {
+  const match = seriesLabel($).match(/book\s+\d+(?:\.\d+)?\s+of\s+(\d+)/i);
+  return match ? normalizeSeriesTotalBooks(match[1]) : undefined;
+}
+
+function extractCover($: CheerioAPI): Pick<AmazonBookData, 'coverUrl' | 'coverWidth' | 'coverHeight'> {
   const img = $('#landingImage, #imgBlkFront').first();
 
-  // data-a-dynamic-image is a JSON map of url -> [width, height] with all available sizes.
-  // Cheerio decodes HTML entities in attr(), so &quot; becomes " automatically.
+  // data-a-dynamic-image is a JSON map of variant url -> size, one entry per available size. The
+  // pairs are [height, width]: every page checked in September 2026 agreed once the images were
+  // measured. Cheerio decodes HTML entities in attr(), so &quot; becomes " automatically.
   const dynamicRaw = img.attr('data-a-dynamic-image');
   if (dynamicRaw) {
     try {
@@ -241,7 +258,7 @@ function extractCoverUrl($: CheerioAPI): string | undefined {
         // Strip the size modifier (e.g. ._SY342_) from any variant URL to get
         // the full-resolution original. All entries are the same image at different sizes.
         const [sampleUrl] = entries[0];
-        return sampleUrl.replace(/\._[^.]+_\./, '.');
+        return { coverUrl: sampleUrl.replace(/\._[^.]+_\./, '.'), ...largestDeclaredSize(entries) };
       }
     } catch {
       // fall through
@@ -249,9 +266,29 @@ function extractCoverUrl($: CheerioAPI): string | undefined {
   }
 
   const hires = img.attr('data-old-hires');
-  if (hires) return hires;
+  if (hires) return { coverUrl: hires };
   const src = img.attr('src');
-  return src ? src.replace(/\._[A-Z0-9_,]+_\./i, '.') : undefined;
+  return src ? { coverUrl: src.replace(/\._[A-Z0-9_,]+_\./i, '.') } : {};
+}
+
+/**
+ * The largest declared size, which is the least rounded. A variant url sized by one side
+ * (`._SY522_` for height, `._SX300_` for width) settles which number is which; otherwise the pair
+ * is read as [height, width].
+ */
+function largestDeclaredSize(entries: [string, unknown][]): Pick<AmazonBookData, 'coverWidth' | 'coverHeight'> {
+  let best: { coverWidth: number; coverHeight: number } | undefined;
+  for (const [variantUrl, size] of entries) {
+    if (!Array.isArray(size)) continue;
+    const [first, second] = size as unknown[];
+    if (typeof first !== 'number' || typeof second !== 'number' || first <= 0 || second <= 0) continue;
+    const sizedWidth = Number(/\._SX(\d+)_/.exec(variantUrl)?.[1]);
+    const sizedHeight = Number(/\._SY(\d+)_/.exec(variantUrl)?.[1]);
+    const firstIsWidth = sizedWidth === first || (sizedHeight === second && sizedHeight !== first);
+    const declared = firstIsWidth ? { coverWidth: first, coverHeight: second } : { coverWidth: second, coverHeight: first };
+    if (!best || declared.coverWidth * declared.coverHeight > best.coverWidth * best.coverHeight) best = declared;
+  }
+  return best ?? {};
 }
 
 function extractCommunityRating($: CheerioAPI): number | undefined {

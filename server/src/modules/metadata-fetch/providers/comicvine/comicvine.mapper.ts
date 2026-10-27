@@ -1,15 +1,15 @@
-import { ComicMetadataFields, MetadataCandidate, MetadataProviderKey } from '@bookorbit/types';
+import { ComicMetadataFields, MetadataCandidate, MetadataProviderKey, parseSeriesIndex as parseSeriesIndexLabel } from '@bookorbit/types';
 
 import { parsePublishedDateKey, parsePublishedYear, publishedYearFromDateKey } from '../../../../common/utils/published-date.utils';
-import { ComicVineIssue, ComicVinePersonCredit } from './comicvine.types';
+import { normalizeSeriesTotalBooks } from '../../../../common/utils/series-total-books.utils';
+import { ComicVineIssue, ComicVinePersonCredit, ComicVineVolume } from './comicvine.types';
 
 function parseYear(dateStr: string | null | undefined): number | undefined {
   return parsePublishedYear(dateStr ?? undefined);
 }
 
-function parseSeriesIndex(issueNumber: string): number | undefined {
-  const n = parseFloat(issueNumber);
-  return Number.isFinite(n) ? n : undefined;
+function parseSeriesIndex(issueNumber: string): string | undefined {
+  return parseSeriesIndexLabel(issueNumber) ?? undefined;
 }
 
 function extractByRole(credits: ComicVinePersonCredit[], ...roles: string[]): string[] {
@@ -34,28 +34,45 @@ function buildComicMetadata(issue: ComicVineIssue): ComicMetadataFields {
   };
 }
 
-function buildTitle(issue: ComicVineIssue): string {
+function buildTitle(issue: ComicVineIssue): string | undefined {
+  return issue.name?.trim() || undefined;
+}
+
+function buildDisplayTitle(issue: ComicVineIssue): string {
   const parts = [issue.volume.name, `#${issue.issue_number}`];
   if (issue.name) parts.push(`- ${issue.name}`);
   return parts.join(' ');
 }
 
-export function mapIssueToCandidate(issue: ComicVineIssue): MetadataCandidate {
+function publisherName(volume: ComicVineVolume | undefined): string | undefined {
+  const name: unknown = volume?.publisher?.name;
+  return typeof name === 'string' ? name.trim() || undefined : undefined;
+}
+
+/**
+ * The issue payload only carries its volume's id and name, so volume-level fields have to come
+ * from the linked volume record. The id check prevents a mismatched search result from leaking
+ * another run's publisher or issue count into the candidate.
+ */
+export function mapIssueToCandidate(issue: ComicVineIssue, options?: { volume?: ComicVineVolume }): MetadataCandidate {
   const writers = extractByRole(issue.person_credits ?? [], 'writer');
   const rawPublishedDate = issue.cover_date ?? issue.store_date;
   const publishedDate = parsePublishedDateKey(rawPublishedDate ?? undefined);
+  const volume = options?.volume?.id === issue.volume.id ? options.volume : undefined;
 
   return {
     provider: MetadataProviderKey.COMICVINE,
     providerId: String(issue.id),
     title: buildTitle(issue),
-    subtitle: issue.name ?? undefined,
+    displayTitle: buildDisplayTitle(issue),
     authors: writers,
     description: issue.description ?? issue.deck ?? undefined,
+    publisher: publisherName(volume),
     publishedDate,
     publishedYear: publishedDate ? publishedYearFromDateKey(publishedDate) : parseYear(rawPublishedDate),
     seriesName: issue.volume.name,
     seriesIndex: parseSeriesIndex(issue.issue_number),
+    seriesTotalBooks: normalizeSeriesTotalBooks(volume?.count_of_issues),
     coverUrl: issue.image?.original_url,
     sourceUrl: issue.site_detail_url ?? undefined,
     comicMetadata: buildComicMetadata(issue),

@@ -1,9 +1,10 @@
 export type SidebarVersionUi = {
   currentLabel: string
   currentHref: string | null
-  showLatest: boolean
-  latestLabel: string
-  latestHref: string
+  /** Shows the external release arrow beside the current version. */
+  showUpdate: boolean
+  updateVersionLabel: string
+  updateHref: string
 }
 
 const GITHUB_RELEASES_BASE = 'https://github.com/bookorbit/bookorbit/releases'
@@ -32,13 +33,13 @@ export function buildSidebarVersionUi(version: string, updateAvailable: boolean 
   const currentIsTag = isVersionTag(currentRaw)
   const currentSha = extractSha(currentRaw)
   const currentLabelBase = normalizeVersionLabel(currentRaw)
-  const showLatest = Boolean(updateAvailable && latestRaw && currentLabelBase && currentIsTag)
+  const showUpdate = Boolean(updateAvailable && latestRaw && currentLabelBase && currentIsTag)
 
   return {
-    currentLabel: showLatest ? `Current ${currentLabelBase}` : currentLabelBase,
+    currentLabel: currentLabelBase,
     currentHref: currentIsTag ? `${GITHUB_RELEASES_BASE}/tag/${currentRaw}` : currentSha ? `${GITHUB_COMMIT_BASE}/${currentSha}` : null,
-    showLatest,
-    latestLabel: normalizeVersionLabel(latestRaw),
-    latestHref: isVersionTag(latestRaw) ? `${GITHUB_RELEASES_BASE}/tag/${latestRaw}` : `${GITHUB_RELEASES_BASE}/latest`,
+    showUpdate,
+    updateVersionLabel: normalizeVersionLabel(latestRaw),
+    updateHref: isVersionTag(latestRaw) ? `${GITHUB_RELEASES_BASE}/tag/${latestRaw}` : `${GITHUB_RELEASES_BASE}/latest`,
   }
 }

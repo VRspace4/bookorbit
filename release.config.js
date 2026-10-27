@@ -7,6 +7,7 @@ const DOCKER_IMAGE = "ghcr.io/bookorbit/bookorbit";
 const TYPES = [
   { type: "feat", section: "Features" },
   { type: "fix", section: "Bug Fixes" },
+  { type: "i18n", section: "Internationalization" },
   { type: "security", section: "Security" },
   { type: "perf", section: "Performance" },
   { type: "db", section: "Database" },
@@ -197,8 +198,14 @@ module.exports = {
       {
         preset: "conventionalcommits",
         releaseRules: [
+          // Must stay first: custom rules short-circuit the analyzer, and the
+          // default `{ breaking: true }` rule is only consulted when no custom
+          // rule matched. Without this, a `feat` carrying a BREAKING CHANGE
+          // footer releases as a minor.
+          { breaking: true, release: "major" },
           { type: "feat", release: "minor" },
           { type: "fix", release: "patch" },
+          { type: "i18n", release: "patch" },
           { type: "perf", release: "patch" },
           { type: "security", release: "patch" },
           { type: "db", release: "patch" },

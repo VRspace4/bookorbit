@@ -1,6 +1,4 @@
-import { isAudioFormat, type BookCard } from '@bookorbit/types'
-
-const COMIC_FORMATS = new Set(['cbz', 'cbr', 'cb7'])
+import { getBookMediaProfile, type BookCard } from '@bookorbit/types'
 
 export const SERIES_BOOK_MEDIA_GROUP_DEFS = [
   { key: 'books', label: 'Books' },
@@ -16,21 +14,24 @@ export type SeriesBookMediaGroup = {
   books: BookCard[]
 }
 
-export function getSeriesBookMediaGroupKey(book: BookCard): SeriesBookMediaGroupKey {
-  const file = book.files.find((candidate) => candidate.role === 'primary') ?? book.files.find((candidate) => candidate.format) ?? null
-  const format = file?.format?.trim().toLowerCase()
+export function getSeriesBookMediaGroupKeys(book: BookCard): SeriesBookMediaGroupKey[] {
+  const profile = getBookMediaProfile(book.files)
+  const keys: SeriesBookMediaGroupKey[] = []
 
-  if (!format) return 'books'
-  if (isAudioFormat(format)) return 'audiobooks'
-  if (COMIC_FORMATS.has(format)) return 'comics'
-  return 'books'
+  if (profile.hasEbook) keys.push('books')
+  if (profile.hasAudio) keys.push('audiobooks')
+  if (profile.hasComic) keys.push('comics')
+
+  return keys.length > 0 ? keys : ['books']
 }
 
 export function groupSeriesBooksByMedia(books: BookCard[]): SeriesBookMediaGroup[] {
   const grouped = new Map<SeriesBookMediaGroupKey, BookCard[]>(SERIES_BOOK_MEDIA_GROUP_DEFS.map((group) => [group.key, []]))
 
   for (const book of books) {
-    grouped.get(getSeriesBookMediaGroupKey(book))?.push(book)
+    for (const key of getSeriesBookMediaGroupKeys(book)) {
+      grouped.get(key)?.push(book)
+    }
   }
 
   return SERIES_BOOK_MEDIA_GROUP_DEFS.map((group) => ({

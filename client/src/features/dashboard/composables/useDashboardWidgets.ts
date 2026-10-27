@@ -5,21 +5,6 @@ import { WIDGET_TYPES } from '@bookorbit/types'
 import { api } from '@/lib/api'
 import { useAuth } from '@/features/auth/composables/useAuth'
 
-const WIDGET_LABELS: Record<WidgetType, string> = {
-  'reading-goal': 'Reading Goal',
-  'currently-reading': 'Currently Reading',
-  'reading-streak': 'Reading Streak',
-  'library-overview': 'Library Overview',
-  'highlight-of-the-day': 'Highlight of the Day',
-  'monthly-challenge': 'Monthly Challenge',
-  'year-projection': 'Year Projection',
-  'neglected-gems': 'Neglected Gems',
-  'reading-dna': 'Reading DNA',
-  'long-wait': 'The Long Wait',
-  'diversity-score': 'Diversity Score',
-  'reading-rhythm': 'Reading Rhythm',
-}
-
 const DEFAULT_WIDGETS: WidgetConfig[] = [
   { id: '1', type: 'reading-streak', enabled: true, order: 1 },
   { id: '2', type: 'currently-reading', enabled: true, order: 2 },
@@ -82,6 +67,18 @@ function normalizeWidgets(raw: unknown): WidgetConfig[] {
   return [...normalized, ...missing]
 }
 
+function normalizeLibraryIds(raw: unknown): number[] | null {
+  if (!Array.isArray(raw)) return null
+  const libraryIds = [...new Set(raw.filter((id): id is number => Number.isSafeInteger(id) && id > 0))]
+  return libraryIds.length > 0 ? libraryIds : null
+}
+
+function withLibraryIds(config: DashboardConfig, libraryIds: readonly number[] | null): DashboardConfig {
+  const { libraryIds: _ignored, ...rest } = config
+  const normalized = normalizeLibraryIds(libraryIds)
+  return normalized ? { ...rest, libraryIds: normalized } : rest
+}
+
 export function useDashboardWidgets() {
   const { user, me } = useAuth()
 
@@ -97,20 +94,33 @@ export function useDashboardWidgets() {
 
   const readingGoal = computed(() => dashboardConfig.value.readingGoal ?? null)
 
-  async function saveWidgets(newWidgets: WidgetConfig[]): Promise<void> {
-    const normalized = normalizeWidgets(newWidgets)
-    const updatedConfig: DashboardConfig = {
-      ...dashboardConfig.value,
-      widgets: normalized,
-    }
+  const libraryIds = computed<number[] | null>(() => normalizeLibraryIds(dashboardConfig.value.libraryIds))
 
+  async function saveConfig(updatedConfig: DashboardConfig, failureMessage: string): Promise<void> {
     const res = await api('/api/v1/users/me/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings: { dashboardConfig: updatedConfig } }),
     })
-    if (!res.ok) throw new Error(`Failed to save widgets: ${res.status}`)
+    if (!res.ok) throw new Error(`${failureMessage}: ${res.status}`)
     await me()
+  }
+
+  async function saveWidgets(newWidgets: WidgetConfig[], nextLibraryIds: readonly number[] | null = libraryIds.value): Promise<void> {
+    const normalized = normalizeWidgets(newWidgets)
+    const updatedConfig = withLibraryIds(
+      {
+        ...dashboardConfig.value,
+        widgets: normalized,
+      },
+      nextLibraryIds,
+    )
+
+    await saveConfig(updatedConfig, 'Failed to save widgets')
+  }
+
+  async function saveLibraryScope(nextLibraryIds: readonly number[] | null): Promise<void> {
+    await saveConfig(withLibraryIds(dashboardConfig.value, nextLibraryIds), 'Failed to save dashboard libraries')
   }
 
   async function saveReadingGoal(goalBooks: number): Promise<void> {
@@ -119,22 +129,17 @@ export function useDashboardWidgets() {
       readingGoal: goalBooks,
     }
 
-    const res = await api('/api/v1/users/me/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { dashboardConfig: updatedConfig } }),
-    })
-    if (!res.ok) throw new Error(`Failed to save reading goal: ${res.status}`)
-    await me()
+    await saveConfig(updatedConfig, 'Failed to save reading goal')
   }
 
   return {
     widgets,
     enabledWidgets,
     readingGoal,
+    libraryIds,
     saveWidgets,
+    saveLibraryScope,
     saveReadingGoal,
-    WIDGET_LABELS,
     DEFAULT_WIDGETS,
   }
 }

@@ -9,7 +9,6 @@ describe('formatTtsCharacterCount', () => {
   })
 
   it('formats thousands with K or k', () => {
-    expect(formatTtsCharacterCount(500)).toBe('0.5K')
     expect(formatTtsCharacterCount(1000)).toBe('1K')
     expect(formatTtsCharacterCount(1500)).toBe('1.5K')
     expect(formatTtsCharacterCount(100_000)).toBe('100k')

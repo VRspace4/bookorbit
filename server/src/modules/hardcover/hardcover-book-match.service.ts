@@ -1,6 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import type { HardcoverEdition as HardcoverEditionSummary, HardcoverEditionsResult } from '@bookorbit/types';
 
+import { parsePublishedDateKey } from '../../common/utils/published-date.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { buildHardcoverMatchBasis, parseHardcoverBookId, parseHardcoverEditionId } from './hardcover-id.utils';
 import type { BookSyncData } from './hardcover.repository';
 import { HardcoverClientService } from './hardcover-client.service';
 import { HardcoverRepository } from './hardcover.repository';
@@ -9,7 +12,17 @@ export interface HardcoverBookMatch {
   hardcoverBookId: number;
   hardcoverEditionId: number | null;
   editionPages: number | null;
+  editionAudioSeconds: number | null;
   matchMethod: 'isbn' | 'title' | 'cached' | 'metadata_id';
+  // Set when this match moved the link off another Hardcover book, whose read ids no longer apply.
+  replacedHardcoverBookId?: number;
+}
+
+// `failed` tells a lookup that could not run apart from one Hardcover answered with no book: only
+// the second may settle a re-check, the first has to be retried.
+interface HardcoverLookup {
+  match: HardcoverBookMatch | null;
+  failed: boolean;
 }
 
 const FIND_BOOK_BY_ISBN13_QUERY = `
@@ -19,6 +32,7 @@ query FindBookByISBN13($isbn: String!) {
     editions(where: { isbn_13: { _eq: $isbn } }, limit: 1) {
       id
       pages
+      audio_seconds
     }
   }
 }`;
@@ -30,6 +44,7 @@ query FindBookByISBN10($isbn: String!) {
     editions(where: { isbn_10: { _eq: $isbn } }, limit: 1) {
       id
       pages
+      audio_seconds
     }
   }
 }`;
@@ -41,9 +56,8 @@ query SearchBooks($query: String!) {
     query_type: "Book"
     per_page: 5
     page: 1
-    fields: "title,author_names,alternative_titles"
-    weights: "5,2,1"
   ) {
+    error
     ids
   }
 }`;
@@ -92,6 +106,18 @@ query FindBookEditionsById($id: Int!) {
   }
 }`;
 
+// Resolves the cached edition by id, scoped to the book, instead of checking membership in the
+// capped list above: popular works have hundreds of editions, and a pick past the cap is still
+// the user's edition. Without this, the next sync would silently replace it via pickBestEdition.
+const FIND_BOOK_EDITION_METRICS_BY_ID_QUERY = `
+query FindBookEditionMetricsById($id: Int!, $editionId: Int!) {
+  books(where: { id: { _eq: $id } }, limit: 1) {
+    id
+    editions(where: { id: { _eq: $editionId } }, limit: 1) {${EDITION_FIELDS}
+    }
+  }
+}`;
+
 const AUDIO_FORMATS = new Set(['m4b', 'm4a', 'mp3', 'aax', 'aacx', 'aac', 'flac', 'ogg', 'opus', 'wma', 'mka']);
 
 interface HardcoverEdition {
@@ -109,9 +135,94 @@ interface BooksQueryResult {
   }>;
 }
 
+// Hardcover reading_format_id: 1 = physical, 2 = audiobook, 4 = ebook.
+const AUDIOBOOK_READING_FORMAT_ID = 2;
+const EBOOK_READING_FORMAT_ID = 4;
+
+export const EDITION_DISPLAY_LIMIT = 50;
+
+const EDITION_DISPLAY_FIELDS = `
+      id
+      title
+      pages
+      isbn_10
+      isbn_13
+      publisher { name }
+      language { code2 }
+      release_date
+      reading_format_id
+      audio_seconds
+      image { url }`;
+
+// Ordered so the capped window is deterministic: without order_by, two calls can return a
+// different slice of the same catalogue and a legitimate pick would fail validation.
+// One over the cap, so the caller can tell a full page apart from a truncated one.
+const FIND_BOOK_EDITIONS_FOR_DISPLAY_QUERY = `
+query FindBookEditionsForDisplay($id: Int!) {
+  books(where: { id: { _eq: $id } }, limit: 1) {
+    id
+    editions(limit: ${EDITION_DISPLAY_LIMIT + 1}, order_by: { id: asc }) {${EDITION_DISPLAY_FIELDS}
+    }
+  }
+}`;
+
+// Validates a single edition by asking for it scoped to the book, instead of re-listing the
+// capped window and checking membership - an edition past the cap is still a valid pick.
+const FIND_BOOK_EDITION_BY_ID_QUERY = `
+query FindBookEditionById($id: Int!, $editionId: Int!) {
+  books(where: { id: { _eq: $id } }, limit: 1) {
+    id
+    editions(where: { id: { _eq: $editionId } }, limit: 1) {${EDITION_DISPLAY_FIELDS}
+    }
+  }
+}`;
+
+interface HardcoverEditionDisplayRow {
+  id: number;
+  title?: string | null;
+  pages?: number | null;
+  isbn_10?: string | null;
+  isbn_13?: string | null;
+  publisher?: { name?: string | null } | null;
+  language?: { code2?: string | null } | null;
+  release_date?: string | null;
+  reading_format_id?: number | null;
+  audio_seconds?: number | null;
+  image?: { url?: string | null } | null;
+}
+
+interface BooksDisplayQueryResult {
+  books: Array<{
+    id: number;
+    editions?: HardcoverEditionDisplayRow[];
+  }>;
+}
+
+function editionFormatLabel(edition: HardcoverEditionDisplayRow): string {
+  if (edition.reading_format_id === AUDIOBOOK_READING_FORMAT_ID || (edition.audio_seconds ?? 0) > 0) return 'Audiobook';
+  if (edition.reading_format_id === EBOOK_READING_FORMAT_ID) return 'E-Book';
+  return 'Physical Book';
+}
+
+function mapEditionForDisplay(edition: HardcoverEditionDisplayRow): HardcoverEditionSummary {
+  return {
+    id: edition.id,
+    title: edition.title ?? null,
+    format: editionFormatLabel(edition),
+    pages: typeof edition.pages === 'number' && edition.pages > 0 ? edition.pages : null,
+    isbn10: edition.isbn_10 ?? null,
+    isbn13: edition.isbn_13 ?? null,
+    publisher: edition.publisher?.name ?? null,
+    language: edition.language?.code2 ?? null,
+    publishedDate: parsePublishedDateKey(edition.release_date) ?? null,
+    coverUrl: edition.image?.url ?? null,
+  };
+}
+
 interface SearchBooksResult {
   search?: {
-    ids?: number[];
+    error?: string | null;
+    ids?: number[] | null;
   } | null;
 }
 
@@ -127,6 +238,12 @@ export class HardcoverBookMatchService {
   async matchBook(userId: number, token: string, book: BookSyncData): Promise<HardcoverBookMatch | null> {
     const cached = await this.repo.findBookState(userId, book.bookId);
     if (cached?.hardcoverBookId && !cached.matchError) {
+      const matchBasis = buildHardcoverMatchBasis(book);
+      if (cached.matchBasis !== matchBasis) {
+        const relinked = await this.relinkIfIdentifiersMoved(userId, token, book, cached.hardcoverBookId, cached.matchBasis ?? null, matchBasis);
+        if (relinked) return relinked;
+      }
+
       const cachedMatch = await this.resolveCachedMatch(userId, token, book, cached.hardcoverBookId, cached.hardcoverEditionId ?? null);
 
       if ((cached.hardcoverEditionId ?? null) !== cachedMatch.hardcoverEditionId) {
@@ -144,6 +261,7 @@ export class HardcoverBookMatchService {
         hardcoverBookId: cached.hardcoverBookId,
         hardcoverEditionId: cachedMatch.hardcoverEditionId,
         editionPages: cachedMatch.editionPages,
+        editionAudioSeconds: cachedMatch.editionAudioSeconds,
         matchMethod: 'cached',
       };
     }
@@ -151,20 +269,15 @@ export class HardcoverBookMatchService {
     let match: HardcoverBookMatch | null = null;
 
     if (book.hardcoverMetadataId) {
-      const id = parseInt(book.hardcoverMetadataId, 10);
-      if (!isNaN(id)) {
-        match = await this.matchByHardcoverId(userId, token, id, book);
-      } else {
-        match = await this.matchByHardcoverSlug(userId, token, book.hardcoverMetadataId, book);
-      }
+      match = (await this.matchByMetadataId(userId, token, book, book.hardcoverMetadataId)).match;
     }
 
     if (!match && book.isbn13) {
-      match = await this.matchByIsbn(userId, token, book.isbn13, book.bookId, 13);
+      match = (await this.matchByIsbn(userId, token, book, book.isbn13, 13)).match;
     }
 
     if (!match && book.isbn10) {
-      match = await this.matchByIsbn(userId, token, book.isbn10, book.bookId, 10);
+      match = (await this.matchByIsbn(userId, token, book, book.isbn10, 10)).match;
     }
 
     if (!match && book.title && book.authorName) {
@@ -178,6 +291,7 @@ export class HardcoverBookMatchService {
         hardcoverBookId: match.hardcoverBookId,
         hardcoverEditionId: match.hardcoverEditionId ?? null,
         matchMethod: match.matchMethod,
+        matchBasis: buildHardcoverMatchBasis(book),
         matchError: null,
       });
     } else {
@@ -185,6 +299,7 @@ export class HardcoverBookMatchService {
         userId,
         bookId: book.bookId,
         hardcoverBookId: null,
+        matchBasis: null,
         matchError: 'no_match',
       });
     }
@@ -192,65 +307,109 @@ export class HardcoverBookMatchService {
     return match;
   }
 
-  private async matchByHardcoverId(userId: number, token: string, id: number, book: BookSyncData): Promise<HardcoverBookMatch | null> {
+  /**
+   * Re-checks a cached link whose identifiers changed since it was made. Only an explicit identifier
+   * can move it, and only to a book Hardcover positively resolves: a title search, or an identifier
+   * Hardcover does not know, must never replace a link that works.
+   */
+  private async relinkIfIdentifiersMoved(
+    userId: number,
+    token: string,
+    book: BookSyncData,
+    cachedBookId: number,
+    previousBasis: string | null,
+    matchBasis: string,
+  ): Promise<HardcoverBookMatch | null> {
+    // A link made before its basis was recorded may have been confirmed through import against an
+    // ISBN that disagrees with it, so only the explicit Hardcover ID is trusted to move it.
+    const lookup = await this.findIdentifiedBook(userId, token, book, previousBasis !== null);
+    if (lookup.failed) return null;
+
+    const match = lookup.match;
+    if (!match || match.hardcoverBookId === cachedBookId) {
+      await this.repo.upsertBookState({ userId, bookId: book.bookId, matchBasis });
+      return null;
+    }
+
+    const releasedAttempts = await this.repo.relinkBook({
+      userId,
+      bookId: book.bookId,
+      hardcoverBookId: match.hardcoverBookId,
+      hardcoverEditionId: match.hardcoverEditionId,
+      matchMethod: match.matchMethod,
+      matchBasis,
+    });
+    this.logger.log(
+      `[hardcover.book_relink] [end] userId=${userId} bookId=${book.bookId} previousHardcoverBookId=${cachedBookId} hardcoverBookId=${match.hardcoverBookId} hardcoverEditionId=${match.hardcoverEditionId ?? null} matchMethod=${match.matchMethod} releasedAttempts=${releasedAttempts} - link moved to the book the metadata identifies`,
+    );
+    return { ...match, replacedHardcoverBookId: cachedBookId };
+  }
+
+  private async findIdentifiedBook(userId: number, token: string, book: BookSyncData, includeIsbn: boolean): Promise<HardcoverLookup> {
+    const lookups: Array<() => Promise<HardcoverLookup>> = [];
+    const { hardcoverMetadataId, isbn13, isbn10 } = book;
+    if (hardcoverMetadataId) lookups.push(() => this.matchByMetadataId(userId, token, book, hardcoverMetadataId));
+    if (includeIsbn && isbn13) lookups.push(() => this.matchByIsbn(userId, token, book, isbn13, 13));
+    if (includeIsbn && isbn10) lookups.push(() => this.matchByIsbn(userId, token, book, isbn10, 10));
+
+    for (const lookup of lookups) {
+      const result = await lookup();
+      // A stronger identifier that could not be checked must not let a weaker one decide instead.
+      if (result.match || result.failed) return result;
+    }
+    return { match: null, failed: false };
+  }
+
+  private matchByMetadataId(userId: number, token: string, book: BookSyncData, metadataId: string): Promise<HardcoverLookup> {
+    const id = parseHardcoverBookId(metadataId);
+    return id !== null ? this.matchByHardcoverId(userId, token, id, book) : this.matchByHardcoverSlug(userId, token, metadataId, book);
+  }
+
+  private async matchByHardcoverId(userId: number, token: string, id: number, book: BookSyncData): Promise<HardcoverLookup> {
     try {
       const data = await this.client.query<BooksQueryResult>(userId, token, FIND_BOOK_BY_HARDCOVER_ID_QUERY, { id });
       const hardcoverBook = data.books?.[0];
-      if (!hardcoverBook) return null;
-      const edition = this.pickBestEdition(hardcoverBook.editions ?? [], book);
-      return {
-        hardcoverBookId: hardcoverBook.id,
-        hardcoverEditionId: edition?.id ?? null,
-        editionPages: this.normalizeEditionPages(edition?.pages),
-        matchMethod: 'metadata_id',
-      };
+      if (!hardcoverBook) return { match: null, failed: false };
+      const fallback = this.pickBestEdition(hardcoverBook.editions ?? [], book);
+      return { match: await this.buildMatch(userId, token, hardcoverBook, book, 'metadata_id', fallback), failed: false };
     } catch (err) {
       const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=metadata_id error="${error}" - metadata_id lookup failed`,
       );
-      return null;
+      return { match: null, failed: true };
     }
   }
 
-  private async matchByHardcoverSlug(userId: number, token: string, slug: string, book: BookSyncData): Promise<HardcoverBookMatch | null> {
+  private async matchByHardcoverSlug(userId: number, token: string, slug: string, book: BookSyncData): Promise<HardcoverLookup> {
     try {
       const data = await this.client.query<BooksQueryResult>(userId, token, FIND_BOOK_BY_HARDCOVER_SLUG_QUERY, { slug });
       const hardcoverBook = data.books?.[0];
-      if (!hardcoverBook) return null;
-      const edition = this.pickBestEdition(hardcoverBook.editions ?? [], book);
-      return {
-        hardcoverBookId: hardcoverBook.id,
-        hardcoverEditionId: edition?.id ?? null,
-        editionPages: this.normalizeEditionPages(edition?.pages),
-        matchMethod: 'metadata_id',
-      };
+      if (!hardcoverBook) return { match: null, failed: false };
+      const fallback = this.pickBestEdition(hardcoverBook.editions ?? [], book);
+      return { match: await this.buildMatch(userId, token, hardcoverBook, book, 'metadata_id', fallback), failed: false };
     } catch (err) {
       const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
         `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=metadata_slug error="${error}" - metadata_slug lookup failed`,
       );
-      return null;
+      return { match: null, failed: true };
     }
   }
 
-  private async matchByIsbn(userId: number, token: string, isbn: string, bookId: number, version: 10 | 13): Promise<HardcoverBookMatch | null> {
+  private async matchByIsbn(userId: number, token: string, book: BookSyncData, isbn: string, version: 10 | 13): Promise<HardcoverLookup> {
     const query = version === 13 ? FIND_BOOK_BY_ISBN13_QUERY : FIND_BOOK_BY_ISBN10_QUERY;
     try {
       const data = await this.client.query<BooksQueryResult>(userId, token, query, { isbn });
       const hardcoverBook = data.books?.[0];
-      if (!hardcoverBook) return null;
-      const edition = hardcoverBook.editions?.[0];
-      return {
-        hardcoverBookId: hardcoverBook.id,
-        hardcoverEditionId: edition?.id ?? null,
-        editionPages: this.normalizeEditionPages(edition?.pages),
-        matchMethod: 'isbn',
-      };
+      if (!hardcoverBook) return { match: null, failed: false };
+      return { match: await this.buildMatch(userId, token, hardcoverBook, book, 'isbn', hardcoverBook.editions?.[0]), failed: false };
     } catch (err) {
       const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
-      this.logger.warn(`[hardcover.book_match] [fail] userId=${userId} bookId=${bookId} method=isbn${version} error="${error}" - ISBN lookup failed`);
-      return null;
+      this.logger.warn(
+        `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=isbn${version} error="${error}" - ISBN lookup failed`,
+      );
+      return { match: null, failed: true };
     }
   }
 
@@ -261,10 +420,18 @@ export class HardcoverBookMatchService {
     author: string,
     book: BookSyncData,
   ): Promise<HardcoverBookMatch | null> {
+    const startedAt = Date.now();
     try {
       const searchData = await this.client.query<SearchBooksResult>(userId, token, SEARCH_BOOKS_QUERY, {
         query: `${title} ${author}`,
       });
+      if (searchData.search?.error) {
+        const error = sanitizeLogValue(searchData.search.error);
+        this.logger.warn(
+          `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=title_author durationMs=${Date.now() - startedAt} errorClass=SearchError error="${error}" - title lookup failed`,
+        );
+        return null;
+      }
       const ids = searchData.search?.ids?.filter((id) => Number.isInteger(id)).slice(0, 5) ?? [];
       if (ids.length === 0) return null;
 
@@ -272,19 +439,114 @@ export class HardcoverBookMatchService {
       const booksById = new Map((data.books ?? []).map((candidate) => [candidate.id, candidate]));
       const hardcoverBook = ids.map((id) => booksById.get(id)).find((candidate): candidate is BooksQueryResult['books'][number] => candidate != null);
       if (!hardcoverBook) return null;
-      const edition = this.pickBestEdition(hardcoverBook.editions ?? [], book);
-      return {
-        hardcoverBookId: hardcoverBook.id,
-        hardcoverEditionId: edition?.id ?? null,
-        editionPages: this.normalizeEditionPages(edition?.pages),
-        matchMethod: 'title',
-      };
+      const fallback = this.pickBestEdition(hardcoverBook.editions ?? [], book);
+      return await this.buildMatch(userId, token, hardcoverBook, book, 'title', fallback);
+    } catch (err) {
+      const errorClass = err instanceof Error ? err.constructor.name : 'Error';
+      const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      this.logger.warn(
+        `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=title_author durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${error}" - title lookup failed`,
+      );
+      return null;
+    }
+  }
+
+  private async buildMatch(
+    userId: number,
+    token: string,
+    hardcoverBook: BooksQueryResult['books'][number],
+    book: BookSyncData,
+    matchMethod: HardcoverBookMatch['matchMethod'],
+    fallback: HardcoverEdition | undefined,
+  ): Promise<HardcoverBookMatch> {
+    const edition = await this.chooseEdition(userId, token, hardcoverBook.id, hardcoverBook.editions ?? [], book, fallback);
+    return {
+      hardcoverBookId: hardcoverBook.id,
+      hardcoverEditionId: edition?.id ?? null,
+      editionPages: this.normalizeEditionPages(edition?.pages),
+      editionAudioSeconds: this.normalizeEditionAudioSeconds(edition?.audio_seconds),
+      matchMethod,
+    };
+  }
+
+  /**
+   * The edition named in the book's metadata wins whenever it belongs to the matched book, looked up
+   * directly when the capped list does not carry it. An edition of another book is ignored.
+   */
+  private async chooseEdition(
+    userId: number,
+    token: string,
+    hardcoverBookId: number,
+    editions: HardcoverEdition[],
+    book: BookSyncData,
+    fallback: HardcoverEdition | undefined,
+  ): Promise<HardcoverEdition | undefined> {
+    const preferredId = parseHardcoverEditionId(book.hardcoverEditionId);
+    if (preferredId === null || preferredId === fallback?.id) return fallback;
+
+    const listed = editions.find((edition) => edition.id === preferredId);
+    if (listed) return listed;
+
+    try {
+      const data = await this.client.query<BooksQueryResult>(userId, token, FIND_BOOK_EDITION_METRICS_BY_ID_QUERY, {
+        id: hardcoverBookId,
+        editionId: preferredId,
+      });
+      return data.books?.[0]?.editions?.find((edition) => edition.id === preferredId) ?? fallback;
     } catch (err) {
       const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
-        `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=title_author error="${error}" - title lookup failed`,
+        `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=metadata_edition error="${error}" - metadata edition lookup failed`,
       );
-      return null;
+      return fallback;
+    }
+  }
+
+  // A failed upstream lookup must not be reported as "no editions" - the caller (and the user)
+  // needs to be able to tell an empty catalog apart from a provider outage and retry.
+  async listEditions(userId: number, token: string, hardcoverBookId: number): Promise<HardcoverEditionsResult> {
+    const data = await this.queryEditions(userId, token, hardcoverBookId, 'list_editions', FIND_BOOK_EDITIONS_FOR_DISPLAY_QUERY, {
+      id: hardcoverBookId,
+    });
+
+    const rows = data.books?.[0]?.editions ?? [];
+    return {
+      editions: rows.slice(0, EDITION_DISPLAY_LIMIT).map(mapEditionForDisplay),
+      truncated: rows.length > EDITION_DISPLAY_LIMIT,
+    };
+  }
+
+  // Resolves one edition scoped to the book it must belong to. Null means Hardcover knows of no
+  // such edition on that book, which is exactly the "not yours to pick" case the caller rejects.
+  async findEditionForBook(userId: number, token: string, hardcoverBookId: number, editionId: number): Promise<HardcoverEditionSummary | null> {
+    const data = await this.queryEditions(userId, token, hardcoverBookId, 'find_edition', FIND_BOOK_EDITION_BY_ID_QUERY, {
+      id: hardcoverBookId,
+      editionId,
+    });
+
+    const edition = data.books?.[0]?.editions?.[0];
+    return edition ? mapEditionForDisplay(edition) : null;
+  }
+
+  // A failed upstream lookup must not be reported as "no editions" - the caller (and the user)
+  // needs to be able to tell an empty catalog apart from a provider outage and retry.
+  private async queryEditions(
+    userId: number,
+    token: string,
+    hardcoverBookId: number,
+    event: string,
+    query: string,
+    variables: Record<string, unknown>,
+  ): Promise<BooksDisplayQueryResult> {
+    const startedAt = Date.now();
+    try {
+      return await this.client.query<BooksDisplayQueryResult>(userId, token, query, variables);
+    } catch (err) {
+      const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
+      this.logger.warn(
+        `[hardcover.${event}] [fail] userId=${userId} hardcoverBookId=${hardcoverBookId} durationMs=${Date.now() - startedAt} errorClass=${err?.constructor?.name ?? 'Error'} error="${error}" - edition lookup failed`,
+      );
+      throw new InternalServerErrorException('Failed to load Hardcover editions');
     }
   }
 
@@ -294,37 +556,54 @@ export class HardcoverBookMatchService {
     book: BookSyncData,
     hardcoverBookId: number,
     cachedEditionId: number | null,
-  ): Promise<{ hardcoverEditionId: number | null; editionPages: number | null }> {
+  ): Promise<{ hardcoverEditionId: number | null; editionPages: number | null; editionAudioSeconds: number | null }> {
     try {
+      // A missing progress metric is not a reason to silently re-point the user's edition.
+      if (cachedEditionId != null) {
+        const data = await this.client.query<BooksQueryResult>(userId, token, FIND_BOOK_EDITION_METRICS_BY_ID_QUERY, {
+          id: hardcoverBookId,
+          editionId: cachedEditionId,
+        });
+        const hardcoverBook = data.books?.[0];
+        if (!hardcoverBook) {
+          return { hardcoverEditionId: cachedEditionId, editionPages: null, editionAudioSeconds: null };
+        }
+
+        const cachedEdition = hardcoverBook.editions?.find((edition) => edition.id === cachedEditionId);
+        if (cachedEdition) {
+          return {
+            hardcoverEditionId: cachedEditionId,
+            editionPages: this.normalizeEditionPages(cachedEdition.pages),
+            editionAudioSeconds: this.normalizeEditionAudioSeconds(cachedEdition.audio_seconds),
+          };
+        }
+      }
+
+      // No usable cached edition on this book: fall back to the best edition among the capped list.
       const data = await this.client.query<BooksQueryResult>(userId, token, FIND_BOOK_EDITIONS_BY_HARDCOVER_ID_QUERY, {
         id: hardcoverBookId,
       });
       const hardcoverBook = data.books?.[0];
       if (!hardcoverBook) {
-        return { hardcoverEditionId: cachedEditionId, editionPages: null };
+        return { hardcoverEditionId: cachedEditionId, editionPages: null, editionAudioSeconds: null };
       }
 
       const editions = hardcoverBook.editions ?? [];
-
-      // A missing page count is not a reason to silently re-point the user's edition.
-      if (cachedEditionId != null) {
-        const cachedEdition = editions.find((edition) => edition.id === cachedEditionId);
-        if (cachedEdition) {
-          return { hardcoverEditionId: cachedEditionId, editionPages: this.normalizeEditionPages(cachedEdition.pages) };
-        }
-      }
-
-      const edition = this.pickBestEdition(editions, book);
+      const edition = await this.chooseEdition(userId, token, hardcoverBookId, editions, book, this.pickBestEdition(editions, book));
       if (!edition) {
-        return { hardcoverEditionId: cachedEditionId, editionPages: null };
+        return { hardcoverEditionId: cachedEditionId, editionPages: null, editionAudioSeconds: null };
       }
-      return { hardcoverEditionId: edition.id, editionPages: this.normalizeEditionPages(edition.pages) };
+      return {
+        hardcoverEditionId: edition.id,
+        editionPages: this.normalizeEditionPages(edition.pages),
+        editionAudioSeconds: this.normalizeEditionAudioSeconds(edition.audio_seconds),
+      };
     } catch (err) {
       const error = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(
-        `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=cached_pages error="${error}" - cached edition pages lookup failed`,
+        `[hardcover.book_match] [fail] userId=${userId} bookId=${book.bookId} method=cached_edition error="${error}" - cached edition metrics lookup failed`,
       );
-      return { hardcoverEditionId: cachedEditionId, editionPages: null };
+      return { hardcoverEditionId: cachedEditionId, editionPages: null, editionAudioSeconds: null };
     }
   }
 
@@ -390,5 +669,10 @@ export class HardcoverBookMatchService {
   private normalizeEditionPages(pages: number | null | undefined): number | null {
     if (typeof pages !== 'number' || !Number.isFinite(pages) || pages <= 0) return null;
     return Math.round(pages);
+  }
+
+  private normalizeEditionAudioSeconds(seconds: number | null | undefined): number | null {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return null;
+    return Math.round(seconds);
   }
 }

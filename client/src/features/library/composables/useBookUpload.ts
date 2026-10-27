@@ -1,9 +1,9 @@
 import { computed, ref } from 'vue'
-import { getAccessToken } from '@/lib/api'
-import type { UploadResult } from '@bookorbit/types'
+import { getValidToken } from '@/lib/api'
+import { UPLOAD_SUPPORTED_FORMATS, type UploadResult } from '@bookorbit/types'
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 
-export const SUPPORTED_FORMATS = ['epub', 'kepub', 'pdf', 'mobi', 'azw3', 'cbz', 'cbr', 'cb7', 'fb2', 'm4b', 'm4a', 'mp3', 'opus', 'ogg', 'flac']
+export const SUPPORTED_FORMATS: readonly string[] = UPLOAD_SUPPORTED_FORMATS
 export const SUPPORTED_FORMATS_ACCEPT = SUPPORTED_FORMATS.map((f) => `.${f}`).join(',')
 export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024 // 500 MB
 
@@ -34,7 +34,8 @@ function validateFile(file: File): string | null {
   return null
 }
 
-function uploadSingle(item: FileUploadItem, url: string): Promise<void> {
+async function uploadSingle(item: FileUploadItem, url: string): Promise<void> {
+  const token = await getValidToken()
   return new Promise((resolve) => {
     const formData = new FormData()
     formData.append('file', item.file)
@@ -42,7 +43,6 @@ function uploadSingle(item: FileUploadItem, url: string): Promise<void> {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', url)
 
-    const token = getAccessToken()
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
 
     xhr.upload.onprogress = (e) => {

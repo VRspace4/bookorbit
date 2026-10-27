@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import type { AudioReaderSettings } from '@bookorbit/types'
 import { useReaderDefaultSettings } from '@/features/reader/shared/composables/useReaderSettings'
 import SettingsPageHeader from './SettingsPageHeader.vue'
+import SettingsResetAction from './SettingsResetAction.vue'
 
 const { t } = useI18n()
 
@@ -25,34 +26,20 @@ onMounted(load)
   <div
     class="[&_.settings-hint]:overflow-hidden [&_.settings-hint]:text-ellipsis [&_.settings-hint]:whitespace-nowrap md:[&_.settings-hint]:overflow-visible md:[&_.settings-hint]:whitespace-normal"
   >
-    <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.audio.title')" :subtitle="t('settings.reader.audio.subtitle')">
-      <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="reset()">
-        {{ t('settings.reader.resetToDefaults') }}
-      </button>
-    </SettingsPageHeader>
-    <template v-else>
-      <div
-        class="md:hidden sticky top-11 z-10 -mx-4 mb-4 px-4 py-2 border-y border-border/70 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/75"
-      >
-        <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="reset()">
-          {{ t('settings.reader.resetToDefaults') }}
-        </button>
-      </div>
-      <div class="hidden md:flex justify-end mb-4">
-        <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="reset()">
-          {{ t('settings.reader.resetToDefaults') }}
-        </button>
-      </div>
-    </template>
+    <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.audio.title')" :subtitle="t('settings.reader.audio.subtitle')" />
 
     <!-- Playback -->
     <div class="mb-6">
-      <p class="settings-group-label">{{ t('settings.reader.audio.playback') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
+      <p class="settings-group-label">
+        {{ t('settings.reader.audio.playback') }}
+      </p>
+      <div class="settings-card">
         <!-- Playback speed -->
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div class="settings-row">
           <div>
-            <p class="settings-label">{{ t('settings.reader.audio.playbackSpeed') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.audio.playbackSpeed') }}
+            </p>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
               {{ t('settings.reader.audio.playbackSpeedHint') }}
             </p>
@@ -78,7 +65,9 @@ onMounted(load)
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">{{ t('settings.reader.audio.volume') }}</p>
+              <p class="settings-label">
+                {{ t('settings.reader.audio.volume') }}
+              </p>
               <span class="settings-value">{{ Math.round(effective.volume * 100) }}%</span>
             </div>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
@@ -92,7 +81,11 @@ onMounted(load)
             step="0.05"
             :value="effective.volume"
             class="w-full accent-primary"
-            @input="update({ volume: parseFloat(($event.target as HTMLInputElement).value) })"
+            @input="
+              update({
+                volume: parseFloat(($event.target as HTMLInputElement).value),
+              })
+            "
           />
         </div>
       </div>
@@ -100,12 +93,16 @@ onMounted(load)
 
     <!-- Skip controls -->
     <div class="mb-6">
-      <p class="settings-group-label">{{ t('settings.reader.audio.skipControls') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
+      <p class="settings-group-label">
+        {{ t('settings.reader.audio.skipControls') }}
+      </p>
+      <div class="settings-card">
         <!-- Skip back -->
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div class="settings-row">
           <div>
-            <p class="settings-label">{{ t('settings.reader.audio.skipBack') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.audio.skipBack') }}
+            </p>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
               {{ t('settings.reader.audio.skipBackHint') }}
             </p>
@@ -128,9 +125,11 @@ onMounted(load)
         </div>
 
         <!-- Skip forward -->
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div class="settings-row">
           <div>
-            <p class="settings-label">{{ t('settings.reader.audio.skipForward') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.audio.skipForward') }}
+            </p>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
               {{ t('settings.reader.audio.skipForwardHint') }}
             </p>
@@ -153,5 +152,7 @@ onMounted(load)
         </div>
       </div>
     </div>
+
+    <SettingsResetAction @reset="reset" />
   </div>
 </template>

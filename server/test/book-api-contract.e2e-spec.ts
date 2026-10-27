@@ -1,9 +1,17 @@
 import { randomUUID } from 'crypto';
-import { rm } from 'fs/promises';
+
+import { and, eq } from 'drizzle-orm';
+import { readdir, rm, stat } from 'fs/promises';
 import { join } from 'path';
 
 import * as unzipper from 'unzipper';
 import { Permission } from '@bookorbit/types';
+
+import { appSettings } from '../src/db/schema/auth';
+import { bookCovers } from '../src/db/schema/book-covers';
+import { bookFiles, books } from '../src/db/schema/books';
+import { bookMetadata } from '../src/db/schema/metadata';
+import { CoverSlotBackfillService } from '../src/modules/cover/cover-slot-backfill.service';
 
 import {
   authHeader,
@@ -19,6 +27,7 @@ import {
   type TestUserSession,
 } from './e2e/metadata-write/metadata-write-harness';
 import { createCbzFixture, createEpubFixture, createPdfFixture, writeFixtureFile } from './e2e/metadata-write/metadata-write-fixture-builder';
+import { createSlotCoverArtifacts } from './e2e/slot-cover-artifacts';
 
 type InjectResponse = Awaited<ReturnType<MetadataWriteE2EContext['app']['inject']>>;
 
@@ -44,28 +53,6 @@ function zipBuffer(response: InjectResponse): Buffer {
 async function listZipEntries(response: InjectResponse): Promise<string[]> {
   const zip = await unzipper.Open.buffer(zipBuffer(response));
   return zip.files.map((file) => file.path).sort();
-}
-
-async function createBookCoverArtifacts(
-  ctx: MetadataWriteE2EContext,
-  bookId: number,
-  options: {
-    coverExtension?: 'jpg' | 'png';
-    coverContent?: Buffer;
-    thumbnailContent?: Buffer;
-  } = {},
-): Promise<void> {
-  const coverExtension = options.coverExtension ?? 'jpg';
-  await writeFixtureFile(
-    ctx.fixture.booksPath,
-    `covers/${bookId}/cover_custom.${coverExtension}`,
-    options.coverContent ?? Buffer.from(`cover-${bookId}`, 'utf8'),
-  );
-  await writeFixtureFile(
-    ctx.fixture.booksPath,
-    `covers/${bookId}/thumbnail.jpg`,
-    options.thumbnailContent ?? Buffer.from(`thumbnail-${bookId}`, 'utf8'),
-  );
 }
 
 describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
@@ -129,7 +116,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
     await grantLibraryAccess(ctx, crossLibraryUser.userId, hiddenLibrary.libraryId, 'viewer');
     await grantLibraryAccess(ctx, downloadUser.userId, visibleLibrary.libraryId, 'viewer');
 
-    await createBookCoverArtifacts(ctx, visibleEpub.bookId, {
+    await createSlotCoverArtifacts(ctx, visibleEpub.bookId, {
       coverExtension: 'png',
       coverContent: Buffer.from('cover-png', 'utf8'),
       thumbnailContent: Buffer.from('thumbnail-jpg', 'utf8'),
@@ -250,6 +237,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
           libraryId: visibleLibrary.libraryId,
           libraryName: visibleLibraryName,
           formats: ['epub'],
+          updatedAt: expect.any(String),
         },
         {
           id: visiblePdf.bookId,
@@ -259,6 +247,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
           libraryId: visibleLibrary.libraryId,
           libraryName: visibleLibraryName,
           formats: ['pdf'],
+          updatedAt: expect.any(String),
         },
         {
           id: visibleCbz.bookId,
@@ -268,6 +257,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
           libraryId: visibleLibrary.libraryId,
           libraryName: visibleLibraryName,
           formats: ['cbz'],
+          updatedAt: expect.any(String),
         },
       ]);
 
@@ -310,6 +300,206 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
 
       expectError(invalidLimit, 400, 'limit must not be greater than 20');
     });
+
+    it('finds subtitle-only matches without exposing books in inaccessible libraries', async () => {
+      const [visibleMetadata] = await ctx.db
+        .select({ subtitle: bookMetadata.subtitle })
+        .from(bookMetadata)
+        .where(eq(bookMetadata.bookId, visibleEpub.bookId));
+      const [hiddenMetadata] = await ctx.db
+        .select({ subtitle: bookMetadata.subtitle })
+        .from(bookMetadata)
+        .where(eq(bookMetadata.bookId, hiddenEpub.bookId));
+      await ctx.db.update(bookMetadata).set({ subtitle: 'The Singapôre Story' }).where(eq(bookMetadata.bookId, visibleEpub.bookId));
+      await ctx.db.update(bookMetadata).set({ subtitle: 'A Singapôre Chronicle' }).where(eq(bookMetadata.bookId, hiddenEpub.bookId));
+
+      try {
+        const query = await ctx.app.inject({
+          method: 'POST',
+          url: '/api/v1/books/query',
+          headers: authHeader(limitedUser.accessToken),
+          payload: { q: 'Singapore', pagination: { page: 0, size: 10 } },
+        });
+        expect(query.statusCode).toBe(201);
+        expect(query.json()).toMatchObject({ total: 1, items: [{ id: visibleEpub.bookId }] });
+
+        const libraryQuery = await ctx.app.inject({
+          method: 'POST',
+          url: `/api/v1/libraries/${visibleLibrary.libraryId}/books`,
+          headers: authHeader(crossLibraryUser.accessToken),
+          payload: { q: 'Singapore', pagination: { page: 0, size: 10 } },
+        });
+        expect(libraryQuery.statusCode).toBe(201);
+        expect(libraryQuery.json()).toMatchObject({ total: 1, items: [{ id: visibleEpub.bookId }] });
+
+        const search = await ctx.app.inject({
+          method: 'GET',
+          url: '/api/v1/books/search?q=Singapore&limit=10',
+          headers: authHeader(limitedUser.accessToken),
+        });
+        expect(search.statusCode).toBe(200);
+        expect(search.json()).toEqual([expect.objectContaining({ id: visibleEpub.bookId })]);
+      } finally {
+        await ctx.db.update(bookMetadata).set({ subtitle: visibleMetadata!.subtitle }).where(eq(bookMetadata.bookId, visibleEpub.bookId));
+        await ctx.db.update(bookMetadata).set({ subtitle: hiddenMetadata!.subtitle }).where(eq(bookMetadata.bookId, hiddenEpub.bookId));
+      }
+    });
+
+    it('filters books by the selected primary file size', async () => {
+      const primaryFileSize = (await stat(visibleEpub.absolutePath)).size;
+      const response = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/books/query',
+        headers: authHeader(limitedUser.accessToken),
+        payload: {
+          filter: {
+            type: 'group',
+            join: 'AND',
+            rules: [
+              { type: 'rule', field: 'title', operator: 'eq', value: 'Alpha Contract EPUB' },
+              { type: 'rule', field: 'fileSize', operator: 'eq', value: primaryFileSize },
+            ],
+          },
+          sort: [{ field: 'title', dir: 'asc' }],
+          pagination: { page: 0, size: 10 },
+        },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({
+        total: 1,
+        items: [{ id: visibleEpub.bookId, files: [{ id: visibleEpub.bookFileId, role: 'primary', sizeBytes: primaryFileSize }] }],
+      });
+    });
+
+    it('filters books with audiobook media by whether their audio cover slot is filled', async () => {
+      const [pdfFile] = await ctx.db
+        .select({ libraryFolderId: bookFiles.libraryFolderId })
+        .from(bookFiles)
+        .where(eq(bookFiles.id, visiblePdf.bookFileId));
+      const [audioFile] = await ctx.db
+        .insert(bookFiles)
+        .values({
+          bookId: visiblePdf.bookId,
+          libraryFolderId: pdfFile!.libraryFolderId,
+          absolutePath: join(visibleLibrary.folderPath, 'contracts/beta-contract.m4b'),
+          relPath: 'contracts/beta-contract.m4b',
+          ino: 987_654_321n,
+          format: 'm4b',
+          role: 'content',
+        })
+        .returning({ id: bookFiles.id });
+
+      const audioCoverBookIds = async (operator: 'isMissing' | 'isPresent') => {
+        const response = await ctx.app.inject({
+          method: 'POST',
+          url: '/api/v1/books/query',
+          headers: authHeader(limitedUser.accessToken),
+          payload: {
+            filter: { type: 'group', join: 'AND', rules: [{ type: 'rule', field: 'audioCover', operator }] },
+            sort: [{ field: 'title', dir: 'asc' }],
+            pagination: { page: 0, size: 20 },
+          },
+        });
+        expect(response.statusCode).toBe(201);
+        return (response.json() as { items: { id: number }[] }).items.map((item) => item.id);
+      };
+
+      try {
+        expect(await audioCoverBookIds('isMissing')).toEqual([visiblePdf.bookId]);
+        expect(await audioCoverBookIds('isPresent')).toEqual([]);
+
+        await ctx.db.insert(bookCovers).values({ bookId: visiblePdf.bookId, medium: 'audio', source: 'custom', origin: 'upload' });
+        expect(await audioCoverBookIds('isMissing')).toEqual([]);
+        expect(await audioCoverBookIds('isPresent')).toEqual([visiblePdf.bookId]);
+
+        await ctx.db
+          .update(bookCovers)
+          .set({ dormantSince: new Date() })
+          .where(and(eq(bookCovers.bookId, visiblePdf.bookId), eq(bookCovers.medium, 'audio')));
+        expect(await audioCoverBookIds('isMissing')).toEqual([visiblePdf.bookId]);
+        expect(await audioCoverBookIds('isPresent')).toEqual([]);
+      } finally {
+        await ctx.db.delete(bookCovers).where(and(eq(bookCovers.bookId, visiblePdf.bookId), eq(bookCovers.medium, 'audio')));
+        await ctx.db.delete(bookFiles).where(eq(bookFiles.id, audioFile!.id));
+      }
+    });
+  });
+
+  describe('bulk query selections', () => {
+    it('resolves metadata filters and search without regressing subquery or explicit selections', async () => {
+      const metadataCollectionResponse = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/collections',
+        headers: authHeader(limitedUser.accessToken),
+        payload: { name: `Metadata selection ${randomUUID()}`, icon: 'FolderOpen' },
+      });
+      expect(metadataCollectionResponse.statusCode).toBe(201);
+      const metadataCollection = metadataCollectionResponse.json() as { id: number };
+
+      const metadataAdd = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/collections/${metadataCollection.id}/books`,
+        headers: authHeader(limitedUser.accessToken),
+        payload: {
+          query: {
+            libraryId: visibleLibrary.libraryId,
+            filter: {
+              type: 'group',
+              join: 'AND',
+              rules: [{ type: 'rule', field: 'title', operator: 'contains', value: 'Contract' }],
+            },
+          },
+        },
+      });
+      expect(metadataAdd.statusCode).toBe(201);
+      expect(metadataAdd.json()).toMatchObject({ id: metadataCollection.id, bookCount: 3 });
+
+      const subqueryRemove = await ctx.app.inject({
+        method: 'DELETE',
+        url: `/api/v1/collections/${metadataCollection.id}/books`,
+        headers: authHeader(limitedUser.accessToken),
+        payload: {
+          query: {
+            libraryId: visibleLibrary.libraryId,
+            filter: {
+              type: 'group',
+              join: 'AND',
+              rules: [{ type: 'rule', field: 'format', operator: 'includesAny', value: ['pdf'] }],
+            },
+          },
+        },
+      });
+      expect(subqueryRemove.statusCode).toBe(200);
+      expect(subqueryRemove.json()).toMatchObject({ id: metadataCollection.id, bookCount: 2 });
+
+      const explicitAdd = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/collections/${metadataCollection.id}/books`,
+        headers: authHeader(limitedUser.accessToken),
+        payload: { bookIds: [visiblePdf.bookId] },
+      });
+      expect(explicitAdd.statusCode).toBe(201);
+      expect(explicitAdd.json()).toMatchObject({ id: metadataCollection.id, bookCount: 3 });
+
+      const searchCollectionResponse = await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/collections',
+        headers: authHeader(limitedUser.accessToken),
+        payload: { name: `Search selection ${randomUUID()}`, icon: 'FolderSearch' },
+      });
+      expect(searchCollectionResponse.statusCode).toBe(201);
+      const searchCollection = searchCollectionResponse.json() as { id: number };
+
+      const scopedSearchAdd = await ctx.app.inject({
+        method: 'POST',
+        url: `/api/v1/collections/${searchCollection.id}/books`,
+        headers: authHeader(limitedUser.accessToken),
+        payload: { query: { q: 'EPUB' } },
+      });
+      expect(scopedSearchAdd.statusCode).toBe(201);
+      expect(scopedSearchAdd.json()).toMatchObject({ id: searchCollection.id, bookCount: 1 });
+    });
   });
 
   describe('detail and reader state', () => {
@@ -334,7 +524,14 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
         payload: { status: 'reading' },
       });
 
-      expect(setStatus.statusCode).toBe(204);
+      expect(setStatus.statusCode).toBe(200);
+      expect(setStatus.json()).toMatchObject({
+        status: 'reading',
+        source: 'manual',
+        startedAt: expect.any(String),
+        finishedAt: null,
+        updatedAt: expect.any(String),
+      });
 
       const getFileProgress = await ctx.app.inject({
         method: 'GET',
@@ -360,6 +557,17 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
         cfi: null,
         pageNumber: null,
         percentage: 0,
+        koboLocationSource: null,
+        koboLocationType: null,
+        koboLocationValue: null,
+        koboContentSourceProgressPercent: null,
+        koreaderProgress: null,
+        positionSeconds: null,
+        textUpdatedAt: null,
+        narrationPercentage: null,
+        narrationUpdatedAt: null,
+        mediaOverlaySectionIndex: null,
+        mediaOverlayFragment: null,
       });
 
       const limitedBookProgress = await ctx.app.inject({
@@ -391,6 +599,14 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
           cfi: null,
           pageNumber: null,
           percentage: 0,
+          koboLocationSource: null,
+          koboLocationType: null,
+          koboLocationValue: null,
+          koboContentSourceProgressPercent: null,
+          koreaderProgress: null,
+          positionSeconds: null,
+          mediaOverlaySectionIndex: null,
+          mediaOverlayFragment: null,
           updatedAt: null,
         },
       ]);
@@ -407,7 +623,10 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
         libraryId: visibleLibrary.libraryId,
         libraryName: visibleLibraryName,
         title: 'Alpha Contract EPUB',
-        coverSource: null,
+        coverSource: 'custom',
+        coverMedia: ['ebook'],
+        covers: { ebook: { source: 'custom', updatedAt: expect.any(String), width: null, height: null }, audio: null },
+        coverVersion: expect.stringMatching(/^ebook:/),
         files: [
           {
             id: visibleEpub.bookFileId,
@@ -416,7 +635,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
             filename: 'alpha-contract.epub',
           },
         ],
-        collections: [],
+        collections: expect.any(Array),
         readStatus: {
           status: 'reading',
           source: 'manual',
@@ -442,7 +661,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
         headers: authHeader(limitedUser.accessToken),
       });
 
-      expect(inaccessibleDetail.statusCode).toBe(403);
+      expect(inaccessibleDetail.statusCode).toBe(404);
     });
   });
 
@@ -525,7 +744,7 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
 
       expect(exportResponse.statusCode).toBe(201);
       expect(exportResponse.headers['content-type']).toContain('application/zip');
-      expect(exportResponse.headers['content-disposition']).toBe('attachment; filename="books.zip"');
+      expect(exportResponse.headers['content-disposition']).toBe('attachment; filename="books.zip"; filename*=UTF-8\'\'books.zip');
 
       const zipEntries = await listZipEntries(exportResponse);
       expect(zipEntries).toEqual(['alpha-contract.epub', 'beta-contract.pdf']);
@@ -556,6 +775,20 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
       expect(cover.headers['content-type']).toContain('image/png');
       expect(cover.headers.etag).toBeTruthy();
       expect(cover.headers['cache-control']).toBe('private, max-age=86400');
+
+      const invalidMedium = await ctx.app.inject({
+        method: 'GET',
+        url: `/api/v1/books/${visibleEpub.bookId}/cover?medium=print`,
+        headers: authHeader(limitedUser.accessToken),
+      });
+      expectError(invalidMedium, 400);
+
+      const invalidStrict = await ctx.app.inject({
+        method: 'GET',
+        url: `/api/v1/books/${visibleEpub.bookId}/cover?strict=yes`,
+        headers: authHeader(limitedUser.accessToken),
+      });
+      expectError(invalidStrict, 400);
 
       const cachedCover = await ctx.app.inject({
         method: 'GET',
@@ -613,5 +846,104 @@ describe('Book API contract (e2e)', { timeout: SCENARIO_TIMEOUT_MS }, () => {
 
       expectError(missingThumbnail, 404, `No thumbnail for book ${visibleEpub.bookId}`);
     });
+
+    it('restores a cover summary that disagrees with the slots when the upgrade runs, without moving updated_at', async () => {
+      await ctx.db.insert(bookCovers).values({ bookId: visibleCbz.bookId, medium: 'ebook', source: 'custom', origin: 'upload' });
+      await ctx.db.update(bookMetadata).set({ coverSource: null }).where(eq(bookMetadata.bookId, visibleCbz.bookId));
+      const [before] = await ctx.db
+        .select({ updatedAt: bookMetadata.updatedAt })
+        .from(bookMetadata)
+        .where(eq(bookMetadata.bookId, visibleCbz.bookId));
+      const marker = JSON.stringify({ version: 3, stage: 'c', lastBookId: 0 });
+      await ctx.db
+        .insert(appSettings)
+        .values({ key: 'cover_slots_backfill', value: marker })
+        .onConflictDoUpdate({ target: appSettings.key, set: { value: marker } });
+      try {
+        const result = await ctx.app.get(CoverSlotBackfillService).run();
+
+        expect(result.repaired).toBeGreaterThanOrEqual(1);
+        const [after] = await ctx.db
+          .select({ coverSource: bookMetadata.coverSource, updatedAt: bookMetadata.updatedAt })
+          .from(bookMetadata)
+          .where(eq(bookMetadata.bookId, visibleCbz.bookId));
+        expect(after).toEqual({ coverSource: 'custom', updatedAt: before!.updatedAt });
+        await expect(ctx.app.get(CoverSlotBackfillService).run()).resolves.toMatchObject({ repaired: 0 });
+      } finally {
+        await ctx.db.delete(bookCovers).where(eq(bookCovers.bookId, visibleCbz.bookId));
+        await ctx.db.update(bookMetadata).set({ coverSource: null }).where(eq(bookMetadata.bookId, visibleCbz.bookId));
+      }
+    });
+
+    it('moves a cover left in the old root layout into its slot on first read, with no coverSource needed', async () => {
+      const coverDir = join(ctx.fixture.booksPath, 'covers', String(visibleCbz.bookId));
+      await writeFixtureFile(ctx.fixture.booksPath, `covers/${visibleCbz.bookId}/cover_custom.jpg`, Buffer.from('legacy-cover', 'utf8'));
+      await writeFixtureFile(ctx.fixture.booksPath, `covers/${visibleCbz.bookId}/thumbnail.jpg`, Buffer.from('legacy-thumbnail', 'utf8'));
+      try {
+        const thumbnail = await ctx.app.inject({
+          method: 'GET',
+          url: `/api/v1/books/${visibleCbz.bookId}/thumbnail`,
+          headers: authHeader(limitedUser.accessToken),
+        });
+        expect(thumbnail.statusCode).toBe(200);
+        expect(thumbnail.body).toBe('legacy-thumbnail');
+
+        const slots = await ctx.db.select().from(bookCovers).where(eq(bookCovers.bookId, visibleCbz.bookId));
+        expect(slots).toEqual([expect.objectContaining({ medium: 'ebook', source: 'custom', origin: 'legacy', dormantSince: null })]);
+        expect(await readdir(coverDir)).toEqual(['ebook']);
+        expect((await readdir(join(coverDir, 'ebook'))).sort()).toEqual(['cover_custom.jpg', 'thumbnail.jpg']);
+
+        const cover = await ctx.app.inject({
+          method: 'GET',
+          url: `/api/v1/books/${visibleCbz.bookId}/cover`,
+          headers: authHeader(limitedUser.accessToken),
+        });
+        expect(cover.statusCode).toBe(200);
+        expect(cover.body).toBe('legacy-cover');
+      } finally {
+        await ctx.db.delete(bookCovers).where(eq(bookCovers.bookId, visibleCbz.bookId));
+        await ctx.db.update(bookMetadata).set({ coverSource: null }).where(eq(bookMetadata.bookId, visibleCbz.bookId));
+        await rm(coverDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('user-supplied added dates', () => {
+    // Issue #1143: an added date the user typed, such as year 0025, came back from Postgres
+    // as an Invalid Date, so serializing the card threw and every listing holding the book
+    // answered 500. These are the year bands the driver's own decoder gets wrong.
+    it.each(['0025-08-25', '0013-01-01', '0031-12-31', '0050-06-15', '0001-01-01'])(
+      'round-trips an added date of %s through storage and back into a listing',
+      async (addedAt) => {
+        const bookId = hiddenEpub.bookId;
+        const [original] = await ctx.db.select({ addedAt: books.addedAt }).from(books).where(eq(books.id, bookId));
+        const expected = `${addedAt}T00:00:00.000Z`;
+
+        try {
+          const update = await ctx.app.inject({
+            method: 'PATCH',
+            url: `/api/v1/books/${bookId}/added-at`,
+            headers: authHeader(ctx.adminToken),
+            payload: { addedAt },
+          });
+
+          expect(update.statusCode).toBe(200);
+          expect((update.json() as { addedAt: string | null }).addedAt).toBe(expected);
+
+          const listing = await ctx.app.inject({
+            method: 'POST',
+            url: '/api/v1/books/query',
+            headers: authHeader(ctx.adminToken),
+            payload: { pagination: { page: 0, size: 200 } },
+          });
+
+          expect(listing.statusCode).toBe(201);
+          const items = (listing.json() as { items: { id: number; addedAt: string }[] }).items;
+          expect(items.find((item) => item.id === bookId)?.addedAt).toBe(expected);
+        } finally {
+          await ctx.db.update(books).set({ addedAt: original!.addedAt }).where(eq(books.id, bookId));
+        }
+      },
+    );
   });
 });

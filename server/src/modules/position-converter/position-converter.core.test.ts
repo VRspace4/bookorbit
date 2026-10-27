@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { chapterIndexFromSpineStep, parseCfi } from './cfi.utils';
-import { cfiRangeToXPointer, parseChapterDocument, xpointerRangeToCfi } from './position-converter.core';
+import { cfiRangeToXPointer, collapsedRangeToCfi, parseChapterDocument, xpointerRangeToCfi } from './position-converter.core';
 import { parseXPointer } from './xpointer.utils';
 
 const SIMPLE_CHAPTER = `<?xml version="1.0" encoding="utf-8"?>
@@ -98,6 +98,27 @@ describe('parseCfi', () => {
   });
 });
 
+describe('parseChapterDocument', () => {
+  const chapter = (body: string) => `<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>T</title></head><body>${body}</body></html>`;
+
+  it('indexes named entities as the characters a renderer would show', () => {
+    const doc = parseChapterDocument(chapter('<p>a&nbsp;b pa&shy;sakyti c&mdash;d</p>'));
+    expect(doc.index.collapsed).toBe('a b pa­sakyti c\u2014d');
+  });
+
+  it('keeps escaped entity text literal instead of resolving it twice', () => {
+    const doc = parseChapterDocument(chapter('<p>write &amp;nbsp; for a space</p>'));
+    expect(doc.index.collapsed).toBe('write &nbsp; for a space');
+  });
+
+  it('builds cfi offsets against resolved characters', () => {
+    const doc = parseChapterDocument(chapter('<p>a&nbsp;bc</p>'));
+    // The nbsp occupies one UTF-16 unit, so "bc" starts at offset 2, not 7.
+    expect(collapsedRangeToCfi(doc, 0, 2, 4)).toBe('epubcfi(/6/2!/4/2,/1:2,/1:4)');
+  });
+});
+
 describe('xpointerRangeToCfi', () => {
   it('converts a simple in-paragraph range exactly', () => {
     const doc = parseChapterDocument(SIMPLE_CHAPTER);
@@ -107,7 +128,7 @@ describe('xpointerRangeToCfi', () => {
 
   it('maps collapsed crengine offsets back to raw offsets in indented source', () => {
     const doc = parseChapterDocument(INDENTED_CHAPTER);
-    const result = xpointerRangeToCfi(doc, 0, '/body/DocFragment[1]/body/p/text().6', '/body/DocFragment[1]/body/p/text().11', 'world');
+    const result = xpointerRangeToCfi(doc, 0, '/body/DocFragment[1]/body/p/text().7', '/body/DocFragment[1]/body/p/text().12', 'world');
     expect(result.status).toBe('exact');
     expect((result as { pos0: string }).pos0).toBe('epubcfi(/6/2!/4/2,/1:13,/1:18)');
   });
@@ -195,8 +216,8 @@ describe('cfiRangeToXPointer', () => {
     const result = cfiRangeToXPointer(doc, 0, 'epubcfi(/6/2!/4/2,/1:13,/1:18)', 'world');
     expect(result).toEqual({
       status: 'exact',
-      pos0: '/body/DocFragment[1]/body/p/text().6',
-      pos1: '/body/DocFragment[1]/body/p/text().11',
+      pos0: '/body/DocFragment[1]/body/p/text().7',
+      pos1: '/body/DocFragment[1]/body/p/text().12',
     });
   });
 
@@ -264,8 +285,8 @@ describe('round trips', () => {
     },
     {
       chapter: INDENTED_CHAPTER,
-      pos0: '/body/DocFragment[1]/body/p/text().0',
-      pos1: '/body/DocFragment[1]/body/p/text().5',
+      pos0: '/body/DocFragment[1]/body/p/text().1',
+      pos1: '/body/DocFragment[1]/body/p/text().6',
       text: 'Hello',
     },
     {

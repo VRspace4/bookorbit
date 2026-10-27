@@ -1,3 +1,4 @@
+import { ReadingAttemptEventsModule } from '../user-book-status/reading-attempt-events.module';
 import { Module, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
@@ -6,6 +7,7 @@ import type { StringValue } from 'ms';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationModule } from '../notification/notification.module';
 import { ScannerModule } from '../scanner/scanner.module';
+import { BookCoverStoreModule } from '../book-cover-store/book-cover-store.module';
 import { MigrationController } from './migration.controller';
 import { MigrationProgressGateway } from './migration-progress.gateway';
 import { MigrationRepository } from './migration.repository';
@@ -17,6 +19,13 @@ import { SourceAdapterRegistry } from './adapters/source-adapter.registry';
 import { BookloreSourceAdapter } from './adapters/booklore/booklore-source.adapter';
 import { BookloreConnector } from './adapters/booklore/booklore-connector';
 import { GrimmorySourceAdapter } from './adapters/grimmory/grimmory-source.adapter';
+import { AudiobookshelfApiConnector } from './adapters/audiobookshelf/audiobookshelf-api.connector';
+import { AudiobookshelfBackupConnector } from './adapters/audiobookshelf/audiobookshelf-backup.connector';
+import { AudiobookshelfNormalizer } from './adapters/audiobookshelf/audiobookshelf-normalizer';
+import { AudiobookshelfSourceAdapter } from './adapters/audiobookshelf/audiobookshelf-source.adapter';
+import { CalibreWebAutomatedNormalizer } from './adapters/calibre-web-automated/calibre-web-automated-normalizer';
+import { CalibreWebAutomatedSnapshotConnector } from './adapters/calibre-web-automated/calibre-web-automated-snapshot.connector';
+import { CalibreWebAutomatedSourceAdapter } from './adapters/calibre-web-automated/calibre-web-automated-source.adapter';
 import { MatchingService } from './planner/matching.service';
 import { MigrationPlannerService } from './planner/planner.service';
 import { PathMappingValidationService } from './planner/path-mapping-validation.service';
@@ -29,9 +38,11 @@ import { MigrationReportingService } from './reporting/migration-reporting.servi
 
 @Module({
   imports: [
+    ReadingAttemptEventsModule,
     AuthModule,
     forwardRef(() => NotificationModule),
     ScannerModule,
+    BookCoverStoreModule,
     JwtModule.registerAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
@@ -48,6 +59,13 @@ import { MigrationReportingService } from './reporting/migration-reporting.servi
     BookloreConnector,
     BookloreSourceAdapter,
     GrimmorySourceAdapter,
+    AudiobookshelfApiConnector,
+    AudiobookshelfBackupConnector,
+    AudiobookshelfNormalizer,
+    AudiobookshelfSourceAdapter,
+    CalibreWebAutomatedSnapshotConnector,
+    CalibreWebAutomatedNormalizer,
+    CalibreWebAutomatedSourceAdapter,
     SourceAdapterRegistry,
     MatchingService,
     MigrationPlannerService,

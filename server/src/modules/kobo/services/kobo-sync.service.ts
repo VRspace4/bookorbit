@@ -1,30 +1,48 @@
 import { createHash } from 'crypto';
-import { Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Inject, Injectable, InternalServerErrorException, Logger, Optional } from '@nestjs/common';
 import { SQL, and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
+import type { GroupRule } from '@bookorbit/types';
 import { DB } from '../../../db/db.module';
 import * as schema from '../../../db/schema';
+import { mapWithConcurrency } from '../../../common/utils/batch.utils';
 import { buildContentFilterClauses } from '../../../common/utils/content-filter-sql.utils';
+import { sanitizeLogValue } from '../../../common/utils/log-sanitize.utils';
 import { resolveTimeZone } from '../../../common/utils/timezone.utils';
 import { ContentFilterRepository } from '../../user/content-filter.repository';
 import { BookQueryBuilder } from '../../book/book-query-builder.service';
+import { MetadataExtractionService } from '../../metadata/metadata-extraction.service';
+import { SmartScopeService } from '../../smart-scope/smart-scope.service';
+import { KoboDeliveryService, deliveryErrorCode } from './kobo-delivery.service';
 import { KoboBookAccessService } from './kobo-book-access.service';
 import { KoboBookIdentityService } from './kobo-book-identity.service';
+import { normalizeKoboLanguage, selectKoboIsbn } from './kobo-metadata.utils';
 import { KoboReadingStateService } from './kobo-reading-state.service';
+import { encodeSyncToken } from './kobo-sync-token';
 
 type Db = NodePgDatabase<typeof schema>;
 
-const SYNC_PAGE_SIZE = 5;
+// A device pauses between sync rounds, so wall-clock time for a long delta tracks the number of
+// round trips rather than the work inside each one: at five books a page, re-announcing a few
+// hundred books cost users tens of minutes of waiting on a mostly idle server.
+export const SYNC_PAGE_SIZE = 50;
 const SNAPSHOT_RECONCILE_BATCH_SIZE = 5000;
 const SNAPSHOT_CREATE_BATCH_SIZE = 5000;
-const TOKEN_PREFIX = 'PX.';
+const METADATA_SERIALIZER_VERSION = 2;
+
+// Fixed-layout detection opens the EPUB, so a sync never resolves the whole backlog at once.
+// Each pass persists what it learns, so a library converges over successive syncs and every
+// later sync reads the stored answer instead of touching the filesystem.
+const FIXED_LAYOUT_BACKFILL_LIMIT = 500;
+const FIXED_LAYOUT_BACKFILL_CONCURRENCY = 8;
 
 type EligibleSnapshotRow = {
   bookId: number;
   fileHash: string | null;
   deliveryHash: string;
   metadataHash: string;
+  coverImageId: string;
   needsLegacyNumericRemoval?: boolean;
 };
 
@@ -38,6 +56,7 @@ type SnapshotSeedRow = {
   fileHash: string | null;
   deliveryHash: string | null;
   metadataHash: string | null;
+  coverImageId: string | null;
 };
 
 type Snapshot = typeof schema.koboLibrarySnapshots.$inferSelect;
@@ -50,7 +69,16 @@ type KoboDeliverySettings = {
   kepubConversionLimitMb: number;
 };
 
-type KoboDeliveryFormat = 'EPUB3' | 'KEPUB' | 'PDF';
+// EPUB3FL tells the device to use its fixed-layout renderer, which is what makes a comic fill
+// the screen instead of picking up the reflowable reading margins.
+type KoboDeliveryFormat = 'EPUB3' | 'EPUB3FL' | 'KEPUB' | 'PDF';
+
+type FixedLayoutCandidate = {
+  fileId: number;
+  fileAbsolutePath: string;
+  fileFormat: string | null;
+  isFixedLayout: boolean | null;
+};
 
 type KoboDeliveryInfo = {
   format: KoboDeliveryFormat;
@@ -64,6 +92,8 @@ type SmartScopeMatch = { name: string; bookIds: number[]; where: SQL | undefined
 // caching across requests (this service is a singleton).
 type SmartScopeMatchCache = Map<number, Promise<Map<number, SmartScopeMatch>>>;
 
+type EligibleIdsResolver = () => Promise<Set<number>>;
+
 export interface KoboBookEntry {
   bookId: number;
   koboEntitlementId: string;
@@ -74,9 +104,10 @@ export interface KoboBookEntry {
   publisher: string | null;
   publishedDate: string | null;
   publishedYear: number | null;
-  language: string | null;
+  language: string;
+  isbn: string | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   fileFormat: string;
   fileSizeBytes: number | null;
   fileHash: string | null;
@@ -86,14 +117,22 @@ export interface KoboBookEntry {
   collectionNames: string[];
   addedAt: Date;
   updatedAt: Date;
+  deliveryId?: string;
 }
 
-function encodeSyncToken(snapshotId: number): string {
-  return TOKEN_PREFIX + Buffer.from(JSON.stringify({ snapshotId })).toString('base64');
+/**
+ * The size the kepub limit is judged by. A read-along is delivered with its narration stripped, which
+ * the download measures after the rebuild; announcing by the size with audio would pick EPUB3 for a
+ * book the download then streams as a kepub.
+ */
+function deliverySizeBytes(row: { fileSizeBytes: number | null; fileMediaOverlayAvailable: boolean | null }): number | null {
+  return row.fileMediaOverlayAvailable ? null : row.fileSizeBytes;
 }
 
 @Injectable()
 export class KoboSyncService {
+  private readonly logger = new Logger(KoboSyncService.name);
+
   constructor(
     @Inject(DB) private readonly db: Db,
     private readonly bookAccessService: KoboBookAccessService,
@@ -101,6 +140,9 @@ export class KoboSyncService {
     private readonly contentFilterRepository: ContentFilterRepository,
     private readonly bookIdentityService: KoboBookIdentityService,
     private readonly queryBuilder: BookQueryBuilder,
+    private readonly smartScopeService: SmartScopeService,
+    private readonly metadataExtractionService: MetadataExtractionService,
+    @Optional() private readonly deliveries?: KoboDeliveryService,
   ) {}
 
   async getDelta(
@@ -110,10 +152,20 @@ export class KoboSyncService {
     baseUrl: string,
   ): Promise<{ entitlements: unknown[]; hasMore: boolean; syncToken: string }> {
     let snapshot = await this.findDeviceSnapshot(userId, deviceId);
+    const smartScopeMatchCache: SmartScopeMatchCache = new Map();
+
+    // Reconciling costs a pass over the whole library, so a device still working through its
+    // pending rows skips it: those rows already say what it is owed, and whatever changed while
+    // it paged is picked up by the reconcile that opens its next sync.
+    if (snapshot && (await this.hasPendingSnapshotBooks(snapshot.id))) {
+      return this.getPageFromSnapshot(userId, snapshot.id, deviceToken, baseUrl, smartScopeMatchCache, () =>
+        this.fetchEligibleBookIds(userId, true, smartScopeMatchCache),
+      );
+    }
+
     const hadDeviceSnapshot = snapshot ? true : await this.hasDeviceSnapshot(userId);
     const legacyNumericRemovalBookIds = snapshot ? new Set<number>() : await this.getLegacyNumericRemovalBookIds(userId, deviceId);
-    const smartScopeMatchCache: SmartScopeMatchCache = new Map();
-    const eligibleSnapshotRows = await this.fetchEligibleSnapshotRows(userId, hadDeviceSnapshot, smartScopeMatchCache);
+    const eligibleSnapshotRows = await this.fetchEligibleSnapshotRows(userId, hadDeviceSnapshot, smartScopeMatchCache, true);
 
     if (!snapshot) {
       const created = await this.createSnapshot(userId, deviceId, eligibleSnapshotRows, legacyNumericRemovalBookIds);
@@ -127,21 +179,52 @@ export class KoboSyncService {
       await this.reconcileSnapshot(snapshot.id, eligibleSnapshotRows);
     }
 
-    return this.getPageFromSnapshot(
-      userId,
-      snapshot.id,
-      deviceToken,
-      baseUrl,
-      new Set(eligibleSnapshotRows.map((row) => row.bookId)),
-      smartScopeMatchCache,
-    );
+    const eligibleIds = new Set(eligibleSnapshotRows.map((row) => row.bookId));
+    return this.getPageFromSnapshot(userId, snapshot.id, deviceToken, baseUrl, smartScopeMatchCache, () => Promise.resolve(eligibleIds));
   }
 
   async getBookMetadata(userId: number, bookId: number, deviceToken: string, baseUrl: string): Promise<unknown[]> {
     const booksById = await this.fetchEligibleBooksByIds(userId, [bookId], await this.hasDeviceSnapshot(userId), new Map());
     const book = booksById.get(bookId) ?? null;
     if (!book) return [];
+    if (this.deliveries) {
+      const device = await this.db.query.koboDevices.findFirst({
+        where: and(eq(schema.koboDevices.userId, userId), eq(schema.koboDevices.token, deviceToken)),
+      });
+      if (device) {
+        const delivery = await this.deliveries.offer(userId, device.id, bookId);
+        book.fileSizeBytes = delivery.metadata.sizeBytes;
+        book.deliveryFormat =
+          delivery.metadata.format === 'kepub'
+            ? 'KEPUB'
+            : delivery.metadata.format === 'pdf'
+              ? 'PDF'
+              : book.deliveryFormat === 'EPUB3FL'
+                ? 'EPUB3FL'
+                : 'EPUB3';
+        book.deliveryId = delivery.id;
+      }
+    }
     return [this.buildBookMetadata(book, deviceToken, baseUrl)];
+  }
+
+  /** Of the given books, those this device holds: in its library snapshot, and not removed or being removed. */
+  async findBookIdsOnDevice(userId: number, deviceId: number, bookIds: number[]): Promise<number[]> {
+    if (bookIds.length === 0) return [];
+    const rows = await this.db
+      .select({ bookId: schema.koboSnapshotBooks.bookId })
+      .from(schema.koboSnapshotBooks)
+      .innerJoin(schema.koboLibrarySnapshots, eq(schema.koboLibrarySnapshots.id, schema.koboSnapshotBooks.snapshotId))
+      .where(
+        and(
+          eq(schema.koboLibrarySnapshots.userId, userId),
+          eq(schema.koboLibrarySnapshots.deviceId, deviceId),
+          inArray(schema.koboSnapshotBooks.bookId, bookIds),
+          eq(schema.koboSnapshotBooks.pendingDelete, false),
+          eq(schema.koboSnapshotBooks.removedByDevice, false),
+        ),
+      );
+    return rows.map((row) => row.bookId);
   }
 
   async removeBookFromSync(userId: number, deviceId: number, bookId: number): Promise<void> {
@@ -169,6 +252,34 @@ export class KoboSyncService {
     return this.db.query.koboLibrarySnapshots.findFirst({
       where: and(eq(schema.koboLibrarySnapshots.userId, userId), eq(schema.koboLibrarySnapshots.deviceId, deviceId)),
     });
+  }
+
+  private async hasPendingSnapshotBooks(snapshotId: number): Promise<boolean> {
+    const [row] = await this.db
+      .select({ bookId: schema.koboSnapshotBooks.bookId })
+      .from(schema.koboSnapshotBooks)
+      .where(
+        and(
+          eq(schema.koboSnapshotBooks.snapshotId, snapshotId),
+          eq(schema.koboSnapshotBooks.synced, false),
+          or(
+            eq(schema.koboSnapshotBooks.pendingDelete, true),
+            isNull(schema.koboSnapshotBooks.deliveryRetryAt),
+            lte(schema.koboSnapshotBooks.deliveryRetryAt, sql`now()`),
+          ),
+        ),
+      )
+      .limit(1);
+    return Boolean(row);
+  }
+
+  private async fetchEligibleBookIds(
+    userId: number,
+    needsLegacyNumericRemovalForNewMappings: boolean,
+    smartScopeMatchCache: SmartScopeMatchCache,
+  ): Promise<Set<number>> {
+    const rows = await this.fetchEligibleSnapshotRows(userId, needsLegacyNumericRemovalForNewMappings, smartScopeMatchCache);
+    return new Set(rows.map((row) => row.bookId));
   }
 
   private async hasDeviceSnapshot(userId: number): Promise<boolean> {
@@ -267,6 +378,7 @@ export class KoboSyncService {
         fileHash: book.fileHash,
         deliveryHash: book.deliveryHash,
         metadataHash: book.metadataHash,
+        coverImageId: book.coverImageId,
       })),
     ];
 
@@ -303,6 +415,7 @@ export class KoboSyncService {
               fileHash: null,
               deliveryHash: null,
               metadataHash: null,
+              coverImageId: null,
             })),
           )
           .onConflictDoUpdate({
@@ -342,6 +455,7 @@ export class KoboSyncService {
           file_hash varchar(64),
           delivery_hash varchar(64) NOT NULL,
           metadata_hash varchar(64) NOT NULL,
+          cover_image_id varchar(128) NOT NULL,
           needs_legacy_numeric_removal boolean NOT NULL
         ) ON COMMIT DROP
       `);
@@ -349,18 +463,22 @@ export class KoboSyncService {
       for (let index = 0; index < eligibleBooks.length; index += SNAPSHOT_RECONCILE_BATCH_SIZE) {
         const chunk = eligibleBooks.slice(index, index + SNAPSHOT_RECONCILE_BATCH_SIZE);
         const valueRows = sql.join(
-          chunk.map((b) => sql`(${b.bookId}, ${b.fileHash}, ${b.deliveryHash}, ${b.metadataHash}, ${b.needsLegacyNumericRemoval ?? false})`),
+          chunk.map(
+            (b) =>
+              sql`(${b.bookId}, ${b.fileHash}, ${b.deliveryHash}, ${b.metadataHash}, ${b.coverImageId}, ${b.needsLegacyNumericRemoval ?? false})`,
+          ),
           sql`, `,
         );
 
         await tx.execute(sql`
-          INSERT INTO kobo_eligible_books_tmp (book_id, file_hash, delivery_hash, metadata_hash, needs_legacy_numeric_removal)
+          INSERT INTO kobo_eligible_books_tmp (book_id, file_hash, delivery_hash, metadata_hash, cover_image_id, needs_legacy_numeric_removal)
           VALUES ${valueRows}
           ON CONFLICT (book_id)
           DO UPDATE
           SET file_hash = EXCLUDED.file_hash,
               delivery_hash = EXCLUDED.delivery_hash,
               metadata_hash = EXCLUDED.metadata_hash,
+              cover_image_id = EXCLUDED.cover_image_id,
               needs_legacy_numeric_removal = EXCLUDED.needs_legacy_numeric_removal
         `);
       }
@@ -386,8 +504,8 @@ export class KoboSyncService {
 
       await tx.execute(sql`
         INSERT INTO ${schema.koboSnapshotBooks}
-          (snapshot_id, book_id, synced, pending_delete, is_new, removed_by_device, needs_legacy_numeric_removal, file_hash, delivery_hash, metadata_hash)
-        SELECT ${snapshotId}, e.book_id, false, false, true, false, e.needs_legacy_numeric_removal, e.file_hash, e.delivery_hash, e.metadata_hash
+          (snapshot_id, book_id, synced, pending_delete, is_new, removed_by_device, needs_legacy_numeric_removal, file_hash, delivery_hash, metadata_hash, cover_image_id)
+        SELECT ${snapshotId}, e.book_id, false, false, true, false, e.needs_legacy_numeric_removal, e.file_hash, e.delivery_hash, e.metadata_hash, e.cover_image_id
         FROM kobo_eligible_books_tmp e
         LEFT JOIN ${schema.koboSnapshotBooks} sb
           ON sb.snapshot_id = ${snapshotId}
@@ -402,7 +520,8 @@ export class KoboSyncService {
             is_new = true,
             file_hash = e.file_hash,
             delivery_hash = e.delivery_hash,
-            metadata_hash = e.metadata_hash
+            metadata_hash = e.metadata_hash,
+            cover_image_id = e.cover_image_id
         FROM kobo_eligible_books_tmp e
         WHERE sb.snapshot_id = ${snapshotId}
           AND sb.book_id = e.book_id
@@ -417,7 +536,8 @@ export class KoboSyncService {
             is_new = true,
             file_hash = e.file_hash,
             delivery_hash = e.delivery_hash,
-            metadata_hash = e.metadata_hash
+            metadata_hash = e.metadata_hash,
+            cover_image_id = e.cover_image_id
         FROM kobo_eligible_books_tmp e
         WHERE sb.snapshot_id = ${snapshotId}
           AND sb.book_id = e.book_id
@@ -444,7 +564,8 @@ export class KoboSyncService {
             is_new = true,
             file_hash = e.file_hash,
             delivery_hash = e.delivery_hash,
-            metadata_hash = e.metadata_hash
+            metadata_hash = e.metadata_hash,
+            cover_image_id = e.cover_image_id
         FROM kobo_eligible_books_tmp e
         WHERE sb.snapshot_id = ${snapshotId}
           AND sb.book_id = e.book_id
@@ -457,10 +578,11 @@ export class KoboSyncService {
       await tx.execute(sql`
         UPDATE ${schema.koboSnapshotBooks} AS sb
         SET synced = false,
-            is_new = false,
+            is_new = sb.cover_image_id IS NOT NULL AND sb.cover_image_id IS DISTINCT FROM e.cover_image_id,
             file_hash = e.file_hash,
             delivery_hash = e.delivery_hash,
-            metadata_hash = e.metadata_hash
+            metadata_hash = e.metadata_hash,
+            cover_image_id = e.cover_image_id
         FROM kobo_eligible_books_tmp e
         WHERE sb.snapshot_id = ${snapshotId}
           AND sb.book_id = e.book_id
@@ -471,23 +593,49 @@ export class KoboSyncService {
           AND sb.delivery_hash IS NOT DISTINCT FROM e.delivery_hash
           AND sb.metadata_hash IS DISTINCT FROM e.metadata_hash
       `);
+
+      // Rows reconciled before cover ids were recorded learn the current one silently, so an
+      // upgrade does not re-announce every book and send each device after every cover again.
+      await tx.execute(sql`
+        UPDATE ${schema.koboSnapshotBooks} AS sb
+        SET cover_image_id = e.cover_image_id
+        FROM kobo_eligible_books_tmp e
+        WHERE sb.snapshot_id = ${snapshotId}
+          AND sb.book_id = e.book_id
+          AND sb.cover_image_id IS NULL
+      `);
     });
   }
 
+  /**
+   * Serves the next page of a snapshot. Eligibility is resolved lazily because only the final page
+   * needs the full set, and reaching for it on every page is what makes a long delta O(library) per
+   * request.
+   */
   private async getPageFromSnapshot(
     userId: number,
     snapshotId: number,
     deviceToken: string,
     baseUrl: string,
-    eligibleIds: Set<number>,
     smartScopeMatchCache: SmartScopeMatchCache,
+    resolveEligibleIds: EligibleIdsResolver,
   ): Promise<{ entitlements: unknown[]; hasMore: boolean; syncToken: string }> {
-    const syncToken = encodeSyncToken(snapshotId);
+    const syncToken = encodeSyncToken();
 
     const pending = await this.db
       .select()
       .from(schema.koboSnapshotBooks)
-      .where(and(eq(schema.koboSnapshotBooks.snapshotId, snapshotId), eq(schema.koboSnapshotBooks.synced, false)))
+      .where(
+        and(
+          eq(schema.koboSnapshotBooks.snapshotId, snapshotId),
+          eq(schema.koboSnapshotBooks.synced, false),
+          or(
+            eq(schema.koboSnapshotBooks.pendingDelete, true),
+            isNull(schema.koboSnapshotBooks.deliveryRetryAt),
+            lte(schema.koboSnapshotBooks.deliveryRetryAt, sql`now()`),
+          ),
+        ),
+      )
       .orderBy(asc(schema.koboSnapshotBooks.bookId))
       .limit(SYNC_PAGE_SIZE + 1);
 
@@ -495,15 +643,11 @@ export class KoboSyncService {
     const page = pending.slice(0, SYNC_PAGE_SIZE);
 
     if (page.length === 0) {
-      const tagItems = await this.buildTagItems(userId, eligibleIds, smartScopeMatchCache);
+      const tagItems = await this.buildTagItems(userId, await resolveEligibleIds(), smartScopeMatchCache);
       return { entitlements: tagItems, hasMore: false, syncToken };
     }
 
-    const pageIds = page.map((r) => r.bookId);
-    await this.db
-      .update(schema.koboSnapshotBooks)
-      .set({ synced: true })
-      .where(and(eq(schema.koboSnapshotBooks.snapshotId, snapshotId), inArray(schema.koboSnapshotBooks.bookId, pageIds)));
+    const snapshot = await this.db.query.koboLibrarySnapshots.findFirst({ where: eq(schema.koboLibrarySnapshots.id, snapshotId) });
 
     const entitlements: unknown[] = [];
     const identitiesById = await this.bookIdentityService.findByBookIds(
@@ -511,6 +655,7 @@ export class KoboSyncService {
       page.map((row) => row.bookId),
     );
     const legacyRemovalCompletedBookIds: number[] = [];
+    const offeredIds: number[] = [];
     const booksById = await this.fetchEligibleBooksByIds(
       userId,
       page.filter((row) => !row.pendingDelete).map((row) => row.bookId),
@@ -539,7 +684,31 @@ export class KoboSyncService {
       const book = booksById.get(row.bookId) ?? null;
       if (!book) continue;
 
-      const readingState = await this.readingStateService.getRawState(userId, row.bookId);
+      try {
+        if (this.deliveries && snapshot) {
+          const delivery = await this.deliveries.offer(userId, snapshot.deviceId, row.bookId);
+          book.fileSizeBytes = delivery.metadata.sizeBytes;
+          book.deliveryFormat =
+            delivery.metadata.format === 'kepub'
+              ? 'KEPUB'
+              : delivery.metadata.format === 'pdf'
+                ? 'PDF'
+                : book.deliveryFormat === 'EPUB3FL'
+                  ? 'EPUB3FL'
+                  : 'EPUB3';
+          book.deliveryId = delivery.id;
+        }
+      } catch (error) {
+        this.logger.warn(
+          `[kobo.delivery] [fail] userId=${userId} deviceId=${snapshot?.deviceId ?? 'none'} bookId=${row.bookId} code=${deliveryErrorCode(error) ?? 'none'} errorClass=${error instanceof Error ? error.name : 'Error'} error="${sanitizeLogValue(error instanceof Error ? error.message : String(error))}" - preparation deferred for retry`,
+        );
+        await this.db
+          .update(schema.koboSnapshotBooks)
+          .set({ deliveryRetryAt: new Date(Date.now() + 300_000), deliveryFailureCode: 'DELIVERY_PREPARATION_FAILED' })
+          .where(and(eq(schema.koboSnapshotBooks.snapshotId, snapshotId), eq(schema.koboSnapshotBooks.bookId, row.bookId)));
+        continue;
+      }
+      const readingState = await this.readingStateService.getRawState(userId, row.bookId, snapshot?.deviceId);
       const defaultReadingState = readingState ?? this.buildDefaultReadingState(book.koboEntitlementId);
 
       if (row.isNew || row.needsLegacyNumericRemoval) {
@@ -569,8 +738,14 @@ export class KoboSyncService {
           });
         }
       }
+      offeredIds.push(row.bookId);
     }
 
+    if (offeredIds.length)
+      await this.db
+        .update(schema.koboSnapshotBooks)
+        .set({ synced: true, deliveryRetryAt: null, deliveryFailureCode: null })
+        .where(and(eq(schema.koboSnapshotBooks.snapshotId, snapshotId), inArray(schema.koboSnapshotBooks.bookId, offeredIds)));
     await this.completeLegacyNumericRemovals(userId, snapshotId, legacyRemovalCompletedBookIds);
 
     return { entitlements, hasMore, syncToken };
@@ -612,8 +787,10 @@ export class KoboSyncService {
   }
 
   private async buildTagItems(userId: number, eligibleIds: Set<number>, smartScopeMatchCache: SmartScopeMatchCache): Promise<unknown[]> {
+    // Book collections only. A Kobo tag is a set of book entitlements, so a podcast collection
+    // would emit an empty tag; the schema also refuses the sync flag on one.
     const collections = await this.db.query.collections.findMany({
-      where: and(eq(schema.collections.userId, userId), eq(schema.collections.syncToKobo, true)),
+      where: and(eq(schema.collections.userId, userId), eq(schema.collections.syncToKobo, true), eq(schema.collections.mediaType, 'books')),
     });
 
     const collectionIds = collections.map((c) => c.id);
@@ -690,9 +867,7 @@ export class KoboSyncService {
     accessibleLibraryIds: number[] | null,
     timeZone: string,
   ): Promise<Map<number, SmartScopeMatch>> {
-    const scopes = await this.db.query.smartScopes.findMany({
-      where: and(eq(schema.smartScopes.userId, userId), eq(schema.smartScopes.syncToKobo, true)),
-    });
+    const scopes = await this.smartScopeService.findKoboSyncScopes(userId);
 
     if (scopes.length === 0) return new Map();
 
@@ -703,10 +878,12 @@ export class KoboSyncService {
         // A scope without a filter matches zero books everywhere else in the app
         // (SmartScopeService.findAll/prepareBooksQuery), so mirror that here rather
         // than syncing the whole library for an unconfigured scope.
-        if (!scope.filter) {
+        // Kobo holds books. The scope query already excludes podcast scopes, whose rules are not a
+        // GroupRule; this second check keeps that guarantee local to where the filter is read.
+        if (!scope.filter || scope.mediaType !== 'books') {
           return [scope.id, { name: scope.name, bookIds: [], where: undefined }];
         }
-        const where = this.queryBuilder.buildWhere(scope.filter, { accessibleLibraryIds: libraryIds, userId, timeZone });
+        const where = this.queryBuilder.buildWhere(scope.filter as GroupRule, { accessibleLibraryIds: libraryIds, userId, timeZone });
         const bookIds = await this.fetchSmartScopeBookIds(where);
         return [scope.id, { name: scope.name, bookIds, where }];
       }),
@@ -773,7 +950,7 @@ export class KoboSyncService {
 
   private buildBookMetadata(book: KoboBookEntry, deviceToken: string, baseUrl: string) {
     const id = book.koboEntitlementId;
-    const downloadUrl = `${baseUrl}/api/v1/kobo/${deviceToken}/v1/books/${id}/download`;
+    const downloadUrl = `${baseUrl}/api/v1/kobo/${deviceToken}/v1/books/${id}/download${book.deliveryId ? `?delivery=${book.deliveryId}` : ''}`;
     const slug = book.title ? book.title.toLowerCase().replace(/[^a-z0-9]/g, '-') : id;
     const publicationDate = book.publishedDate
       ? `${book.publishedDate}T00:00:00.000Z`
@@ -785,8 +962,8 @@ export class KoboSyncService {
       ? {
           Id: `series_${book.seriesName}`,
           Name: book.seriesName,
-          Number: book.seriesIndex != null ? String(book.seriesIndex) : '1',
-          NumberFloat: book.seriesIndex ?? 1.0,
+          Number: book.seriesIndex ?? '1',
+          NumberFloat: book.seriesIndex != null ? Number(book.seriesIndex) : 1.0,
         }
       : { Id: '', Name: '', Number: '', NumberFloat: 0.0 };
 
@@ -800,7 +977,8 @@ export class KoboSyncService {
       Description: book.description,
       Publisher: publisher,
       PublicationDate: publicationDate,
-      Language: book.language ?? 'en',
+      Language: book.language,
+      ...(book.isbn ? { ISBN: book.isbn } : {}),
       Genre: '00000000-0000-0000-0000-000000000001',
       CoverImageId: book.koboCoverImageId,
       Contributors: book.authors,
@@ -837,12 +1015,15 @@ export class KoboSyncService {
     title: string | null;
     authors: string[];
     seriesName: string | null;
-    seriesIndex: number | null;
+    seriesIndex: string | null;
     metadataUpdatedAt: Date | null;
     entitlementId: string;
     coverImageId: string;
+    language: string;
+    isbn: string | null;
   }): string {
     const metaStr = [
+      METADATA_SERIALIZER_VERSION,
       params.title ?? '',
       params.authors.join(','),
       params.seriesName ?? '',
@@ -850,38 +1031,116 @@ export class KoboSyncService {
       String(params.metadataUpdatedAt ?? ''),
       params.entitlementId,
       params.coverImageId,
+      params.language,
+      params.isbn ?? '',
     ].join('|');
     return createHash('sha256').update(metaStr).digest('hex').slice(0, 16);
   }
 
+  /**
+   * `hyphenate` describes the bytes actually delivered, not the announced format, so a hyphenated
+   * kepub and a plain one never collide even when both are announced as EPUB3FL.
+   */
   private buildDeliveryHash(format: KoboDeliveryFormat, hyphenate: boolean): string {
     return createHash('sha256')
-      .update([format, format === 'KEPUB' && hyphenate ? 'hyphenate' : 'plain'].join('|'))
+      .update([format, hyphenate ? 'hyphenate' : 'plain'].join('|'))
       .digest('hex')
       .slice(0, 16);
   }
 
-  private getDeliveryInfo(fileFormat: string | null, fileSizeBytes: number | null, settings: KoboDeliverySettings): KoboDeliveryInfo {
+  private getDeliveryInfo(
+    fileFormat: string | null,
+    fileSizeBytes: number | null,
+    settings: KoboDeliverySettings,
+    isFixedLayout: boolean | null,
+  ): KoboDeliveryInfo {
     const normalizedFormat = (fileFormat ?? 'epub').toLowerCase();
 
     if (normalizedFormat === 'pdf') {
       return { format: 'PDF', hash: this.buildDeliveryHash('PDF', false) };
     }
 
+    const limitBytes = settings.kepubConversionLimitMb * 1024 * 1024;
+    const convertsToKepub = normalizedFormat === 'epub' && settings.convertToKepub && (!fileSizeBytes || fileSizeBytes <= limitBytes);
+    const hyphenated = convertsToKepub && settings.forceEnableHyphenation;
+
+    // Announcing EPUB3FL is what earns the full-screen renderer; the bytes are deliberately left
+    // alone. A kepub renders full screen just the same once the format says fixed layout, and
+    // keeping the conversion preserves the KoboSpan positions two-way progress sync depends on.
+    if (isFixedLayout && (normalizedFormat === 'epub' || normalizedFormat === 'kepub')) {
+      return { format: 'EPUB3FL', hash: this.buildDeliveryHash('EPUB3FL', hyphenated) };
+    }
+
     if (normalizedFormat === 'kepub') {
       return { format: 'KEPUB', hash: this.buildDeliveryHash('KEPUB', false) };
     }
 
-    if (normalizedFormat === 'epub') {
-      const limitBytes = settings.kepubConversionLimitMb * 1024 * 1024;
-      const withinLimit = !fileSizeBytes || fileSizeBytes <= limitBytes;
-
-      if (settings.convertToKepub && withinLimit) {
-        return { format: 'KEPUB', hash: this.buildDeliveryHash('KEPUB', settings.forceEnableHyphenation) };
-      }
+    if (convertsToKepub) {
+      return { format: 'KEPUB', hash: this.buildDeliveryHash('KEPUB', hyphenated) };
     }
 
     return { format: 'EPUB3', hash: this.buildDeliveryHash('EPUB3', false) };
+  }
+
+  /**
+   * Resolves the fixed-layout flag for eligible files that have never been checked, and stores what
+   * it finds so later syncs read the column instead of the filesystem. Capped per sync because this
+   * runs on the whole-library pass; anything left over is picked up by the next sync, which only
+   * delays a comic's re-announcement rather than losing it.
+   *
+   * A file that cannot be read stays null so it is retried later: persisting a read failure as
+   * `false` would permanently mark a comic reflowable.
+   */
+  private async backfillFixedLayout(rows: readonly FixedLayoutCandidate[]): Promise<Map<number, boolean>> {
+    const pending = rows
+      .filter((row) => row.isFixedLayout === null && (row.fileFormat === 'epub' || row.fileFormat === 'kepub'))
+      .slice(0, FIXED_LAYOUT_BACKFILL_LIMIT);
+    const resolved = new Map<number, boolean>();
+    if (pending.length === 0) return resolved;
+
+    const startedAt = Date.now();
+    const detected = await mapWithConcurrency(pending, FIXED_LAYOUT_BACKFILL_CONCURRENCY, async (row) => {
+      try {
+        return await this.metadataExtractionService.detectFixedLayout(row.fileAbsolutePath, row.fileFormat!);
+      } catch {
+        return null;
+      }
+    });
+
+    const fileIdsByValue = new Map<boolean, number[]>();
+    detected.forEach((value, index) => {
+      if (value === null) return;
+      const fileId = pending[index]!.fileId;
+      resolved.set(fileId, value);
+      const bucket = fileIdsByValue.get(value) ?? [];
+      bucket.push(fileId);
+      fileIdsByValue.set(value, bucket);
+    });
+
+    try {
+      for (const [value, fileIds] of fileIdsByValue) {
+        // Still-null guard: keeps the write idempotent, avoids clobbering a value a concurrent
+        // scan just wrote, and keeps book_files.updatedAt (the KOReader library token and OPDS
+        // entry timestamps) from being bumped by a sync that changed nothing.
+        await this.db
+          .update(schema.bookFiles)
+          .set({ isFixedLayout: value })
+          .where(and(inArray(schema.bookFiles.id, fileIds), isNull(schema.bookFiles.isFixedLayout)));
+      }
+    } catch (err) {
+      // The detected values are still returned, so this sync announces the right format either
+      // way; only the persistence that saves the next sync the work is lost.
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.logger.warn(
+        `[kobo.fixed_layout_backfill] [fail] candidates=${pending.length} errorClass=${error.constructor.name} error="${sanitizeLogValue(error.message)}" - could not persist fixed layout flags`,
+      );
+      return resolved;
+    }
+
+    this.logger.debug(
+      `[kobo.fixed_layout_backfill] [end] candidates=${pending.length} resolved=${resolved.size} fixedLayout=${fileIdsByValue.get(true)?.length ?? 0} durationMs=${Date.now() - startedAt} - fixed layout flags backfilled`,
+    );
+    return resolved;
   }
 
   private async getDeliverySettings(userId: number): Promise<KoboDeliverySettings> {
@@ -953,6 +1212,7 @@ export class KoboSyncService {
     userId: number,
     needsLegacyNumericRemovalForNewMappings: boolean,
     smartScopeMatchCache: SmartScopeMatchCache,
+    backfillFixedLayout = false,
   ): Promise<EligibleSnapshotRow[]> {
     const whereClause = await this.buildEligibleBooksWhereClause(userId, smartScopeMatchCache);
     if (!whereClause) return [];
@@ -962,12 +1222,20 @@ export class KoboSyncService {
       .select({
         bookId: schema.books.id,
         title: schema.bookMetadata.title,
+        isbn10: schema.bookMetadata.isbn10,
+        isbn13: schema.bookMetadata.isbn13,
+        language: schema.bookMetadata.language,
         seriesName: schema.bookMetadata.seriesName,
         seriesIndex: schema.bookMetadata.seriesIndex,
         metadataUpdatedAt: schema.bookMetadata.updatedAt,
+        coverUpdatedAt: schema.bookMetadata.coverUpdatedAt,
         fileFormat: schema.bookFiles.format,
         fileSizeBytes: schema.bookFiles.sizeBytes,
+        fileMediaOverlayAvailable: schema.bookFiles.mediaOverlayAvailable,
         fileHash: schema.bookFiles.fileHash,
+        fileId: schema.bookFiles.id,
+        fileAbsolutePath: schema.bookFiles.absolutePath,
+        isFixedLayout: schema.bookFiles.isFixedLayout,
         authorNamesCsv: sql<string>`coalesce(string_agg(${schema.authors.name}, ',' ORDER BY ${schema.bookAuthors.displayOrder}, ${schema.bookAuthors.authorId}), '')`,
       })
       .from(schema.books)
@@ -979,12 +1247,19 @@ export class KoboSyncService {
       .groupBy(
         schema.books.id,
         schema.bookMetadata.title,
+        schema.bookMetadata.isbn10,
+        schema.bookMetadata.isbn13,
+        schema.bookMetadata.language,
         schema.bookMetadata.seriesName,
         schema.bookMetadata.seriesIndex,
         schema.bookMetadata.updatedAt,
+        schema.bookMetadata.coverUpdatedAt,
         schema.bookFiles.format,
         schema.bookFiles.sizeBytes,
         schema.bookFiles.fileHash,
+        schema.bookFiles.id,
+        schema.bookFiles.absolutePath,
+        schema.bookFiles.isFixedLayout,
       );
 
     const identitiesById = await this.bookIdentityService.ensureForBooks(
@@ -993,16 +1268,20 @@ export class KoboSyncService {
       needsLegacyNumericRemovalForNewMappings,
     );
 
+    const fixedLayoutByFileId = backfillFixedLayout ? await this.backfillFixedLayout(rows) : new Map<number, boolean>();
+
     return rows.map((row) => {
-      const delivery = this.getDeliveryInfo(row.fileFormat, row.fileSizeBytes, deliverySettings);
+      const isFixedLayout = row.isFixedLayout ?? fixedLayoutByFileId.get(row.fileId) ?? null;
+      const delivery = this.getDeliveryInfo(row.fileFormat, deliverySizeBytes(row), deliverySettings, isFixedLayout);
       const identity = identitiesById.get(row.bookId);
       const coverImageId = identity
-        ? this.bookIdentityService.buildVersionedCoverImageId(identity.coverImageId, row.metadataUpdatedAt)
+        ? this.bookIdentityService.buildVersionedCoverImageId(identity.coverImageId, row.coverUpdatedAt)
         : String(row.bookId);
       return {
         bookId: row.bookId,
         fileHash: row.fileHash,
         deliveryHash: delivery.hash,
+        coverImageId,
         metadataHash: this.buildMetadataHash({
           title: row.title,
           authors: row.authorNamesCsv ? row.authorNamesCsv.split(',').filter((name) => name.length > 0) : [],
@@ -1011,6 +1290,8 @@ export class KoboSyncService {
           metadataUpdatedAt: row.metadataUpdatedAt,
           entitlementId: identity?.entitlementId ?? String(row.bookId),
           coverImageId,
+          language: normalizeKoboLanguage(row.language),
+          isbn: selectKoboIsbn(row.isbn13, row.isbn10),
         }),
         needsLegacyNumericRemoval: identity?.needsLegacyNumericRemoval ?? false,
       };
@@ -1039,12 +1320,17 @@ export class KoboSyncService {
         publishedDate: schema.bookMetadata.publishedDate,
         publishedYear: schema.bookMetadata.publishedYear,
         language: schema.bookMetadata.language,
+        isbn10: schema.bookMetadata.isbn10,
+        isbn13: schema.bookMetadata.isbn13,
         seriesName: schema.bookMetadata.seriesName,
         seriesIndex: schema.bookMetadata.seriesIndex,
         fileFormat: schema.bookFiles.format,
         fileSizeBytes: schema.bookFiles.sizeBytes,
+        fileMediaOverlayAvailable: schema.bookFiles.mediaOverlayAvailable,
         fileHash: schema.bookFiles.fileHash,
+        isFixedLayout: schema.bookFiles.isFixedLayout,
         metadataUpdatedAt: schema.bookMetadata.updatedAt,
+        coverUpdatedAt: schema.bookMetadata.coverUpdatedAt,
         addedAt: schema.books.addedAt,
         updatedAt: schema.books.updatedAt,
       })
@@ -1095,10 +1381,12 @@ export class KoboSyncService {
     const byId = new Map<number, KoboBookEntry>();
     for (const row of rows) {
       const authors = authorsByBook.get(row.bookId) ?? [];
-      const delivery = this.getDeliveryInfo(row.fileFormat, row.fileSizeBytes, deliverySettings);
+      const delivery = this.getDeliveryInfo(row.fileFormat, deliverySizeBytes(row), deliverySettings, row.isFixedLayout);
       const identity = identitiesById.get(row.bookId);
       if (!identity) continue;
-      const coverImageId = this.bookIdentityService.buildVersionedCoverImageId(identity.coverImageId, row.metadataUpdatedAt);
+      const coverImageId = this.bookIdentityService.buildVersionedCoverImageId(identity.coverImageId, row.coverUpdatedAt);
+      const language = normalizeKoboLanguage(row.language);
+      const isbn = selectKoboIsbn(row.isbn13, row.isbn10);
       byId.set(row.bookId, {
         bookId: row.bookId,
         koboEntitlementId: identity.entitlementId,
@@ -1109,7 +1397,8 @@ export class KoboSyncService {
         publisher: row.publisher,
         publishedDate: row.publishedDate,
         publishedYear: row.publishedYear,
-        language: row.language,
+        language,
+        isbn,
         seriesName: row.seriesName,
         seriesIndex: row.seriesIndex,
         fileFormat: row.fileFormat ?? 'epub',
@@ -1124,6 +1413,8 @@ export class KoboSyncService {
           metadataUpdatedAt: row.metadataUpdatedAt,
           entitlementId: identity.entitlementId,
           coverImageId,
+          language,
+          isbn,
         }),
         metadataUpdatedAt: row.metadataUpdatedAt,
         collectionNames: collectionsByBook.get(row.bookId) ?? [],

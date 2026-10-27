@@ -1,8 +1,55 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { AnyColumn, SQL, sql } from 'drizzle-orm';
 
-import type { SortField, SortSpec } from '@bookorbit/types';
-import { bookMetadata, books } from '../../db/schema';
+import { MAX_RANDOM_SORT_SEED, parseCustomSortFieldId } from '@bookorbit/types';
+import type { CustomMetadataFieldType, CustomMetadataFieldTypeMap, SortField, SortSpec } from '@bookorbit/types';
+import {
+  authors,
+  bookAuthors,
+  bookMetadata,
+  bookNarrators,
+  bookSeries,
+  bookSeriesMemberships,
+  books,
+  collectionBooks,
+  narrators,
+} from '../../db/schema';
+import { seriesIndexOrderBy } from '../../common/utils/series-index-sql.utils';
+
+export type BookSortContext = {
+  defaultCollectionId?: number;
+  /** Seed for the `random` sort field. See `resolveRandomSortSeed`. */
+  randomSeed?: number;
+  query?: string;
+};
+
+/**
+ * Browsing clients send a seed so every page uses the same shuffle and a fresh visit reshuffles.
+ * Other callers fall back to a per-user daily seed to keep pagination coherent within a day.
+ */
+export function resolveRandomSortSeed(context: BookSortContext | undefined, userId: number | undefined): number {
+  const seed = context?.randomSeed;
+  if (seed !== undefined && Number.isSafeInteger(seed) && seed >= 0 && seed <= MAX_RANDOM_SORT_SEED) return seed;
+  return Math.floor(Date.now() / 86_400_000) + (userId ?? 0);
+}
+
+const CUSTOM_VALUE_COLUMNS: Record<CustomMetadataFieldType, string> = {
+  text: 'value_text',
+  url: 'value_text',
+  number: 'value_number',
+  date: 'value_date',
+  boolean: 'value_boolean',
+};
+
+/**
+ * Column of `book_custom_metadata_values` holding this field's values, or null
+ * when the id does not resolve to an active field (archived or deleted since
+ * the sort was saved).
+ */
+export function customMetadataValueColumn(fieldId: number, fieldTypes: CustomMetadataFieldTypeMap | undefined): string | null {
+  const type = fieldTypes?.get(fieldId);
+  return type ? (CUSTOM_VALUE_COLUMNS[type] ?? null) : null;
+}
 
 const SORT_FIELD_MAP: Partial<Record<SortField, AnyColumn>> = {
   title: bookMetadata.title,
@@ -18,12 +65,12 @@ const SORT_FIELD_MAP: Partial<Record<SortField, AnyColumn>> = {
 
 @Injectable()
 export class BookSortBuilder {
-  build(sort: SortSpec[], userId?: number): SQL[] {
+  build(sort: SortSpec[], userId?: number, customFieldTypes?: CustomMetadataFieldTypeMap, context?: BookSortContext): SQL[] {
     const result: SQL[] = [];
     for (const { field, dir } of sort) {
       const D = this.normalizeDir(dir);
       if (!D) continue;
-      this.appendField(result, field, D, sort, userId);
+      this.appendField(result, field, D, sort, userId, customFieldTypes, context);
     }
     if (result.length === 0) result.push(sql`${bookMetadata.title} ASC NULLS LAST`);
     result.push(sql`${books.id} ASC`);
@@ -35,8 +82,33 @@ export class BookSortBuilder {
     return d === 'ASC' || d === 'DESC' ? d : null;
   }
 
-  private appendField(result: SQL[], field: SortField, D: 'ASC' | 'DESC', allSorts: SortSpec[], userId?: number): void {
+  private appendField(
+    result: SQL[],
+    field: SortField,
+    D: 'ASC' | 'DESC',
+    allSorts: SortSpec[],
+    userId?: number,
+    customFieldTypes?: CustomMetadataFieldTypeMap,
+    context?: BookSortContext,
+  ): void {
+    const customFieldId = parseCustomSortFieldId(field);
+    if (customFieldId !== null) {
+      const column = customMetadataValueColumn(customFieldId, customFieldTypes);
+      if (!column) return;
+      result.push(
+        sql`(SELECT v.${sql.raw(column)} FROM book_custom_metadata_values v WHERE v.book_id = books.id AND v.field_id = ${customFieldId}) ${sql.raw(D)} NULLS LAST`,
+      );
+      return;
+    }
+
     switch (field) {
+      case 'relevance': {
+        const q = context?.query?.trim();
+        if (!q) throw new BadRequestException('relevance sort requires a non-empty search query');
+        result.push(sql`${this.buildRelevanceScore(q)} ${sql.raw(D)}`);
+        result.push(sql`${bookMetadata.title} ASC NULLS LAST`);
+        break;
+      }
       case 'author':
         result.push(sql`${books.primaryAuthorSortName} ${sql.raw(D)} NULLS LAST`);
         break;
@@ -52,7 +124,7 @@ export class BookSortBuilder {
       case 'lastReadAt':
         if (userId === undefined) throw new BadRequestException('lastReadAt sort requires an authenticated user');
         result.push(
-          sql`(SELECT max(rp.updated_at) FROM reading_progress rp INNER JOIN book_files bf ON rp.book_file_id = bf.id WHERE bf.book_id = books.id AND rp.user_id = ${userId}) ${sql.raw(D)} NULLS LAST`,
+          sql`(SELECT max(rp.last_read_at) FROM reading_progress rp INNER JOIN book_files bf ON rp.book_file_id = bf.id WHERE bf.book_id = books.id AND rp.user_id = ${userId}) ${sql.raw(D)} NULLS LAST`,
         );
         break;
       case 'finishedAt':
@@ -73,10 +145,18 @@ export class BookSortBuilder {
           sql`(SELECT ubr.rating FROM user_book_ratings ubr WHERE ubr.book_id = books.id AND ubr.user_id = ${userId}) ${sql.raw(D)} NULLS LAST`,
         );
         break;
+      case 'collectionOrder': {
+        const collectionId = context?.defaultCollectionId;
+        if (collectionId === undefined) throw new BadRequestException('collectionOrder sort requires a collection scope');
+        if (!Number.isSafeInteger(collectionId) || collectionId <= 0) throw new BadRequestException('Invalid collection id for collectionOrder sort');
+        result.push(
+          sql`(SELECT ${collectionBooks.position} FROM ${collectionBooks} WHERE ${collectionBooks.collectionId} = ${collectionId} AND ${collectionBooks.bookId} = ${books.id}) ${sql.raw(D)} NULLS LAST`,
+        );
+        break;
+      }
       case 'random': {
-        const daySeed = Math.floor(Date.now() / 86_400_000);
-        const scopedSeed = daySeed + (userId ?? 0);
-        result.push(sql`md5(${books.id}::text || ':' || ${scopedSeed}::text) ${sql.raw(D)}`);
+        const seed = resolveRandomSortSeed(context, userId);
+        result.push(sql`md5(${books.id}::text || ':' || ${seed}::text) ${sql.raw(D)}`);
         result.push(sql`${books.id} ${sql.raw(D)}`);
         break;
       }
@@ -92,6 +172,12 @@ export class BookSortBuilder {
       case 'publishedYear':
         result.push(sql`${bookMetadata.publishedYear} ${sql.raw(D)} NULLS LAST`);
         break;
+      case 'seriesIndex':
+        result.push(...seriesIndexOrderBy(bookMetadata.seriesIndex, D));
+        if (!allSorts.some((s) => s.field === 'series')) {
+          result.push(sql`${bookMetadata.seriesName} ${sql.raw(D)} NULLS LAST`);
+        }
+        break;
       case 'format':
         result.push(sql.raw(`(SELECT bf.format FROM book_files bf WHERE bf.id = books.primary_file_id) ${D} NULLS LAST`));
         break;
@@ -99,10 +185,43 @@ export class BookSortBuilder {
         const col = SORT_FIELD_MAP[field];
         if (!col) return;
         result.push(sql`${col} ${sql.raw(D)} NULLS LAST`);
-        if (field === 'seriesIndex' && !allSorts.some((s) => s.field === 'series')) {
-          result.push(sql`${bookMetadata.seriesName} ${sql.raw(D)} NULLS LAST`);
-        }
       }
     }
   }
+
+  private buildRelevanceScore(query: string): SQL {
+    const title = searchTextScore(bookMetadata.title, query, 1000, 850, 650, 400);
+    const legacySeries = searchTextScore(bookMetadata.seriesName, query, 700, 620, 500, 300);
+    const author = sql`COALESCE((
+      SELECT max(${searchTextScore(authors.name, query, 800, 700, 550, 350)})
+      FROM ${bookAuthors}
+      INNER JOIN ${authors} ON ${authors.id} = ${bookAuthors.authorId}
+      WHERE ${bookAuthors.bookId} = ${books.id}
+    ), 0)`;
+    const series = sql`COALESCE((
+      SELECT max(${searchTextScore(bookSeries.name, query, 700, 620, 500, 300)})
+      FROM ${bookSeriesMemberships}
+      INNER JOIN ${bookSeries} ON ${bookSeries.id} = ${bookSeriesMemberships.seriesId}
+      WHERE ${bookSeriesMemberships.bookId} = ${books.id}
+    ), 0)`;
+    const narrator = sql`COALESCE((
+      SELECT max(${searchTextScore(narrators.name, query, 500, 440, 360, 240)})
+      FROM ${bookNarrators}
+      INNER JOIN ${narrators} ON ${narrators.id} = ${bookNarrators.narratorId}
+      WHERE ${bookNarrators.bookId} = ${books.id}
+    ), 0)`;
+
+    return sql`GREATEST(${title}, ${author}, ${legacySeries}, ${series}, ${narrator})`;
+  }
+}
+
+function searchTextScore(value: AnyColumn | SQL, query: string, exact: number, prefix: number, contains: number, fuzzy: number): SQL {
+  const normalizedValue = sql`lower(public.bookorbit_unaccent(COALESCE(${value}, '')))`;
+  const normalizedQuery = sql`lower(public.bookorbit_unaccent(${query}))`;
+  return sql`CASE
+    WHEN ${normalizedValue} = ${normalizedQuery} THEN ${exact}
+    WHEN ${normalizedValue} LIKE ${normalizedQuery} || '%' THEN ${prefix}
+    WHEN ${normalizedValue} LIKE '%' || ${normalizedQuery} || '%' THEN ${contains}
+    ELSE similarity(${normalizedValue}, ${normalizedQuery}) * ${fuzzy}
+  END`;
 }

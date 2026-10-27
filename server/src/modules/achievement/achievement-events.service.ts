@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { EventEmitter } from 'events';
+import type { ReadingSessionSource } from '@bookorbit/types';
 
 export const ACHIEVEMENT_EVENT_READING_SESSION_SAVED = 'reading-session.saved';
 export const ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED = 'book.status-changed';
@@ -10,6 +11,7 @@ export const ACHIEVEMENT_EVENT_BACKFILL = 'achievement.backfill';
 export const ACHIEVEMENT_EVENT_ACHIEVEMENT_AWARDED = 'achievement.awarded';
 export const ACHIEVEMENT_EVENT_BOOK_RATING_CHANGED = 'book.rating-changed';
 export const ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED = 'book.progress-changed';
+export const ACHIEVEMENT_EVENT_BOOK_HARDCOVER_EDITION_CHANGED = 'book.hardcover-edition-changed';
 
 export interface ReadingSessionSavedPayload {
   userId: number;
@@ -20,6 +22,7 @@ export interface ReadingSessionSavedPayload {
   progressDelta: number | null;
   endProgress: number | null;
   timezone: string;
+  source: ReadingSessionSource;
 }
 
 export interface BookStatusChangedPayload {
@@ -60,6 +63,12 @@ export interface BookProgressChangedPayload {
   source: 'koreader' | 'kobo' | 'web_reader';
 }
 
+export interface BookHardcoverEditionChangedPayload {
+  userId: number;
+  bookId: number;
+  hardcoverEditionId: string;
+}
+
 export type AchievementEventPayload =
   | ReadingSessionSavedPayload
   | BookStatusChangedPayload
@@ -67,7 +76,8 @@ export type AchievementEventPayload =
   | CollectionCreatedPayload
   | LibraryCatalogChangedPayload
   | BookRatingChangedPayload
-  | BookProgressChangedPayload;
+  | BookProgressChangedPayload
+  | BookHardcoverEditionChangedPayload;
 
 @Injectable()
 export class AchievementEventsService extends EventEmitter {}

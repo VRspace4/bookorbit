@@ -2,8 +2,9 @@ import { Inject, Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } f
 import { watch, type FSWatcher } from 'chokidar';
 import { eq } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { stat } from 'fs/promises';
 import { dirname, sep } from 'path';
+import { SelfWriteRegistry } from '../../common/services/self-write-registry.service';
+import { normalizeWatchEvent, waitForWatcherReady, type WatchEventType } from '../../common/utils/fs-watch.utils';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 
 import { DB } from '../../db';
@@ -12,10 +13,9 @@ import { libraries, libraryFolders } from '../../db/schema';
 import { ScanGateway } from './scan.gateway';
 import { ScannerService } from './scanner.service';
 import { FileEventProcessorService, type FileEventResult } from './file-event-processor.service';
-import { classifyFile } from './lib/classify';
 
 type Db = NodePgDatabase<typeof schema>;
-type EventType = 'delete' | 'create';
+type EventType = WatchEventType;
 
 export const WATCHER_DEBOUNCE_MS = 500;
 const DEBOUNCE_MS = WATCHER_DEBOUNCE_MS;
@@ -35,6 +35,8 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
   private pendingCrossLibraryReconcileTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly suppressedDirScans = new Map<number, Set<string>>();
   private readonly suppressedDirScanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Watchers kept alive but detached from event delivery while their library moves its own files. */
+  private readonly pausedWatchers = new Map<number, FSWatcher[]>();
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -42,6 +44,7 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     private readonly processor: FileEventProcessorService,
     private readonly gateway: ScanGateway,
     private readonly scannerService: ScannerService,
+    private readonly selfWriteRegistry: SelfWriteRegistry,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
@@ -107,6 +110,11 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       for (const subs of this.subscriptions.values()) {
         for (const sub of subs) await sub.close();
       }
+      // A run that was still in flight can leave a paused watcher behind; it owns handles too.
+      for (const subs of this.pausedWatchers.values()) {
+        for (const sub of subs) await sub.close();
+      }
+      this.pausedWatchers.clear();
       this.subscriptions.clear();
       this.watchedLibraryPaths.clear();
       this.logger.log(`[${event}] [end] durationMs=${Date.now() - startedAt} - watcher destroy completed`);
@@ -131,6 +139,9 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     try {
       const results = await this.processor.reconcileMissingBooks(libraryIds);
       for (const result of results) {
+        if (result.type === 'book-restored' || result.type === 'book-moved' || result.type === 'book-transferred') {
+          this.scannerService.reconcileCoverSlotsAsync(result.bookIds);
+        }
         if (result.type === 'book-missing') {
           this.scannerService.bufferBookMissingEvent(result.libraryId, result.bookIds);
           this.scannerService.bufferBooksUnavailableNotification(result.libraryId, result.bookIds);
@@ -222,14 +233,23 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     }
   }
 
+  /**
+   * Stops watching a library and releases its operating system handles.
+   *
+   * `close()` unwinds one handle per watched directory and blocks for seconds on a large library,
+   * so callers that only need the watcher to stop reacting to their own writes should use
+   * {@link pauseWatcher} instead.
+   */
   async stopWatcher(libraryId: number): Promise<void> {
     const event = 'scanner.watcher.stop';
     const startedAt = Date.now();
     this.logger.log(`[${event}] [start] libraryId=${libraryId} - watcher stop requested`);
     try {
       this.watchedLibraryPaths.delete(libraryId);
-      const existing = this.subscriptions.get(libraryId);
-      if (!existing) {
+      const paused = this.pausedWatchers.get(libraryId) ?? [];
+      this.pausedWatchers.delete(libraryId);
+      const existing = [...(this.subscriptions.get(libraryId) ?? []), ...paused];
+      if (existing.length === 0) {
         this.logger.log(`[${event}] [end] libraryId=${libraryId} durationMs=${Date.now() - startedAt} hadWatcher=false - watcher stop completed`);
         return;
       }
@@ -251,6 +271,45 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       );
       throw err;
     }
+  }
+
+  /**
+   * Makes a library's watcher stop delivering events without tearing it down, for callers that are
+   * about to move files themselves.
+   *
+   * Every event is gated on library membership in `subscriptions`: `schedule` returns immediately
+   * for a library that is absent, and a timer that is already pending is discarded when it fires.
+   * So removing the entry is what actually silences the watcher. Closing it as well would release
+   * one handle per watched directory, which measured 9.5s of blocking work across 944 directories
+   * on a real library, followed by a full re-walk to rebuild it.
+   *
+   * @returns whether a live watcher was paused, so the caller knows if it must resume one.
+   */
+  pauseWatcher(libraryId: number): boolean {
+    const event = 'scanner.watcher.pause';
+    const subs = this.subscriptions.get(libraryId);
+    if (!subs) return false;
+
+    this.subscriptions.delete(libraryId);
+    this.pausedWatchers.set(libraryId, subs);
+    this.clearPendingTimersForLibrary(libraryId);
+    this.clearLibraryFolderScanSuppressions(libraryId);
+
+    this.logger.log(`[${event}] [end] libraryId=${libraryId} watcherCount=${subs.length} - watcher paused`);
+    return true;
+  }
+
+  /** Re-arms a paused watcher. Anything that happened while it was paused is intentionally lost. */
+  resumeWatcher(libraryId: number): boolean {
+    const event = 'scanner.watcher.resume';
+    const paused = this.pausedWatchers.get(libraryId);
+    if (!paused) return false;
+
+    this.pausedWatchers.delete(libraryId);
+    this.subscriptions.set(libraryId, paused);
+
+    this.logger.log(`[${event}] [end] libraryId=${libraryId} watcherCount=${paused.length} - watcher resumed`);
+    return true;
   }
 
   private scheduleFolderScan(filePath: string, libraryId: number): void {
@@ -363,9 +422,26 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
     return false;
   }
 
+  // The candidate walk skips every hidden entry, so an event for one can never describe a book
+  // file. Reacting to them only produces spurious work, and the write path's own
+  // .bookorbit-write-* temp file would otherwise schedule a rescan of the very book being written.
+  private isHiddenLibraryPath(path: string, libraryId: number): boolean {
+    for (const root of this.watchedLibraryPaths.get(libraryId) ?? []) {
+      if (path === root) return false;
+      if (!path.startsWith(root + sep)) continue;
+      return path
+        .slice(root.length + 1)
+        .split(sep)
+        .some((segment) => segment.startsWith('.'));
+    }
+    return false;
+  }
+
   private schedule(type: EventType, path: string, libraryId: number): void {
     // Guard orphaned timers - ignore events for unwatched libraries
     if (!this.subscriptions.has(libraryId)) return;
+
+    if (this.isHiddenLibraryPath(path, libraryId)) return;
 
     // Dir-level coalescing - if there's already a pending folder scan
     // for this file's directory, don't schedule individual file processing
@@ -375,37 +451,44 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
 
     const existing = this.pendingTimers.get(path);
     if (existing) clearTimeout(existing.timer);
-    const timer = setTimeout(() => {
+    const timer = this.createPendingTimer(path);
+    this.pendingTimers.set(path, { timer, type, libraryId });
+  }
+
+  private createPendingTimer(path: string): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      const entry = this.pendingTimers.get(path);
+      if (!entry) return;
+      if (!this.subscriptions.has(entry.libraryId)) {
+        this.pendingTimers.delete(path);
+        return;
+      }
+      if (this.selfWriteRegistry.isSuppressed(path)) {
+        entry.timer = this.createPendingTimer(path);
+        return;
+      }
+
       this.pendingTimers.delete(path);
-      this.process(type, path, libraryId).catch((err) =>
+      this.process(entry.type, path, entry.libraryId).catch((err) =>
         this.logger.error(
-          `[scanner.watcher.process_event] [fail] libraryId=${libraryId} type=${type} path="${sanitizeLogValue(path)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - file event processing failed`,
+          `[scanner.watcher.process_event] [fail] libraryId=${entry.libraryId} type=${entry.type} path="${sanitizeLogValue(path)}" errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - file event processing failed`,
         ),
       );
     }, DEBOUNCE_MS);
-    this.pendingTimers.set(path, { timer, type, libraryId });
   }
 
   private async process(type: EventType, path: string, libraryId: number): Promise<void> {
     let result: FileEventResult;
     if (type === 'create') {
       result = await this.processor.handleCreate(path, libraryId);
-      if (result.type === 'noop') {
-        const pathStat = await stat(path).catch(() => null);
-        if (pathStat?.isDirectory()) {
-          // A created directory can be either one book folder or a grouping folder
-          // containing many books, so scan that subtree instead of one synthetic child.
+      if (result.type === 'scan-required') {
+        if (result.scope === 'directory') {
           this.suppressFolderScansForDir(path, libraryId);
           this.scannerService.scanBookDirectoryAsync(path, libraryId);
           return;
         }
-        // Only schedule a scan for unrecognized content-format files. Supplementary
-        // files (covers, metadata, .lit, etc.) don't need a full scan on creation.
-        const { role } = classifyFile(path);
-        if (role === 'content') {
-          if (this.isFolderScanSuppressed(path, libraryId) && this.scannerService.isScanRunning(libraryId)) return;
-          this.scheduleFolderScan(path, libraryId);
-        }
+        if (this.isFolderScanSuppressed(path, libraryId) && this.scannerService.isScanRunning(libraryId)) return;
+        this.scheduleFolderScan(path, libraryId);
         return;
       }
     } else {
@@ -413,6 +496,10 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       if (result.type === 'noop') {
         result = await this.processor.handleUnlinkDir(path, libraryId);
       }
+    }
+
+    if (result.type === 'book-restored' || result.type === 'book-moved' || result.type === 'book-transferred') {
+      this.scannerService.reconcileCoverSlotsAsync(result.bookIds);
     }
 
     if (result.type === 'book-missing') {
@@ -424,6 +511,8 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.scannerService.bufferBooksRestoredNotification(result.libraryId, result.bookIds);
     } else if (result.type === 'book-moved') {
       this.gateway.emitBookMoved({ libraryId: result.libraryId, bookIds: result.bookIds });
+      // The new path is already recorded, so the folder scan below cannot see the move regex rules read.
+      this.scannerService.refreshRegexMetadataAfterMoveAsync(result.bookIds);
       // A move updates the file's path and may consolidate virtual-sibling books.
       // Schedule a folder scan so upsertBook can drain any remaining siblings.
       if (type === 'create') this.scheduleFolderScan(path, libraryId);
@@ -431,26 +520,4 @@ export class FileWatcherService implements OnApplicationBootstrap, OnModuleDestr
       this.gateway.emitBookTransferred({ fromLibraryId: result.fromLibraryId, toLibraryId: result.toLibraryId, bookIds: result.bookIds });
     }
   }
-}
-
-function normalizeWatchEvent(eventName: string): EventType | null {
-  if (eventName === 'unlink' || eventName === 'unlinkDir') return 'delete';
-  if (eventName === 'add' || eventName === 'addDir' || eventName === 'change') return 'create';
-  return null;
-}
-
-function waitForWatcherReady(watcher: FSWatcher): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const handleReady = () => {
-      watcher.off('error', handleError);
-      resolve();
-    };
-    const handleError = (error: unknown) => {
-      watcher.off('ready', handleReady);
-      reject(error instanceof Error ? error : new Error(String(error)));
-    };
-
-    watcher.once('ready', handleReady);
-    watcher.once('error', handleError);
-  });
 }

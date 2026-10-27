@@ -22,8 +22,13 @@ function makeController() {
     exchange: vi.fn().mockResolvedValue({ books: [] }),
     exchangeAck: vi.fn().mockResolvedValue({ ok: true }),
   };
+  const bookmarkExchangeService = {
+    exchange: vi.fn().mockResolvedValue({ results: [], unmatched: [] }),
+    exchangeAck: vi.fn().mockResolvedValue({ results: [], unmatched: [] }),
+  };
   const packageService = {
     getVersionInfo: vi.fn().mockResolvedValue({ pluginVersion: '0.4.0', serverVersion: '1.0.0' }),
+    getVersionInfoForSelfUpdate: vi.fn().mockResolvedValue({ pluginVersion: '0.4.0', serverVersion: '1.0.0' }),
     buildPluginPackage: vi.fn().mockResolvedValue(Buffer.from('fake-zip-content')),
     buildRawPluginPackage: vi.fn().mockResolvedValue(Buffer.from('fake-zip-content')),
   };
@@ -34,10 +39,12 @@ function makeController() {
       statsService as never,
       annotationService as never,
       annotationExchangeService as never,
+      bookmarkExchangeService as never,
       packageService as never,
     ),
     pluginService,
     statsService,
+    bookmarkExchangeService,
     annotationService,
     annotationExchangeService,
     packageService,
@@ -100,6 +107,26 @@ describe('KoreaderPluginController', () => {
     expect(annotationExchangeService.exchangeAck).toHaveBeenCalledWith(user, dto);
   });
 
+  it('exchangeBookmarks delegates to bookmark exchange service', async () => {
+    const { controller, bookmarkExchangeService } = makeController();
+    const user = { id: 7 } as never;
+    const dto = {} as never;
+
+    await controller.exchangeBookmarks(user, dto);
+
+    expect(bookmarkExchangeService.exchange).toHaveBeenCalledWith(user, dto);
+  });
+
+  it('exchangeBookmarksAck delegates to bookmark exchange service', async () => {
+    const { controller, bookmarkExchangeService } = makeController();
+    const user = { id: 7 } as never;
+    const dto = {} as never;
+
+    await controller.exchangeBookmarksAck(user, dto);
+
+    expect(bookmarkExchangeService.exchangeAck).toHaveBeenCalledWith(user, dto);
+  });
+
   it('uploadBookStates delegates to plugin service', async () => {
     const { controller, pluginService } = makeController();
     const user = { id: 7 } as never;
@@ -130,13 +157,29 @@ describe('KoreaderPluginController', () => {
     expect(pluginService.sweepComplete).toHaveBeenCalledWith(user, dto);
   });
 
-  it('getVersion returns plugin and server versions from package service', async () => {
+  it('getVersion passes the authenticated user and device identity to the self-update gate', async () => {
+    const { controller, packageService } = makeController();
+    const user = { id: 7 } as never;
+
+    const result = await controller.getVersion(user, 'device-1', '1.5.4');
+
+    expect(packageService.getVersionInfoForSelfUpdate).toHaveBeenCalledWith(7, {
+      deviceId: 'device-1',
+      pluginVersion: '1.5.4',
+    });
+    expect(packageService.getVersionInfo).not.toHaveBeenCalled();
+    expect(result).toEqual({ pluginVersion: '0.4.0', serverVersion: '1.0.0' });
+  });
+
+  it('getVersion preserves absent identity headers for the legacy fallback', async () => {
     const { controller, packageService } = makeController();
 
-    const result = await controller.getVersion();
+    await controller.getVersion({ id: 7 } as never, undefined, undefined);
 
-    expect(packageService.getVersionInfo).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ pluginVersion: '0.4.0', serverVersion: '1.0.0' });
+    expect(packageService.getVersionInfoForSelfUpdate).toHaveBeenCalledWith(7, {
+      deviceId: undefined,
+      pluginVersion: undefined,
+    });
   });
 
   it('downloadUpdatePackage builds a raw package and streams it with correct headers', async () => {

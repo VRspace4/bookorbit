@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mediaSessionMock = vi.hoisted(() => ({
-  setMetadata: vi.fn(async () => undefined),
-  setPlaybackState: vi.fn(async () => undefined),
-  setActionHandler: vi.fn(async () => undefined),
-  setPositionState: vi.fn(async () => undefined),
+  setMetadata: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+  setPlaybackState: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+  setActionHandler: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+  setPositionState: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
 }))
 
 vi.mock('@jofr/capacitor-media-session', () => ({
@@ -90,13 +90,9 @@ describe('tts media session', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    const registered = mediaSessionMock.setActionHandler.mock.calls.map(
-      (call) => (call[0] as { action: string }).action,
-    )
+    const registered = mediaSessionMock.setActionHandler.mock.calls.map((call) => ((call as unknown[])[0] as { action: string }).action)
 
-    expect(registered).toEqual(
-      expect.arrayContaining(['play', 'pause', 'stop', 'previoustrack', 'nexttrack', 'seekbackward', 'seekforward']),
-    )
+    expect(registered).toEqual(expect.arrayContaining(['play', 'pause', 'stop', 'previoustrack', 'nexttrack', 'seekbackward', 'seekforward']))
     expect(registered).toContain('pause')
     expect(mediaSessionMock.setActionHandler.mock.calls.length).toBeGreaterThanOrEqual(7)
   })

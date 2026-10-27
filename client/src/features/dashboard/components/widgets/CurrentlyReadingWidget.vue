@@ -2,7 +2,7 @@
 import { BookOpen, Play } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { FORMAT_TO_GROUP } from '@bookorbit/types'
+import { isComicFormat } from '@bookorbit/types'
 
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import BookCoverArtwork from '@/features/book/components/BookCoverArtwork.vue'
@@ -19,7 +19,7 @@ function goToBook(bookId: number) {
 }
 
 function isComic(fileFormat: string | null): boolean {
-  return fileFormat != null && FORMAT_TO_GROUP[fileFormat] === 'cbx'
+  return fileFormat != null && isComicFormat(fileFormat)
 }
 
 function continueReading(bookId: number, fileId: number | null, fileFormat: string | null) {
@@ -34,17 +34,17 @@ function continueReading(bookId: number, fileId: number | null, fileFormat: stri
 <template>
   <div class="flex h-full flex-col p-3">
     <div class="mb-3 flex items-center gap-2 self-start">
-      <BookOpen :size="16" class="text-primary/90" />
+      <BookOpen :size="16" class="text-primary" />
       <span class="text-[15px] font-semibold text-foreground">{{ t('dashboard.widgets.currentlyReading.title') }}</span>
     </div>
 
     <!-- Loading -->
     <div v-if="loading" class="flex flex-1 gap-3">
       <div v-for="n in 2" :key="n" class="flex w-full gap-2.5">
-        <div class="h-16 w-11 shrink-0 animate-pulse rounded bg-muted" />
+        <div class="h-16 w-11 shrink-0 animate-pulse rounded-xs bg-muted" />
         <div class="flex-1 space-y-2">
-          <div class="h-3 w-3/4 animate-pulse rounded bg-muted" />
-          <div class="h-2.5 w-1/2 animate-pulse rounded bg-muted" />
+          <div class="h-3 w-3/4 animate-pulse rounded-xs bg-muted" />
+          <div class="h-2.5 w-1/2 animate-pulse rounded-xs bg-muted" />
           <div class="mt-1 h-1.5 w-full animate-pulse rounded-full bg-muted" />
         </div>
       </div>
@@ -58,7 +58,7 @@ function continueReading(bookId: number, fileId: number | null, fileFormat: stri
     <!-- Empty -->
     <div v-else-if="!data || data.books.length === 0" class="flex flex-1 flex-col items-center justify-center gap-2">
       <div class="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-        <BookOpen :size="16" class="text-muted-foreground/60" />
+        <BookOpen :size="16" class="text-muted-foreground" />
       </div>
       <p class="text-center text-xs text-muted-foreground">{{ t('dashboard.widgets.currentlyReading.empty') }}</p>
     </div>
@@ -75,7 +75,7 @@ function continueReading(bookId: number, fileId: number | null, fileFormat: stri
           <!-- Cover thumbnail -->
           <BookCoverSurface
             size="mini"
-            class="book-cover-surface--spine-fitted h-14 w-9 shrink-0 overflow-hidden rounded"
+            class="book-cover-surface--spine-fitted h-14 w-9 shrink-0 overflow-hidden rounded-xs"
             :is-comic="isComic(book.fileFormat)"
           >
             <BookCoverArtwork

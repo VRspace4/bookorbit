@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   ArrowLeft,
@@ -8,15 +9,21 @@ import {
   BookmarkCheck,
   CircleHelp,
   Clock3,
+  Columns3,
   FileText,
+  Headphones,
   Maximize,
   Minimize,
+  Pin,
+  PinOff,
   Search,
   Settings,
   Volume2,
 } from '@lucide/vue'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { useMediaQuery } from '@vueuse/core'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import ReaderSettingsSheet from '@/features/reader/shared/components/ReaderSettingsSheet.vue'
 import { useFullscreen } from '../../shared/composables/useFullscreen'
 
 const { t } = useI18n()
@@ -28,6 +35,11 @@ const props = defineProps<{
   footerMode: 0 | 1 | 2
   peekMode?: boolean
   ttsActive?: boolean
+  isTtsActive?: boolean
+  isTtsAvailable?: boolean
+  isMediaOverlay?: boolean
+  isPinned?: boolean
+  showTapZones?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -41,12 +53,29 @@ const emit = defineEmits<{
   toggleHelp: []
   cycleFooterMode: []
   startReading: []
+  startTts: []
+  togglePin: []
+  toggleTapZones: []
 }>()
 
 const { isFullscreen } = useFullscreen()
 
+// The settings surface is one panel in two containers: an anchored popover where there
+// is room beside the text, a bottom sheet where the thumb is and the page must stay visible.
+const isCompact = useMediaQuery('(max-width: 639px)')
+
+const ttsTooltip = computed(() => {
+  if (props.isTtsActive) return props.isMediaOverlay ? t('reader.header.narrationPlaying') : t('reader.header.ttsPlaying')
+  return props.isMediaOverlay ? t('reader.header.listenWithNarrationShort') : t('reader.header.listen')
+})
+
 function onSettingsOpenChange(open: boolean) {
   emit('update:settingsOpen', open)
+}
+
+/** Mirrors PopoverTrigger on the wide path, so the icon means the same thing in both containers. */
+function toggleSettings() {
+  emit('update:settingsOpen', !props.settingsOpen)
 }
 
 function getFooterModeIcon(mode: 0 | 1 | 2) {
@@ -94,6 +123,7 @@ function getFooterModeTooltip(mode: 0 | 1 | 2): string {
             class="viewer-btn"
             :class="isBookmarked ? '!text-primary' : ''"
             :aria-label="t('reader.header.toggleBookmark')"
+            :aria-pressed="isBookmarked"
             @click="emit('toggleBookmark')"
           >
             <BookmarkCheck v-if="isBookmarked" :size="18" />
@@ -121,18 +151,32 @@ function getFooterModeTooltip(mode: 0 | 1 | 2): string {
         </button>
       </div>
 
+      <Tooltip v-if="props.isTtsAvailable !== false">
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn"
+            :class="props.isTtsActive ? '!text-primary' : ''"
+            :aria-label="props.isMediaOverlay ? t('reader.header.listenWithNarration') : t('reader.header.listenWithTts')"
+            @click="emit('startTts')"
+          >
+            <Headphones :size="18" :class="{ 'animate-pulse': props.isTtsActive }" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{{ ttsTooltip }}</TooltipContent>
+      </Tooltip>
+
       <Tooltip>
         <TooltipTrigger as-child>
           <button
             class="viewer-btn"
             :class="props.ttsActive ? '!bg-muted !text-foreground' : ''"
-            :aria-label="t('reader.header.textToSpeech', 'Text-to-speech')"
+            :aria-label="t('reader.header.textToSpeech')"
             @click="emit('toggleTts')"
           >
             <Volume2 :size="18" />
           </button>
         </TooltipTrigger>
-        <TooltipContent>{{ t('reader.header.textToSpeech', 'Text-to-speech') }}</TooltipContent>
+        <TooltipContent>{{ t('reader.header.textToSpeech') }}</TooltipContent>
       </Tooltip>
 
       <Tooltip>
@@ -176,8 +220,52 @@ function getFooterModeTooltip(mode: 0 | 1 | 2): string {
         <TooltipContent>{{ isFullscreen ? t('reader.header.exitFullscreen') : t('reader.header.enterFullscreen') }}</TooltipContent>
       </Tooltip>
 
-      <DropdownMenu :open="props.settingsOpen" @update:open="onSettingsOpenChange">
-        <DropdownMenuTrigger as-child>
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn hidden sm:flex"
+            :class="props.showTapZones ? '!bg-muted !text-primary' : ''"
+            aria-label="Toggle tap zones"
+            @click="emit('toggleTapZones')"
+          >
+            <Columns3 :size="18" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Show tap zones</TooltipContent>
+      </Tooltip>
+
+      <Tooltip>
+        <TooltipTrigger as-child>
+          <button
+            class="viewer-btn hidden sm:flex"
+            :class="props.isPinned ? '!bg-muted !text-primary' : ''"
+            :aria-label="props.isPinned ? 'Unpin menu' : 'Pin menu'"
+            @click="emit('togglePin')"
+          >
+            <PinOff v-if="props.isPinned" :size="18" />
+            <Pin v-else :size="18" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>{{ props.isPinned ? 'Unpin menu' : 'Pin menu' }}</TooltipContent>
+      </Tooltip>
+
+      <template v-if="isCompact">
+        <button
+          class="viewer-btn"
+          :class="props.settingsOpen ? '!bg-muted !text-foreground' : ''"
+          :title="t('reader.settings.title')"
+          :aria-label="t('reader.settings.ariaLabel')"
+          @click="toggleSettings"
+        >
+          <Settings :size="18" />
+        </button>
+        <ReaderSettingsSheet :open="props.settingsOpen" @update:open="onSettingsOpenChange">
+          <slot name="settingsPanel" />
+        </ReaderSettingsSheet>
+      </template>
+
+      <Popover v-else :open="props.settingsOpen" @update:open="onSettingsOpenChange">
+        <PopoverTrigger as-child>
           <button
             class="viewer-btn"
             :class="props.settingsOpen ? '!bg-muted !text-foreground' : ''"
@@ -186,16 +274,16 @@ function getFooterModeTooltip(mode: 0 | 1 | 2): string {
           >
             <Settings :size="18" />
           </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
+        </PopoverTrigger>
+        <PopoverContent
           align="end"
           side="bottom"
           :side-offset="10"
-          class="w-[22rem] max-w-[calc(100vw-1rem)] max-h-[min(80vh,38rem)] rounded-lg border-border bg-card p-0 shadow-2xl overflow-hidden"
+          class="flex max-h-[min(80vh,40rem)] w-[21rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl border-border bg-card p-0 shadow-2xl"
         >
           <slot name="settingsPanel" />
-        </DropdownMenuContent>
-      </DropdownMenu>
+        </PopoverContent>
+      </Popover>
     </div>
   </header>
 </template>

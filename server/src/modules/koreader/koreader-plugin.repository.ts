@@ -1,25 +1,43 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, like, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, inArray, like, lt, lte, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
+import { chunk } from '../../common/utils/batch.utils';
+import { buildSessionIdPrefix, koreaderSessionDeviceKey } from '../../common/utils/koreader-session-id.utils';
 import {
   aggregateReadingSessionDailyStats,
   getDayRangeForDateKeys,
   getReadingSessionDayKeys,
   type ReadingDailyStatsSegment,
 } from '../../common/utils/reading-daily-stats.utils';
-import { buildSessionIdPrefix, deriveKoreaderSessions, type DerivedKoreaderSession, type KoreaderPageEvent } from './koreader-stats.util';
+import {
+  KOREADER_MAX_EVENT_DURATION_SECONDS,
+  KOREADER_SESSION_GAP_SECONDS,
+  deriveKoreaderSessions,
+  excludeTombstonedEvents,
+  type DerivedKoreaderSession,
+  type KoreaderPageEvent,
+} from './koreader-stats.util';
 
 type Db = NodePgDatabase<typeof schema>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+const BATCH_QUERY_SIZE = 200;
+
+/** Postgres returns bigint aggregates as strings. */
+function toSeconds(value: string | number | null | undefined): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 export interface IngestPageStatsResult {
   accepted: number;
   duplicates: number;
   insertedSessions: DerivedKoreaderSession[];
-  updatedSessions: number;
+  updatedSessions: DerivedKoreaderSession[];
   deletedSessions: number;
 }
 
@@ -36,9 +54,10 @@ export class KoreaderPluginRepository {
     events: KoreaderPageEvent[];
     timeZone: string;
   }): Promise<IngestPageStatsResult> {
-    const { userId, bookFileId, bookId, libraryId, deviceId, events, timeZone } = params;
+    const { userId, bookFileId, deviceId, events } = params;
 
     return this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`koreader-stats:${userId}:${bookFileId}`}, 0))`);
       const inserted = await tx
         .insert(schema.koreaderPageStats)
         .values(
@@ -61,141 +80,343 @@ export class KoreaderPluginRepository {
             schema.koreaderPageStats.startTime,
           ],
         })
-        .returning({ id: schema.koreaderPageStats.id });
+        .returning({ startTime: schema.koreaderPageStats.startTime });
 
       const accepted = inserted.length;
       const duplicates = events.length - accepted;
       if (accepted === 0) {
-        return { accepted, duplicates, insertedSessions: [], updatedSessions: 0, deletedSessions: 0 };
+        return { accepted, duplicates, insertedSessions: [], updatedSessions: [], deletedSessions: 0 };
       }
 
-      const allEvents = await tx
-        .select({
-          page: schema.koreaderPageStats.page,
-          startTime: schema.koreaderPageStats.startTime,
-          durationSeconds: schema.koreaderPageStats.durationSeconds,
-          totalPages: schema.koreaderPageStats.totalPages,
-        })
-        .from(schema.koreaderPageStats)
-        .where(
-          and(
-            eq(schema.koreaderPageStats.userId, userId),
-            eq(schema.koreaderPageStats.bookFileId, bookFileId),
-            eq(schema.koreaderPageStats.deviceId, deviceId),
-          ),
+      // Only the clusters the new events belong to can change, so derivation reads and
+      // rewrites that window instead of the book's whole history on every batch.
+      const window = await this.findAffectedWindow(tx, {
+        userId,
+        bookFileId,
+        deviceId,
+        firstInsertedStart: Math.min(...inserted.map((row) => row.startTime)),
+        lastInsertedStart: Math.max(...inserted.map((row) => row.startTime)),
+      });
+
+      await this.migrateLegacySessions(tx, params, window);
+      return { accepted, duplicates, ...(await this.deriveStoredWindow(tx, params, window)) };
+    });
+  }
+
+  private async deriveStoredWindow(
+    tx: Tx,
+    params: {
+      userId: number;
+      bookFileId: number;
+      bookId: number;
+      libraryId: number;
+      deviceId: string;
+      timeZone: string;
+      legacyAttemptId?: number | null;
+    },
+    window: { firstStart: number; lastStart: number; endSeconds: number },
+  ): Promise<Pick<IngestPageStatsResult, 'insertedSessions' | 'updatedSessions' | 'deletedSessions'>> {
+    const { userId, bookFileId, bookId, libraryId, deviceId, timeZone } = params;
+    const windowEvents = await tx
+      .select({
+        page: schema.koreaderPageStats.page,
+        startTime: schema.koreaderPageStats.startTime,
+        durationSeconds: schema.koreaderPageStats.durationSeconds,
+        totalPages: schema.koreaderPageStats.totalPages,
+      })
+      .from(schema.koreaderPageStats)
+      .where(
+        and(
+          eq(schema.koreaderPageStats.userId, userId),
+          eq(schema.koreaderPageStats.bookFileId, bookFileId),
+          eq(schema.koreaderPageStats.deviceId, deviceId),
+          gte(schema.koreaderPageStats.startTime, window.firstStart),
+          lte(schema.koreaderPageStats.startTime, window.lastStart),
+        ),
+      )
+      .orderBy(schema.koreaderPageStats.startTime, schema.koreaderPageStats.page);
+
+    // The window still grows over suppressed events: dropping events only widens the gaps
+    // between the rest, so its edges stay true cluster boundaries.
+    const tombstones = await tx
+      .select({ startTime: schema.koreaderSessionTombstones.startTime, endTime: schema.koreaderSessionTombstones.endTime })
+      .from(schema.koreaderSessionTombstones)
+      .where(
+        and(
+          eq(schema.koreaderSessionTombstones.userId, userId),
+          eq(schema.koreaderSessionTombstones.bookFileId, bookFileId),
+          inArray(schema.koreaderSessionTombstones.deviceKey, [koreaderSessionDeviceKey(deviceId), deviceId.slice(0, 8)]),
+          lte(schema.koreaderSessionTombstones.startTime, window.lastStart),
+          gt(schema.koreaderSessionTombstones.endTime, window.firstStart),
+        ),
+      );
+
+    const desired = deriveKoreaderSessions(excludeTombstonedEvents(windowEvents, tombstones), deviceId, bookFileId);
+    const prefix = buildSessionIdPrefix(deviceId, bookFileId);
+
+    // Selected by time overlap rather than by recomputed id: a merged cluster changes
+    // its session id, and the superseded row is only findable by its time range.
+    const existing = await tx
+      .select({
+        id: schema.readingSessions.id,
+        sessionId: schema.readingSessions.sessionId,
+        startedAt: schema.readingSessions.startedAt,
+        endedAt: schema.readingSessions.endedAt,
+        durationSeconds: schema.readingSessions.durationSeconds,
+        progressDelta: schema.readingSessions.progressDelta,
+        endProgress: schema.readingSessions.endProgress,
+      })
+      .from(schema.readingSessions)
+      .where(
+        and(
+          eq(schema.readingSessions.userId, userId),
+          eq(schema.readingSessions.bookFileId, bookFileId),
+          like(schema.readingSessions.sessionId, `${prefix}%`),
+          lte(schema.readingSessions.startedAt, new Date(window.endSeconds * 1000)),
+          gte(schema.readingSessions.endedAt, new Date(window.firstStart * 1000)),
+        ),
+      );
+
+    const desiredById = new Map(desired.map((session) => [session.sessionId, session]));
+    const existingById = new Map(existing.map((session) => [session.sessionId, session]));
+
+    const toDelete = existing.filter((session) => !desiredById.has(session.sessionId));
+    const toInsert = desired.filter((session) => !existingById.has(session.sessionId));
+    const toUpdate = desired.filter((session) => {
+      const current = existingById.get(session.sessionId);
+      if (!current) return false;
+      return (
+        current.endedAt.getTime() !== session.endedAt.getTime() ||
+        current.durationSeconds !== session.durationSeconds ||
+        (current.progressDelta ?? null) !== (session.progressDelta ?? null) ||
+        (current.endProgress ?? null) !== (session.endProgress ?? null)
+      );
+    });
+
+    if (toDelete.length > 0) {
+      await tx.delete(schema.readingSessions).where(
+        inArray(
+          schema.readingSessions.id,
+          toDelete.map((session) => session.id),
+        ),
+      );
+    }
+
+    const upserts = [...toInsert, ...toUpdate];
+    if (upserts.length > 0) {
+      await tx
+        .insert(schema.readingSessions)
+        .values(
+          upserts.map((session) => ({
+            userId,
+            bookFileId,
+            bookId,
+            attemptId:
+              params.legacyAttemptId !== undefined
+                ? params.legacyAttemptId
+                : sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
+            sessionId: session.sessionId,
+            source: 'koreader' as const,
+            startedAt: session.startedAt,
+            endedAt: session.endedAt,
+            durationSeconds: session.durationSeconds,
+            progressDelta: session.progressDelta,
+            endProgress: session.endProgress,
+          })),
         )
-        .orderBy(schema.koreaderPageStats.startTime, schema.koreaderPageStats.page);
+        .onConflictDoUpdate({
+          target: [schema.readingSessions.userId, schema.readingSessions.sessionId],
+          set: {
+            endedAt: sql`excluded.ended_at`,
+            durationSeconds: sql`excluded.duration_seconds`,
+            progressDelta: sql`excluded.progress_delta`,
+            endProgress: sql`excluded.end_progress`,
+            attemptId: sql`coalesce(excluded.attempt_id, ${schema.readingSessions.attemptId})`,
+          },
+        });
+    }
 
-      const desired = deriveKoreaderSessions(allEvents, deviceId, bookFileId);
-      const prefix = buildSessionIdPrefix(deviceId, bookFileId);
+    const affectedDays = new Set<string>();
+    for (const session of toDelete) {
+      for (const day of getReadingSessionDayKeys(
+        {
+          startedAt: session.startedAt,
+          endedAt: session.endedAt,
+          durationSeconds: session.durationSeconds,
+          progressDelta: session.progressDelta ?? null,
+        },
+        timeZone,
+      )) {
+        affectedDays.add(day);
+      }
+    }
+    for (const session of upserts) {
+      for (const day of getReadingSessionDayKeys(session, timeZone)) {
+        affectedDays.add(day);
+      }
+    }
 
-      const existing = await tx
+    if (affectedDays.size > 0) {
+      await this.recomputeDailyStats(tx, userId, libraryId, [...affectedDays], timeZone);
+    }
+
+    return {
+      insertedSessions: toInsert,
+      updatedSessions: toUpdate,
+      deletedSessions: toDelete.length,
+    };
+  }
+
+  private async migrateLegacySessions(
+    tx: Tx,
+    params: { userId: number; bookFileId: number; bookId: number; libraryId: number; deviceId: string; timeZone: string },
+    window: { firstStart: number; endSeconds: number },
+  ): Promise<void> {
+    const { userId, bookFileId, libraryId, timeZone } = params;
+    const legacyKey = params.deviceId.slice(0, 8);
+    const escapedKey = legacyKey.replace(/[\\%_]/g, '\\$&');
+    for (;;) {
+      const legacy = await tx
         .select({
           id: schema.readingSessions.id,
-          sessionId: schema.readingSessions.sessionId,
           startedAt: schema.readingSessions.startedAt,
           endedAt: schema.readingSessions.endedAt,
           durationSeconds: schema.readingSessions.durationSeconds,
           progressDelta: schema.readingSessions.progressDelta,
-          endProgress: schema.readingSessions.endProgress,
+          attemptId: schema.readingSessions.attemptId,
         })
         .from(schema.readingSessions)
         .where(
           and(
             eq(schema.readingSessions.userId, userId),
             eq(schema.readingSessions.bookFileId, bookFileId),
-            like(schema.readingSessions.sessionId, `${prefix}%`),
+            like(schema.readingSessions.sessionId, `kor:${escapedKey}:${bookFileId}:%`),
+            lte(schema.readingSessions.startedAt, new Date(window.endSeconds * 1000)),
+            gte(schema.readingSessions.endedAt, new Date(window.firstStart * 1000)),
           ),
-        );
+        )
+        .orderBy(schema.readingSessions.id)
+        .limit(BATCH_QUERY_SIZE);
+      if (legacy.length === 0) return;
 
-      const desiredById = new Map(desired.map((session) => [session.sessionId, session]));
-      const existingById = new Map(existing.map((session) => [session.sessionId, session]));
-
-      const toDelete = existing.filter((session) => !desiredById.has(session.sessionId));
-      const toInsert = desired.filter((session) => !existingById.has(session.sessionId));
-      const toUpdate = desired.filter((session) => {
-        const current = existingById.get(session.sessionId);
-        if (!current) return false;
-        return (
-          current.endedAt.getTime() !== session.endedAt.getTime() ||
-          current.durationSeconds !== session.durationSeconds ||
-          (current.progressDelta ?? null) !== (session.progressDelta ?? null) ||
-          (current.endProgress ?? null) !== (session.endProgress ?? null)
-        );
-      });
-
-      if (toDelete.length > 0) {
-        await tx.delete(schema.readingSessions).where(
-          inArray(
-            schema.readingSessions.id,
-            toDelete.map((session) => session.id),
-          ),
-        );
-      }
-
-      const upserts = [...toInsert, ...toUpdate];
-      if (upserts.length > 0) {
-        await tx
-          .insert(schema.readingSessions)
-          .values(
-            upserts.map((session) => ({
+      // Legacy rows lost the full device identity. Rebuild every contributing device's complete
+      // clusters before removing a conflated row, retaining historical deletion suppression.
+      const affectedDays = new Set<string>();
+      for (const row of legacy) {
+        let afterDevice: string | undefined;
+        for (;;) {
+          const devices = await tx
+            .select({
+              deviceId: schema.koreaderPageStats.deviceId,
+              firstStart: sql<string>`min(${schema.koreaderPageStats.startTime})`,
+              lastStart: sql<string>`max(${schema.koreaderPageStats.startTime})`,
+            })
+            .from(schema.koreaderPageStats)
+            .where(
+              and(
+                eq(schema.koreaderPageStats.userId, userId),
+                eq(schema.koreaderPageStats.bookFileId, bookFileId),
+                like(schema.koreaderPageStats.deviceId, `${escapedKey}%`),
+                afterDevice ? gt(schema.koreaderPageStats.deviceId, afterDevice) : undefined,
+                gte(schema.koreaderPageStats.startTime, row.startedAt.getTime() / 1000),
+                lt(schema.koreaderPageStats.startTime, row.endedAt.getTime() / 1000),
+              ),
+            )
+            .groupBy(schema.koreaderPageStats.deviceId)
+            .orderBy(schema.koreaderPageStats.deviceId)
+            .limit(BATCH_QUERY_SIZE);
+          if (devices.length === 0) break;
+          for (const device of devices) {
+            const deviceWindow = await this.findAffectedWindow(tx, {
               userId,
               bookFileId,
-              bookId,
-              attemptId: sql`(select id from reading_attempts where user_id = ${userId} and book_id = ${bookId} and outcome is null and deleted_at is null limit 1)`,
-              sessionId: session.sessionId,
-              source: 'koreader' as const,
-              startedAt: session.startedAt,
-              endedAt: session.endedAt,
-              durationSeconds: session.durationSeconds,
-              progressDelta: session.progressDelta,
-              endProgress: session.endProgress,
-            })),
-          )
-          .onConflictDoUpdate({
-            target: [schema.readingSessions.userId, schema.readingSessions.sessionId],
-            set: {
-              endedAt: sql`excluded.ended_at`,
-              durationSeconds: sql`excluded.duration_seconds`,
-              progressDelta: sql`excluded.progress_delta`,
-              endProgress: sql`excluded.end_progress`,
-              attemptId: sql`coalesce(excluded.attempt_id, ${schema.readingSessions.attemptId})`,
-            },
-          });
-      }
-
-      const affectedDays = new Set<string>();
-      for (const session of toDelete) {
-        for (const day of getReadingSessionDayKeys(
-          {
-            startedAt: session.startedAt,
-            endedAt: session.endedAt,
-            durationSeconds: session.durationSeconds,
-            progressDelta: session.progressDelta ?? null,
-          },
-          timeZone,
-        )) {
-          affectedDays.add(day);
+              deviceId: device.deviceId,
+              firstInsertedStart: Number(device.firstStart),
+              lastInsertedStart: Number(device.lastStart),
+            });
+            await this.deriveStoredWindow(tx, { ...params, deviceId: device.deviceId, legacyAttemptId: row.attemptId }, deviceWindow);
+          }
+          afterDevice = devices.at(-1)!.deviceId;
         }
+        for (const day of getReadingSessionDayKeys(row, timeZone)) affectedDays.add(day);
       }
-      for (const session of upserts) {
-        for (const day of getReadingSessionDayKeys(session, timeZone)) {
-          affectedDays.add(day);
-        }
-      }
+      await tx.delete(schema.readingSessions).where(
+        inArray(
+          schema.readingSessions.id,
+          legacy.map((row) => row.id),
+        ),
+      );
+      if (affectedDays.size > 0) await this.recomputeDailyStats(tx, userId, libraryId, [...affectedDays], timeZone);
+    }
+  }
 
-      if (affectedDays.size > 0) {
-        await this.recomputeDailyStats(tx, userId, libraryId, [...affectedDays], timeZone);
-      }
+  /**
+   * Grows the newly inserted events outward over stored events until a gap strictly
+   * larger than the session gap terminates each side, so the returned start-time range
+   * holds only complete clusters. Sessions outside it cannot change.
+   *
+   * Batches are not guaranteed to be chronological: retries, plugin state resets, and
+   * KOReader's own device-to-device statistics sync can deliver events older than
+   * history the server already holds, and such an insert can merge a preceding and a
+   * following cluster into one session.
+   */
+  private async findAffectedWindow(
+    tx: Tx,
+    params: { userId: number; bookFileId: number; deviceId: string; firstInsertedStart: number; lastInsertedStart: number },
+  ): Promise<{ firstStart: number; lastStart: number; endSeconds: number }> {
+    const { userId, bookFileId, deviceId } = params;
+    const scope = and(
+      eq(schema.koreaderPageStats.userId, userId),
+      eq(schema.koreaderPageStats.bookFileId, bookFileId),
+      eq(schema.koreaderPageStats.deviceId, deviceId),
+    );
+    const eventEnd = sql<string | number | null>`max(${schema.koreaderPageStats.startTime} + ${schema.koreaderPageStats.durationSeconds})`;
 
-      return {
-        accepted,
-        duplicates,
-        insertedSessions: toInsert,
-        updatedSessions: toUpdate.length,
-        deletedSessions: toDelete.length,
-      };
-    });
+    let firstStart = params.firstInsertedStart;
+    for (;;) {
+      const [row] = await tx
+        .select({ earliest: sql<string | number | null>`min(${schema.koreaderPageStats.startTime})` })
+        .from(schema.koreaderPageStats)
+        .where(
+          and(
+            scope,
+            lt(schema.koreaderPageStats.startTime, firstStart),
+            // The duration cap bounds how far back a chaining event can start, keeping
+            // this an index range scan instead of a walk over the book's whole history.
+            gte(schema.koreaderPageStats.startTime, firstStart - KOREADER_SESSION_GAP_SECONDS - KOREADER_MAX_EVENT_DURATION_SECONDS),
+            gte(sql`${schema.koreaderPageStats.startTime} + ${schema.koreaderPageStats.durationSeconds}`, firstStart - KOREADER_SESSION_GAP_SECONDS),
+          ),
+        );
+      const earliest = toSeconds(row?.earliest);
+      if (earliest == null || earliest >= firstStart) break;
+      firstStart = earliest;
+    }
+
+    let lastStart = params.lastInsertedStart;
+    const [seed] = await tx
+      .select({ maxEnd: eventEnd })
+      .from(schema.koreaderPageStats)
+      .where(and(scope, gte(schema.koreaderPageStats.startTime, firstStart), lte(schema.koreaderPageStats.startTime, lastStart)));
+    let endSeconds = toSeconds(seed?.maxEnd) ?? lastStart;
+
+    for (;;) {
+      const [row] = await tx
+        .select({ latest: sql<string | number | null>`max(${schema.koreaderPageStats.startTime})`, maxEnd: eventEnd })
+        .from(schema.koreaderPageStats)
+        .where(
+          and(
+            scope,
+            gt(schema.koreaderPageStats.startTime, lastStart),
+            lte(schema.koreaderPageStats.startTime, endSeconds + KOREADER_SESSION_GAP_SECONDS),
+          ),
+        );
+      const latest = toSeconds(row?.latest);
+      if (latest == null || latest <= lastStart) break;
+      lastStart = latest;
+      endSeconds = Math.max(endSeconds, toSeconds(row?.maxEnd) ?? endSeconds);
+    }
+
+    return { firstStart, lastStart, endSeconds };
   }
 
   private async recomputeDailyStats(tx: Tx, userId: number, libraryId: number, days: string[], timeZone: string) {
@@ -280,25 +501,38 @@ export class KoreaderPluginRepository {
       });
   }
 
-  async getRating(userId: number, bookId: number): Promise<{ rating: number | null; updatedAt: Date } | null> {
-    const [row] = await this.db
-      .select({ rating: schema.userBookRatings.rating, updatedAt: schema.userBookRatings.updatedAt })
-      .from(schema.userBookRatings)
-      .where(and(eq(schema.userBookRatings.userId, userId), eq(schema.userBookRatings.bookId, bookId)))
-      .limit(1);
-    return row ?? null;
+  async getRatings(userId: number, bookIds: number[]): Promise<Map<number, { rating: number | null; updatedAt: Date }>> {
+    const ratings = new Map<number, { rating: number | null; updatedAt: Date }>();
+    for (const batch of chunk([...new Set(bookIds)], BATCH_QUERY_SIZE)) {
+      const rows = await this.db
+        .select({
+          bookId: schema.userBookRatings.bookId,
+          rating: schema.userBookRatings.rating,
+          updatedAt: schema.userBookRatings.updatedAt,
+        })
+        .from(schema.userBookRatings)
+        .where(and(eq(schema.userBookRatings.userId, userId), inArray(schema.userBookRatings.bookId, batch)));
+      for (const row of rows) {
+        ratings.set(row.bookId, { rating: row.rating, updatedAt: row.updatedAt });
+      }
+    }
+    return ratings;
   }
 
-  async upsertRating(userId: number, bookId: number, rating: number | null): Promise<{ rating: number | null; updatedAt: Date }> {
-    const [row] = await this.db
-      .insert(schema.userBookRatings)
-      .values({ userId, bookId, rating })
-      .onConflictDoUpdate({
-        target: [schema.userBookRatings.userId, schema.userBookRatings.bookId],
-        set: { rating, updatedAt: new Date() },
-      })
-      .returning({ rating: schema.userBookRatings.rating, updatedAt: schema.userBookRatings.updatedAt });
-    return row!;
+  /**
+   * Entries must already be deduplicated by book: Postgres rejects an ON CONFLICT
+   * DO UPDATE that would touch the same row twice in one statement.
+   */
+  async upsertRatings(userId: number, entries: { bookId: number; rating: number | null }[], updatedAt: Date): Promise<void> {
+    for (const batch of chunk(entries, BATCH_QUERY_SIZE)) {
+      await this.db
+        .insert(schema.userBookRatings)
+        .values(batch.map((entry) => ({ userId, bookId: entry.bookId, rating: entry.rating, updatedAt })))
+        .onConflictDoUpdate({
+          target: [schema.userBookRatings.userId, schema.userBookRatings.bookId],
+          set: { rating: sql`excluded.rating`, updatedAt: sql`excluded.updated_at` },
+        });
+    }
   }
 
   async upsertSweep(data: {
@@ -343,6 +577,14 @@ export class KoreaderPluginRepository {
       .from(schema.koreaderDeviceSweeps)
       .where(eq(schema.koreaderDeviceSweeps.userId, userId))
       .orderBy(desc(schema.koreaderDeviceSweeps.lastSweepAt));
+  }
+
+  async listDevicePluginVersions(userId: number): Promise<(string | null)[]> {
+    const rows = await this.db
+      .selectDistinct({ pluginVersion: schema.koreaderDeviceSweeps.pluginVersion })
+      .from(schema.koreaderDeviceSweeps)
+      .where(eq(schema.koreaderDeviceSweeps.userId, userId));
+    return rows.map((row) => row.pluginVersion);
   }
 
   async getPluginTotals(userId: number): Promise<{
@@ -397,15 +639,14 @@ export class KoreaderPluginRepository {
     };
   }
 
-  async getLibraryMaxFileTimestamp(accessibleLibraryIds: number[] | null): Promise<Date | null> {
-    if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return null;
-    const libraryFilter = accessibleLibraryIds ? inArray(schema.books.libraryId, accessibleLibraryIds) : undefined;
-
+  async getGlobalMaxFileTimestamp(): Promise<Date | null> {
+    // A global file change may invalidate an unrelated user's token, which is harmless.
+    // The expression index makes this one probe instead of scanning all accessible files.
     const [row] = await this.db
-      .select({ maxTs: sql<Date | string | null>`max(greatest(${schema.bookFiles.createdAt}, ${schema.bookFiles.updatedAt}))` })
+      .select({ maxTs: sql<Date | string | null>`greatest(${schema.bookFiles.createdAt}, ${schema.bookFiles.updatedAt})` })
       .from(schema.bookFiles)
-      .innerJoin(schema.books, eq(schema.books.id, schema.bookFiles.bookId))
-      .where(libraryFilter);
+      .orderBy(sql`greatest(${schema.bookFiles.createdAt}, ${schema.bookFiles.updatedAt}) desc`)
+      .limit(1);
 
     return row?.maxTs ? new Date(row.maxTs) : null;
   }
@@ -420,5 +661,15 @@ export class KoreaderPluginRepository {
       .where(eq(schema.koreaderBookHashLinks.userId, userId));
 
     return { count: Number(row?.count ?? 0), maxTs: row?.maxTs ? new Date(row.maxTs) : null };
+  }
+
+  async getHashHistoryVersion(accessibleLibraryIds: number[] | null): Promise<string> {
+    if (accessibleLibraryIds !== null && accessibleLibraryIds.length === 0) return '';
+    const rows = await this.db
+      .select({ id: schema.libraries.id, revision: sql<string>`${schema.libraries.koreaderHashRevision}::text` })
+      .from(schema.libraries)
+      .where(accessibleLibraryIds ? inArray(schema.libraries.id, accessibleLibraryIds) : undefined)
+      .orderBy(schema.libraries.id);
+    return rows.map((row) => `${row.id}:${row.revision}`).join(',');
   }
 }

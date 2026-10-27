@@ -11,7 +11,7 @@ export interface BookWritePayload {
   language?: string | null;
   pageCount?: number | null;
   seriesName?: string | null;
-  seriesIndex?: number | null;
+  seriesIndex?: string | null;
   isbn10?: string | null;
   isbn13?: string | null;
   rating?: number | null;
@@ -28,6 +28,7 @@ export interface BookWritePayload {
   koboId?: string | null;
   lubimyczytacId?: string | null;
   aladinId?: string | null;
+  comicvineId?: string | null;
   comicIssueNumber?: string | null;
   comicVolumeName?: string | null;
   comicPencillers?: string[];

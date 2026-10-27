@@ -35,11 +35,16 @@ export function fileMimeType(format: string): string {
   switch (format.toLowerCase()) {
     case 'epub':
       return 'application/epub+zip';
+    case 'kepub':
+      return 'application/kepub+zip';
     case 'pdf':
       return 'application/pdf';
+    case 'djvu':
+      return 'image/vnd.djvu';
     case 'mobi':
       return 'application/x-mobipocket-ebook';
     case 'azw3':
+    case 'azw':
       return 'application/vnd.amazon.ebook';
     case 'fb2':
       return 'application/x-fictionbook+xml';
@@ -47,6 +52,18 @@ export function fileMimeType(format: string): string {
       return 'application/vnd.comicbook+zip';
     case 'cbr':
       return 'application/vnd.comicbook-rar';
+    case 'cb7':
+      return 'application/x-cb7';
+    case 'm4b':
+    case 'm4a':
+      return 'audio/mp4';
+    case 'mp3':
+      return 'audio/mpeg';
+    case 'ogg':
+    case 'opus':
+      return 'audio/ogg';
+    case 'flac':
+      return 'audio/flac';
     default:
       return 'application/octet-stream';
   }
@@ -55,3 +72,7 @@ export function fileMimeType(format: string): string {
 export const OPDS_MIME_NAV = 'application/atom+xml;profile=opds-catalog;kind=navigation';
 export const OPDS_MIME_ACQ = 'application/atom+xml;profile=opds-catalog;kind=acquisition';
 export const OPDS_MIME_SEARCH = 'application/opensearchdescription+xml';
+// Bare atom type, used only on the inline templated search link. Clients that skip
+// OpenSearch discovery match this type by equality, so the profile/kind parameters
+// carried by OPDS_MIME_ACQ must not be attached here.
+export const OPDS_MIME_ATOM = 'application/atom+xml';

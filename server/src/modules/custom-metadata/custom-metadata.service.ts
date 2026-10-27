@@ -4,6 +4,7 @@ import type {
   CustomMetadataFieldDefinition,
   CustomMetadataFieldSummary,
   CustomMetadataFieldType,
+  CustomMetadataFieldTypeMap,
   CustomMetadataPrimitiveValue,
 } from '@bookorbit/types';
 
@@ -25,10 +26,10 @@ export class CustomMetadataService {
   constructor(private readonly repository: CustomMetadataRepository) {}
 
   async listFields(includeArchived = false): Promise<CustomMetadataFieldDefinition[]> {
-    const [fields, enablements, usageCounts] = await Promise.all([
+    const [fields, enablements, usageRows] = await Promise.all([
       this.repository.listFields(includeArchived),
       this.repository.listEnablements(),
-      this.repository.countValuesByField(),
+      this.repository.countValuesByFieldAndLibrary(),
     ]);
     const enabledByFieldId = new Map<number, number[]>();
     for (const enablement of enablements) {
@@ -36,8 +37,8 @@ export class CustomMetadataService {
       current.push(enablement.libraryId);
       enabledByFieldId.set(enablement.fieldId, current);
     }
-    const usageByFieldId = new Map(usageCounts.map((row) => [row.fieldId, row.count]));
-    return fields.map((field) => this.toDefinition(field, enabledByFieldId.get(field.id) ?? [], usageByFieldId.get(field.id) ?? 0));
+    const usageByFieldId = groupUsage(usageRows);
+    return fields.map((field) => this.toDefinition(field, enabledByFieldId.get(field.id) ?? [], usageByFieldId.get(field.id) ?? {}));
   }
 
   async listFieldSummaries(): Promise<CustomMetadataFieldSummary[]> {
@@ -58,6 +59,13 @@ export class CustomMetadataService {
     }));
   }
 
+  /** Resolves the requested field ids to their types, omitting ids that are archived or gone. */
+  async getActiveFieldTypes(fieldIds: number[]): Promise<CustomMetadataFieldTypeMap> {
+    if (fieldIds.length === 0) return new Map();
+    const rows = await this.repository.findActiveFieldTypes(fieldIds);
+    return new Map(rows.map((row) => [row.id, row.type]));
+  }
+
   async createField(dto: CreateCustomMetadataFieldDto): Promise<CustomMetadataFieldDefinition> {
     const label = normalizeLabel(dto.label);
     const libraryIds = await this.normalizeLibraryIds(dto.enabledLibraryIds ?? []);
@@ -74,7 +82,7 @@ export class CustomMetadataService {
         tx,
       );
       await this.repository.replaceEnabledLibraries(field.id, libraryIds, tx);
-      return this.toDefinition(field, libraryIds, 0);
+      return this.toDefinition(field, libraryIds, {});
     });
   }
 
@@ -94,7 +102,7 @@ export class CustomMetadataService {
         await this.repository.replaceEnabledLibraries(fieldId, libraryIds, tx);
       }
       const enabledLibraryIds = libraryIds ?? (await this.enabledLibraryIdsForField(fieldId));
-      return this.toDefinition(field, enabledLibraryIds, await this.usageCountForField(fieldId));
+      return this.toDefinition(field, enabledLibraryIds, await this.usageForField(fieldId));
     });
   }
 
@@ -220,9 +228,9 @@ export class CustomMetadataService {
     return enablements.filter((enablement) => enablement.fieldId === fieldId).map((enablement) => enablement.libraryId);
   }
 
-  private async usageCountForField(fieldId: number): Promise<number> {
-    const counts = await this.repository.countValuesByField();
-    return counts.find((row) => row.fieldId === fieldId)?.count ?? 0;
+  private async usageForField(fieldId: number): Promise<Record<number, number>> {
+    const rows = await this.repository.countValuesByFieldAndLibrary(fieldId);
+    return groupUsage(rows).get(fieldId) ?? {};
   }
 
   private async normalizeLibraryIds(libraryIds: number[]): Promise<number[]> {
@@ -245,7 +253,11 @@ export class CustomMetadataService {
     throw new BadRequestException('Unable to generate a unique custom metadata key');
   }
 
-  private toDefinition(field: CustomMetadataField, enabledLibraryIds: number[], usageCount: number): CustomMetadataFieldDefinition {
+  private toDefinition(
+    field: CustomMetadataField,
+    enabledLibraryIds: number[],
+    usageByLibrary: Record<number, number>,
+  ): CustomMetadataFieldDefinition {
     return {
       id: field.id,
       key: field.key,
@@ -256,9 +268,20 @@ export class CustomMetadataService {
       createdAt: field.createdAt.toISOString(),
       updatedAt: field.updatedAt.toISOString(),
       enabledLibraryIds,
-      usageCount,
+      usageCount: Object.values(usageByLibrary).reduce((total, value) => total + value, 0),
+      usageByLibrary,
     };
   }
+}
+
+function groupUsage(rows: Array<{ fieldId: number; libraryId: number; count: number }>): Map<number, Record<number, number>> {
+  const byField = new Map<number, Record<number, number>>();
+  for (const row of rows) {
+    const current = byField.get(row.fieldId) ?? {};
+    current[row.libraryId] = row.count;
+    byField.set(row.fieldId, current);
+  }
+  return byField;
 }
 
 function normalizeLabel(label: string): string {

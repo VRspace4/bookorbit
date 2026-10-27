@@ -2,8 +2,9 @@
 import { computed } from 'vue'
 import { ArrowDownAZ, ArrowUpAZ, ChevronDown, ChevronUp, Plus, Trash2 } from '@lucide/vue'
 import type { SortField, SortSpec } from '@bookorbit/types'
-import { SORT_FIELDS } from '@bookorbit/types'
-import { SORT_FIELD_LABELS } from '@/features/book/lib/filter-labels'
+import { SORT_FIELDS, customSortField, isCollectionScopedSortField } from '@bookorbit/types'
+import { sortFieldLabel } from '@/features/book/lib/filter-labels'
+import { useActiveCustomFields } from '@/features/book/composables/useActiveCustomFields'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useI18n } from 'vue-i18n'
 
@@ -11,16 +12,42 @@ const { t } = useI18n()
 
 const props = defineProps<{
   modelValue: SortSpec[]
+  /** Set when the builder sits inside a collection view, which is the only place a sort may order by collection membership. */
+  collectionScoped?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: SortSpec[]]
 }>()
 
+const { fields: customFields } = useActiveCustomFields()
+
+const customSortFields = computed<SortField[]>(() =>
+  customFields.value
+    .filter((f) => !f.archivedAt)
+    .sort((a, b) => a.displayOrder - b.displayOrder || a.label.localeCompare(b.label))
+    .map((f) => customSortField(f.id)),
+)
+
+// Relevance only ranks against a search query, so the browse sort builder never offers it.
+const browseSortFields = SORT_FIELDS.filter((field) => field !== 'relevance')
+
+// Smart scopes and home shelves are not scoped to one collection, so the server rejects a
+// membership sort from them and offering it would hand the user a sort that fails.
+const offerableFields = computed<SortField[]>(() =>
+  props.collectionScoped ? browseSortFields : browseSortFields.filter((f) => !isCollectionScopedSortField(f)),
+)
+
+const allFields = computed<SortField[]>(() => [...offerableFields.value, ...customSortFields.value])
+
 const usedFields = computed(() => new Set(props.modelValue.map((s) => s.field)))
 
 function availableFields(currentField: SortField): SortField[] {
-  return SORT_FIELDS.filter((f) => f === currentField || !usedFields.value.has(f))
+  return offerableFields.value.filter((f) => f === currentField || !usedFields.value.has(f))
+}
+
+function availableCustomFields(currentField: SortField): SortField[] {
+  return customSortFields.value.filter((f) => f === currentField || !usedFields.value.has(f))
 }
 
 function updateField(index: number, field: SortField) {
@@ -52,12 +79,12 @@ function remove(index: number) {
 }
 
 function addTier() {
-  const nextField = SORT_FIELDS.find((f) => !usedFields.value.has(f))
+  const nextField = allFields.value.find((f) => !usedFields.value.has(f))
   if (!nextField) return
   emit('update:modelValue', [...props.modelValue, { field: nextField, dir: 'asc' }])
 }
 
-const canAddMore = computed(() => props.modelValue.length < SORT_FIELDS.length)
+const canAddMore = computed(() => props.modelValue.length < allFields.value.length)
 </script>
 
 <template>
@@ -69,7 +96,7 @@ const canAddMore = computed(() => props.modelValue.length < SORT_FIELDS.length)
             <button
               @click="move(index, -1)"
               :disabled="index === 0"
-              class="h-5 w-5 flex items-center justify-center rounded text-foreground/60 hover:text-foreground disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+              class="h-5 w-5 flex items-center justify-center rounded-xs text-foreground hover:text-foreground disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
             >
               <ChevronUp :size="14" stroke-width="2.5" />
             </button>
@@ -81,7 +108,7 @@ const canAddMore = computed(() => props.modelValue.length < SORT_FIELDS.length)
             <button
               @click="move(index, 1)"
               :disabled="index === modelValue.length - 1"
-              class="h-5 w-5 flex items-center justify-center rounded text-foreground/60 hover:text-foreground disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
+              class="h-5 w-5 flex items-center justify-center rounded-xs text-foreground hover:text-foreground disabled:opacity-25 disabled:cursor-not-allowed transition-colors"
             >
               <ChevronDown :size="14" stroke-width="2.5" />
             </button>
@@ -95,8 +122,13 @@ const canAddMore = computed(() => props.modelValue.length < SORT_FIELDS.length)
         class="flex-1 h-8 rounded-md border border-input bg-background text-foreground text-sm px-2 focus:outline-none focus:ring-2 focus:ring-primary"
       >
         <option v-for="field in availableFields(spec.field)" :key="field" :value="field">
-          {{ SORT_FIELD_LABELS[field] }}
+          {{ sortFieldLabel(field) }}
         </option>
+        <optgroup v-if="customSortFields.length > 0" :label="t('book.sort.customFieldsGroup')">
+          <option v-for="field in availableCustomFields(spec.field)" :key="field" :value="field">
+            {{ sortFieldLabel(field) }}
+          </option>
+        </optgroup>
       </select>
       <Tooltip>
         <TooltipTrigger as-child>
@@ -114,7 +146,7 @@ const canAddMore = computed(() => props.modelValue.length < SORT_FIELDS.length)
         <TooltipTrigger as-child>
           <button
             @click="remove(index)"
-            class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground/70 hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+            class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
           >
             <Trash2 :size="13" />
           </button>

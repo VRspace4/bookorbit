@@ -57,7 +57,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-[70] bg-black/35 backdrop-blur-[2px]" @click.self="emit('close')">
+  <div class="fixed inset-0 z-[70] bg-scrim backdrop-blur-[2px]" @click.self="emit('close')">
     <aside
       class="absolute bottom-0 right-0 max-h-[86vh] w-full overflow-y-auto rounded-t-xl border border-border bg-card p-4 shadow-2xl sm:bottom-4 sm:right-4 sm:w-[25rem] sm:rounded-xl"
     >

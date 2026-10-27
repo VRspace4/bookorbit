@@ -1,19 +1,24 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
-import { esc, fileMimeType, OPDS_MIME_ACQ, OPDS_MIME_NAV, OPDS_MIME_SEARCH, xmlEl, xmlLink } from './opds-xml.helpers';
+import { esc, fileMimeType, OPDS_MIME_ACQ, OPDS_MIME_ATOM, OPDS_MIME_NAV, OPDS_MIME_SEARCH, xmlEl, xmlLink } from './opds-xml.helpers';
+import { htmlToPlainText } from '../../common/utils/html-to-text.utils';
+import { DeliverySelectionService } from '../book/delivery-selection.service';
+import type { OpdsRequestUser } from './opds-auth.guard';
 import type { OpdsBookEntry } from './opds-book.service';
 
 const BASE = '/api/v1/opds';
+const SEARCH_TEMPLATE = `${BASE}/catalog?q={searchTerms}`;
 
 @Injectable()
 export class OpdsService {
+  constructor(@Optional() private readonly selections?: DeliverySelectionService) {}
   generateRootNavigation(): string {
     const now = new Date().toISOString();
     return this.wrapFeed(
       'bookorbit OPDS Catalog',
       'urn:bookorbit:root',
       now,
-      [xmlLink('self', BASE, OPDS_MIME_NAV), xmlLink('start', BASE, OPDS_MIME_NAV), xmlLink('search', `${BASE}/search.opds`, OPDS_MIME_SEARCH)],
+      [xmlLink('self', BASE, OPDS_MIME_NAV), xmlLink('start', BASE, OPDS_MIME_NAV), ...this.searchLinks()],
       [
         this.navEntry('urn:bookorbit:all', 'All Books', 'Browse the full catalog', `${BASE}/catalog`, now),
         this.navEntry('urn:bookorbit:recent', 'Recent Books', 'Recently added books', `${BASE}/recent`, now),
@@ -32,7 +37,13 @@ export class OpdsService {
     const entries = libs.map((lib) =>
       this.navEntry(`urn:bookorbit:library:${lib.id}`, lib.name, `${lib.bookCount} books`, `${BASE}/catalog?libraryId=${lib.id}`, now),
     );
-    return this.wrapFeed('Libraries', 'urn:bookorbit:libraries', now, [xmlLink('self', `${BASE}/libraries`, OPDS_MIME_NAV)], entries);
+    return this.wrapFeed(
+      'Libraries',
+      'urn:bookorbit:libraries',
+      now,
+      [xmlLink('self', `${BASE}/libraries`, OPDS_MIME_NAV), ...this.searchLinks()],
+      entries,
+    );
   }
 
   generateCollectionsNavigation(cols: { id: number; name: string; bookCount: number }[]): string {
@@ -40,7 +51,13 @@ export class OpdsService {
     const entries = cols.map((col) =>
       this.navEntry(`urn:bookorbit:collection:${col.id}`, col.name, `${col.bookCount} books`, `${BASE}/catalog?collectionId=${col.id}`, now),
     );
-    return this.wrapFeed('Collections', 'urn:bookorbit:collections', now, [xmlLink('self', `${BASE}/collections`, OPDS_MIME_NAV)], entries);
+    return this.wrapFeed(
+      'Collections',
+      'urn:bookorbit:collections',
+      now,
+      [xmlLink('self', `${BASE}/collections`, OPDS_MIME_NAV), ...this.searchLinks()],
+      entries,
+    );
   }
 
   generateSmartScopesNavigation(items: { id: number; name: string; icon: string | null }[]): string {
@@ -54,7 +71,13 @@ export class OpdsService {
         now,
       ),
     );
-    return this.wrapFeed('SmartScopes', 'urn:bookorbit:smartScopes', now, [xmlLink('self', `${BASE}/smart-scopes`, OPDS_MIME_NAV)], entries);
+    return this.wrapFeed(
+      'SmartScopes',
+      'urn:bookorbit:smartScopes',
+      now,
+      [xmlLink('self', `${BASE}/smart-scopes`, OPDS_MIME_NAV), ...this.searchLinks()],
+      entries,
+    );
   }
 
   generateAuthorsNavigation(items: { name: string; bookCount: number }[]): string {
@@ -68,7 +91,13 @@ export class OpdsService {
         now,
       ),
     );
-    return this.wrapFeed('Authors', 'urn:bookorbit:authors', now, [xmlLink('self', `${BASE}/authors`, OPDS_MIME_NAV)], entries);
+    return this.wrapFeed(
+      'Authors',
+      'urn:bookorbit:authors',
+      now,
+      [xmlLink('self', `${BASE}/authors`, OPDS_MIME_NAV), ...this.searchLinks()],
+      entries,
+    );
   }
 
   generateSeriesNavigation(items: { id?: number; name: string; bookCount: number }[]): string {
@@ -82,7 +111,7 @@ export class OpdsService {
         now,
       ),
     );
-    return this.wrapFeed('Series', 'urn:bookorbit:series', now, [xmlLink('self', `${BASE}/series`, OPDS_MIME_NAV)], entries);
+    return this.wrapFeed('Series', 'urn:bookorbit:series', now, [xmlLink('self', `${BASE}/series`, OPDS_MIME_NAV), ...this.searchLinks()], entries);
   }
 
   generateAcquisitionFeed(
@@ -94,14 +123,11 @@ export class OpdsService {
     size: number,
     selfPath: string,
     coverToken: string,
+    profile?: OpdsRequestUser,
   ): string {
     const now = new Date().toISOString();
     const totalPages = Math.max(1, Math.ceil(total / size));
-    const links = [
-      xmlLink('self', selfPath, OPDS_MIME_ACQ),
-      xmlLink('start', BASE, OPDS_MIME_NAV),
-      xmlLink('search', `${BASE}/search.opds`, OPDS_MIME_SEARCH),
-    ];
+    const links = [xmlLink('self', selfPath, OPDS_MIME_ACQ), xmlLink('start', BASE, OPDS_MIME_NAV), ...this.searchLinks()];
 
     const url = new URL(selfPath, 'http://localhost');
     const pageUrl = (p: number) => {
@@ -118,7 +144,7 @@ export class OpdsService {
       links.push(xmlLink('last', pageUrl(totalPages), OPDS_MIME_ACQ));
     }
 
-    const entries = books.map((book) => this.bookEntry(book, coverToken));
+    const entries = books.map((book) => this.bookEntry(book, coverToken, profile));
 
     return this.wrapFeed(title, feedId, now, links, entries, total);
   }
@@ -129,14 +155,14 @@ export class OpdsService {
       '<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">',
       `  ${xmlEl('ShortName', 'bookorbit OPDS')}`,
       `  ${xmlEl('Description', 'Search the bookorbit book catalog')}`,
-      `  <Url type="${esc(OPDS_MIME_ACQ)}" template="${esc(BASE)}/catalog?q={searchTerms}"/>`,
+      `  <Url type="${esc(OPDS_MIME_ACQ)}" template="${esc(SEARCH_TEMPLATE)}"/>`,
       '  <InputEncoding>UTF-8</InputEncoding>',
       '  <OutputEncoding>UTF-8</OutputEncoding>',
       '</OpenSearchDescription>',
     ].join('\n');
   }
 
-  private bookEntry(book: OpdsBookEntry, coverToken: string): string {
+  private bookEntry(book: OpdsBookEntry, coverToken: string, profile?: OpdsRequestUser): string {
     const lines: string[] = [];
     lines.push('<entry>');
     lines.push(`  ${xmlEl('title', book.title)}`);
@@ -147,8 +173,12 @@ export class OpdsService {
       lines.push(`  <author>${xmlEl('name', author)}</author>`);
     }
 
-    if (book.description) {
-      lines.push(`  <content type="text">${esc(book.description)}</content>`);
+    // Descriptions are stored as HTML. Clients that honour type="text" show markup literally,
+    // and type="html" would hand unsanitized markup from book files and providers to clients
+    // that render it, so the feed carries the text alone.
+    const description = book.description ? htmlToPlainText(book.description, { preserveLineBreaks: true }) : '';
+    if (description) {
+      lines.push(`  <content type="text">${esc(description)}</content>`);
     } else {
       lines.push('  <content type="text"/>');
     }
@@ -178,15 +208,56 @@ export class OpdsService {
       );
     }
 
-    for (const file of book.files) {
+    const variant = profile?.readAloudDelivery;
+    const selectedFiles =
+      variant === 'original'
+        ? [...(book.allFiles ?? book.files)]
+        : book.files.map((file) => book.allFiles?.find((candidate) => candidate.id === file.id) ?? file);
+    if (variant === 'original') {
+      const epubs = selectedFiles
+        .filter((file) => file.format.toLowerCase() === 'epub')
+        .sort(
+          (a, b) => Number('mediaOverlayAvailable' in b && b.mediaOverlayAvailable) - Number('mediaOverlayAvailable' in a && a.mediaOverlayAvailable),
+        );
+      let index = 0;
+      for (let i = 0; i < selectedFiles.length; i++) if (selectedFiles[i].format.toLowerCase() === 'epub') selectedFiles[i] = epubs[index++];
+    }
+    for (const file of selectedFiles) {
+      const fileVariant = file.format.toLowerCase() === 'epub' ? variant : undefined;
+      const narrated = 'mediaOverlayAvailable' in file && file.mediaOverlayAvailable;
+      const selection =
+        profile && this.selections && file.format.toLowerCase() === 'epub'
+          ? this.selections.descriptor(
+              profile.userId,
+              `opds:${profile.opdsUserId}`,
+              file.id,
+              fileVariant ?? null,
+              'contentVersion' in file ? String(file.contentVersion) : '',
+            )
+          : undefined;
+      const href = `${BASE}/${book.id}/download?fileId=${file.id}${fileVariant ? `&variant=${fileVariant}` : ''}${selection ? `&selection=${encodeURIComponent(selection)}` : ''}`;
+      const label =
+        file.format.toUpperCase() +
+        (fileVariant
+          ? narrated && fileVariant === 'original'
+            ? ' (with narration)'
+            : fileVariant === 'audioless_epub'
+              ? ' (text only)'
+              : ' (original)'
+          : '');
       const mime = fileMimeType(file.format);
-      lines.push(
-        `  ${xmlLink('http://opds-spec.org/acquisition', `${BASE}/${book.id}/download?fileId=${file.id}`, mime, file.format.toUpperCase())}`,
-      );
+      lines.push(`  ${xmlLink('http://opds-spec.org/acquisition', href, mime, label)}`);
     }
 
     lines.push('</entry>');
     return lines.join('\n');
+  }
+
+  // Both links are needed. Compliant clients follow the OpenSearch description; Moon+ Reader
+  // and CrossPoint never fetch it and only detect search from a rel="search" href that already
+  // contains {searchTerms}, so without the second link they hide search entirely (issue #860).
+  private searchLinks(): string[] {
+    return [xmlLink('search', `${BASE}/search.opds`, OPDS_MIME_SEARCH), xmlLink('search', SEARCH_TEMPLATE, OPDS_MIME_ATOM, 'Search')];
   }
 
   private navEntry(id: string, title: string, content: string, href: string, updated: string): string {

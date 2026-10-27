@@ -41,6 +41,21 @@ describe('AmazonScraper', () => {
       const result = extractAsins(html, 5);
       expect(result).toEqual(['GOOD123456']);
     });
+
+    it('should skip sponsored cards before following unrelated format links', () => {
+      const html = `
+        <div data-component-type="s-search-result" data-asin="SPONSOR001">
+          <div data-cy="title-recipe">Sponsored Sponsored result</div>
+          <a href="/dp/SERIES0001">Book 1 of 3: A Series</a>
+        </div>
+        <div data-component-type="s-search-result" data-asin="B123456789">
+          <div data-cy="title-recipe">Wanted Book</div>
+          <a href="/dp/B123456789">Kindle</a>
+        </div>
+      `;
+
+      expect(extractAsins(html, 5)).toEqual(['B123456789']);
+    });
   });
 
   describe('parseBookPage', () => {
@@ -103,6 +118,56 @@ describe('AmazonScraper', () => {
       expect(result.pageCount).toBe(1234);
     });
 
+    describe('series attributes', () => {
+      function seriesHtml(label: string, name = 'The Expanse'): string {
+        return `
+          <span id="productTitle">A Book</span>
+          <div id="rpi-attribute-book_details-series">
+            <span class="rpi-attribute-label"><span>${label}</span></span>
+            <span class="rpi-attribute-value"><a href="/dp/X"><span>${name}</span></a></span>
+          </div>
+        `;
+      }
+
+      it('reads the series name, position and length from one label', () => {
+        const result = parseBookPage(seriesHtml('Book 3 of 7'));
+
+        expect(result.seriesName).toBe('The Expanse');
+        expect(result.seriesIndex).toBe('3');
+        expect(result.seriesTotalBooks).toBe(7);
+      });
+
+      it('keeps a fractional position while still reading the length', () => {
+        const result = parseBookPage(seriesHtml('Book 2.5 of 9'));
+
+        expect(result.seriesIndex).toBe('2.5');
+        expect(result.seriesTotalBooks).toBe(9);
+      });
+
+      it('still yields the position when the label states no length', () => {
+        const result = parseBookPage(seriesHtml('Book 3 of'));
+
+        expect(result.seriesIndex).toBe('3');
+        expect(result.seriesTotalBooks).toBeUndefined();
+      });
+
+      it('preserves trailing zeros in a fractional position', () => {
+        expect(parseBookPage(seriesHtml('Book 5.10 of 12')).seriesIndex).toBe('5.10');
+      });
+
+      it('yields nothing when the page has no series block', () => {
+        const result = parseBookPage('<span id="productTitle">A Book</span>');
+
+        expect(result.seriesName).toBeUndefined();
+        expect(result.seriesIndex).toBeUndefined();
+        expect(result.seriesTotalBooks).toBeUndefined();
+      });
+
+      it('rejects a length beyond the supported ceiling', () => {
+        expect(parseBookPage(seriesHtml('Book 1 of 10001')).seriesTotalBooks).toBeUndefined();
+      });
+    });
+
     it('rejects a negative rating value', () => {
       const html = `
         <span id="productTitle">Bad Rating Book</span>
@@ -131,5 +196,34 @@ describe('AmazonScraper', () => {
       expect(result.communityRating).toBe(4.0);
       expect(result.communityRatingCount).toBeUndefined();
     });
+  });
+});
+
+describe('Amazon cover size', () => {
+  function page(dynamicImage: string): string {
+    return `<span id="productTitle">Dune</span><img id="landingImage" data-a-dynamic-image='${dynamicImage}'>`;
+  }
+
+  it('reads an unsized pair as height then width, the order Amazon pages use', () => {
+    expect(parseBookPage(page('{"https://m.media-amazon.com/images/I/1.jpg": [461, 300]}'))).toMatchObject({
+      coverWidth: 300,
+      coverHeight: 461,
+    });
+  });
+
+  it('lets the sized side of a variant url say which number is which', () => {
+    expect(parseBookPage(page('{"https://m.media-amazon.com/images/I/1._SY522_.jpg": [522, 340]}'))).toMatchObject({
+      coverWidth: 340,
+      coverHeight: 522,
+    });
+    expect(parseBookPage(page('{"https://m.media-amazon.com/images/I/1._SX300_.jpg": [300, 461]}'))).toMatchObject({
+      coverWidth: 300,
+      coverHeight: 461,
+    });
+  });
+
+  it('keeps the largest declared size', () => {
+    const map = '{"https://m.media-amazon.com/images/I/1._SY200_.jpg": [200, 130], "https://m.media-amazon.com/images/I/1._SY522_.jpg": [522, 340]}';
+    expect(parseBookPage(page(map))).toMatchObject({ coverWidth: 340, coverHeight: 522 });
   });
 });

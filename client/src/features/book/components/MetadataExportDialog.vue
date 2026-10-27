@@ -74,8 +74,8 @@ const canRun = computed(() => {
 })
 
 const scopeSummary = computed(() => {
-  if (scope.value === 'selected') return t('book.export.selectedRowsSummary', { count: selectedCountLabel.value }, props.selectedCount)
-  return t('book.export.matchingRowsSummary', { count: totalCountLabel.value }, props.totalCount)
+  if (scope.value === 'selected') return t('book.export.selectedRowsSummary', { count: props.selectedCount })
+  return t('book.export.matchingRowsSummary', { count: props.totalCount })
 })
 
 const sizeHintClass = computed(() => {
@@ -213,7 +213,7 @@ watch(
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center">
-      <div class="absolute inset-0 bg-black/40 backdrop-blur-sm" @click="closeDialog" />
+      <div class="absolute inset-0 bg-scrim" @click="closeDialog" />
       <div class="relative z-10 mx-4 w-full max-w-2xl rounded-lg border border-border bg-card shadow-2xl">
         <div class="flex items-center justify-between border-b border-border px-5 py-4">
           <div class="flex items-center gap-2">

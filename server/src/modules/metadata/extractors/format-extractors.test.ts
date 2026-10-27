@@ -4,7 +4,8 @@ vi.mock('fs/promises', () => ({
   readFile: vi.fn(),
 }));
 
-vi.mock('../lib/epub', () => ({
+vi.mock('../lib/epub', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/epub')>()),
   extractEpubMetadata: vi.fn(),
 }));
 
@@ -120,8 +121,9 @@ describe('metadata format extractors', () => {
       publishedYear: 1965,
       language: 'en',
       seriesName: 'Dune Chronicles',
-      seriesIndex: 1,
+      seriesIndex: '1',
       authors: [{ name: 'Frank Herbert', sortName: null }],
+      narrators: [],
       genres: ['Science Fiction'],
       tags: ['SF', 'Classic'],
       rating: 9,
@@ -168,6 +170,7 @@ describe('metadata format extractors', () => {
       seriesName: null,
       seriesIndex: null,
       authors: [{ name: 'Frank Herbert', sortName: null }],
+      narrators: [],
       genres: [],
       tags: ['Science Fiction'],
       rating: null,
@@ -230,6 +233,51 @@ describe('metadata format extractors', () => {
     expect(mockReadFile).toHaveBeenCalledWith('/books/metadata.opf', 'utf8');
   });
 
+  it('opf extractor carries narrators declared by role nrt', async () => {
+    mockReadFile.mockResolvedValue(`
+      <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+          <dc:title>Audiobook Title</dc:title>
+          <dc:creator opf:role="aut">Sidecar Author</dc:creator>
+          <dc:creator opf:role="nrt">Sidecar Narrator</dc:creator>
+        </metadata>
+      </package>
+    `);
+
+    await expect(new OpfFormatExtractor().extract('/books/book.opf')).resolves.toEqual(
+      expect.objectContaining({
+        authors: [{ name: 'Sidecar Author', sortName: null }],
+        narrators: ['Sidecar Narrator'],
+      }),
+    );
+  });
+
+  it('opf extractor treats a narrator-only sidecar as usable metadata', async () => {
+    mockReadFile.mockResolvedValue(`
+      <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+          <dc:contributor opf:role="nrt">Sidecar Narrator</dc:contributor>
+        </metadata>
+      </package>
+    `);
+
+    await expect(new OpfFormatExtractor().extract('/books/book.opf')).resolves.toEqual(expect.objectContaining({ narrators: ['Sidecar Narrator'] }));
+  });
+
+  it('opf extractor leaves narrators undefined when the sidecar names none, so nothing is wiped', async () => {
+    mockReadFile.mockResolvedValue(`
+      <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+        <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+          <dc:title>Sidecar Title</dc:title>
+          <dc:creator opf:role="aut">Sidecar Author</dc:creator>
+        </metadata>
+      </package>
+    `);
+
+    const parsed = await new OpfFormatExtractor().extract('/books/book.opf');
+    expect(parsed?.narrators).toBeUndefined();
+  });
+
   it('opf extractor returns null for sidecars without usable metadata', async () => {
     mockReadFile.mockResolvedValue('<package><metadata></metadata></package>');
 
@@ -286,12 +334,17 @@ describe('metadata format extractors', () => {
     mockParseFb2File.mockResolvedValue({
       title: 'Roadside Picnic',
       description: 'Sci-fi classic',
+      publishedDate: null,
       publishedYear: 1972,
       language: 'ru',
       seriesName: null,
       seriesIndex: null,
       authors: [{ name: 'Arkady Strugatsky', sortName: null }],
       genres: ['Science Fiction'],
+      tags: [],
+      publisher: null,
+      isbn13: null,
+      custom: {},
     });
     mockExtractFb2Cover.mockRejectedValue(new Error('missing binary'));
 
@@ -302,6 +355,65 @@ describe('metadata format extractors', () => {
         cover: null,
       }),
     );
+  });
+
+  it('fb2 extractor maps namespaced custom-info onto book fields', async () => {
+    mockParseFb2File.mockResolvedValue({
+      title: 'Nemesis',
+      description: null,
+      publishedDate: '2018-03-14',
+      publishedYear: 2018,
+      language: 'en',
+      seriesName: 'Pathway',
+      seriesIndex: '2',
+      authors: [],
+      genres: [],
+      tags: ['favourite'],
+      publisher: 'Painted Quill Press',
+      isbn13: '9781729419007',
+      custom: { subtitle: 'A Tale', rating: '4.5', pageCount: '412', goodreadsId: '12345', isbn10: '1729419001' },
+    });
+    mockExtractFb2Cover.mockResolvedValue(Buffer.from('cover'));
+
+    const result = await new Fb2FormatExtractor().extract('/books/test.fb2');
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        subtitle: 'A Tale',
+        rating: 4.5,
+        pageCount: 412,
+        goodreadsId: '12345',
+        isbn10: '1729419001',
+        isbn13: '9781729419007',
+        publisher: 'Painted Quill Press',
+        publishedDate: '2018-03-14',
+        tags: ['favourite'],
+      }),
+    );
+  });
+
+  it('fb2 extractor leaves numeric custom-info null when the stored value is not a number', async () => {
+    mockParseFb2File.mockResolvedValue({
+      title: 'Nemesis',
+      description: null,
+      publishedDate: null,
+      publishedYear: null,
+      language: null,
+      seriesName: null,
+      seriesIndex: null,
+      authors: [],
+      genres: [],
+      tags: [],
+      publisher: null,
+      isbn13: null,
+      custom: { rating: 'not-a-number', pageCount: '' },
+    });
+    mockExtractFb2Cover.mockResolvedValue(null);
+
+    const result = await new Fb2FormatExtractor().extract('/books/test.fb2');
+
+    expect(result?.rating).toBeNull();
+    expect(result?.pageCount).toBeNull();
   });
 
   it('comic extractor uses filename fallback when embedded metadata is missing', async () => {
@@ -315,6 +427,8 @@ describe('metadata format extractors', () => {
         publishedYear: 2014,
         authors: [],
         genres: [],
+        tags: [],
+        comicvineId: null,
       }),
     );
   });
@@ -327,11 +441,12 @@ describe('metadata format extractors', () => {
       publishedYear: 2020,
       language: 'en',
       seriesName: 'Batman',
-      seriesIndex: 55,
+      seriesIndex: '55',
       authors: [{ name: 'Writer', sortName: null }],
       genres: ['Comics'],
       tags: ['Superhero'],
       ranobedbId: 'comic-ranobe',
+      comicvineId: '140529',
       comicMetadata: { issueNumber: '55', volumeName: 'Batman' },
     });
     mockExtractCbrCover.mockResolvedValue(null);
@@ -340,10 +455,27 @@ describe('metadata format extractors', () => {
       expect.objectContaining({
         title: 'Batman',
         genres: ['Comics'],
+        tags: ['Superhero'],
         ranobedbId: 'comic-ranobe',
+        comicvineId: '140529',
         comicMetadata: { issueNumber: '55', volumeName: 'Batman' },
       }),
     );
+  });
+
+  it('comic extractor keeps Tags as tags and never promotes them to genres', async () => {
+    mockExtractCbzMetadata.mockResolvedValue({
+      title: 'Ninja Scroll',
+      authors: [],
+      genres: [],
+      tags: ['ninja', 'school life'],
+    } as any);
+    mockExtractCbzCover.mockResolvedValue(null);
+
+    const result = await new ComicFormatExtractor('cbz').extract('/books/ninja.cbz');
+
+    expect(result?.genres).toEqual([]);
+    expect(result?.tags).toEqual(['ninja', 'school life']);
   });
 
   it('comic extractor uses CBR reader when a CBZ file is actually a RAR archive', async () => {
@@ -387,8 +519,17 @@ describe('metadata format extractors', () => {
       expect.objectContaining({
         publishedYear: 1992,
         cover: null,
+        isbn13: '9780553380958',
       }),
     );
+  });
+
+  it('puts a formatted MOBI ISBN-10 in isbn10', async () => {
+    mockParseMobiFile.mockResolvedValue({ title: 'Book', isbn: '0-9752298-0-x', authors: [], tags: [] } as never);
+    mockExtractMobiCover.mockResolvedValue(null);
+    const result = await new MobiFormatExtractor().extract('/books/book.mobi');
+    expect(result?.isbn10).toBe('097522980X');
+    expect(result?.isbn13).toBeUndefined();
   });
 
   it('pdf extractor returns null for unparseable PDFs', async () => {
@@ -411,6 +552,7 @@ describe('metadata format extractors', () => {
       seriesName: null,
       seriesIndex: null,
       authors: [],
+      narrators: [],
       genres: [],
       tags: [],
       rating: null,
@@ -454,7 +596,7 @@ describe('metadata format extractors', () => {
       publishedYear: 2021,
       language: 'en',
       seriesName: 'Project Hail Mary',
-      seriesIndex: 1,
+      seriesIndex: '1',
       authors: [{ name: 'Andy Weir', sortName: null }],
       genres: ['Science Fiction'],
       audibleId: 'B08G9PRS1K',
@@ -470,7 +612,7 @@ describe('metadata format extractors', () => {
         title: 'Project Hail Mary',
         subtitle: 'A Novel',
         seriesName: 'Project Hail Mary',
-        seriesIndex: 1,
+        seriesIndex: '1',
         genres: ['Science Fiction'],
         audibleId: 'B08G9PRS1K',
         librofmId: '9781234567890',
@@ -480,5 +622,12 @@ describe('metadata format extractors', () => {
         cover: Buffer.from('cover'),
       }),
     );
+  });
+
+  // Persisting an unreadable file as empty metadata would wipe whatever the book already had.
+  it('AudioFormatExtractor returns null when the file cannot be read', async () => {
+    mockExtractAudioMetadata.mockResolvedValue(null);
+
+    await expect(new AudioFormatExtractor().extract('/books/hail-mary.m4b')).resolves.toBeNull();
   });
 });

@@ -1,11 +1,18 @@
 import { onUnmounted, ref } from 'vue'
 import { api, getAccessToken } from '@/lib/api'
+import { i18n } from '@/i18n'
 import { useFoliateAnnotations } from './useFoliateAnnotations'
 import { useFoliateSelection } from './useFoliateSelection'
 import { useFoliateInput } from './useFoliateInput'
+import { ensureMediaOverlayActiveClass } from '../../media-overlay/lib/media-overlay-highlight'
+import { scalePublisherFontSizes } from '../lib/publisher-font-sizes'
 import type { EpubBookInfo, EpubReaderSettings } from '@bookorbit/types'
 
 export interface RelocateDetail {
+  /** Why the view moved: a user's `page`/`snap`/`scroll`, a programmatic `navigation`, or an `anchor` relayout. */
+  reason?: string
+  /** The view is still opening the book at its starting position. */
+  restoring?: boolean
   cfi?: string | null
   fraction?: number
   /** Paginator section-local page fraction (page-1)/(pages-2), paginated only. */
@@ -67,9 +74,7 @@ function isFixedLayoutBook(book: unknown): boolean {
 }
 
 /** Wait for post-load style application (setTimeout 0), paint, and section fonts. */
-async function waitForReaderLayoutSettle(view: {
-  renderer?: FoliateRenderer & { getContents?: () => { doc?: Document }[] }
-}): Promise<void> {
+async function waitForReaderLayoutSettle(view: { renderer?: FoliateRenderer & { getContents?: () => { doc?: Document }[] } }): Promise<void> {
   // Load handler applies styles on a macrotask; let that run first.
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 0)
@@ -113,11 +118,31 @@ function makeFoliateFetchFile(): FoliateFetchFile {
   return fetchFile
 }
 
+export interface FoliateMediaOverlay extends EventTarget {
+  start: (index?: number, filter?: (item: { text: string }, i: number, items: { text: string }[]) => boolean) => Promise<boolean>
+  pause: () => void
+  resume: () => void
+  stop: () => void
+  next: () => void
+  prev: () => void
+  setRate: (rate: number) => void
+  setVolume: (volume: number) => void
+}
+
+export interface FoliateOpenOptions extends EpubOpenOptions {
+  cfi?: string | null
+  fallbackFraction?: number
+  mediaOverlayFragment?: string | null
+  mediaOverlaySectionIndex?: number | null
+}
+
 export function useFoliate(
   container: () => HTMLElement | null,
   onRelocate?: (detail: RelocateDetail) => void,
   onApplyStyles?: (renderer: FoliateRenderer) => void,
   onMiddleTap?: () => void,
+  onChapterLoad?: (doc: Document, viewEl: HTMLElement) => void,
+  canNavigate?: () => boolean,
   onDocumentLoad?: (doc: Document) => void,
 ) {
   const loading = ref(false)
@@ -127,6 +152,7 @@ export function useFoliate(
   const viewRef = ref<unknown>(null)
   const bookLanguage = ref<string>('en')
   const isFixedLayout = ref(false)
+  const hasMediaOverlay = ref(false)
 
   let initialRestoreDone: Promise<void> | undefined
   let resolveInitialRestore: (() => void) | undefined
@@ -148,7 +174,15 @@ export function useFoliate(
 
   const annotations = useFoliateAnnotations()
   const selection = useFoliateSelection(() => viewRef.value)
-  const input = useFoliateInput(() => viewRef.value, onMiddleTap, selection.handleSelectionEnd, selection.handleSelectionChange)
+  const input = useFoliateInput(
+    () => viewRef.value,
+    onMiddleTap,
+    selection.handleSelectionEnd,
+    selection.handleSelectionChange,
+    canNavigate,
+    selection.handleInteractionStart,
+    selection.handleInteractionEnd,
+  )
 
   function notifyDocumentLoad(doc: Document | null | undefined) {
     if (!doc) return
@@ -174,7 +208,16 @@ export function useFoliate(
     await customElements.whenDefined('foliate-view')
   }
 
-  async function open(bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number, options?: EpubOpenOptions) {
+  async function open(
+    bookId: number,
+    fileId: number,
+    format: string,
+    optionsOrCfi: FoliateOpenOptions | string | null = {},
+    fallbackFraction?: number,
+    epubOptions?: EpubOpenOptions,
+  ) {
+    const options: FoliateOpenOptions =
+      typeof optionsOrCfi === 'object' && optionsOrCfi !== null ? optionsOrCfi : { ...epubOptions, cfi: optionsOrCfi, fallbackFraction }
     initialRestoreDone = new Promise<void>((resolve) => {
       resolveInitialRestore = resolve
     })
@@ -190,6 +233,7 @@ export function useFoliate(
     loading.value = !hasCachedProgress
     error.value = null
     isFixedLayout.value = false
+    hasMediaOverlay.value = false
 
     let loadTimeoutId: ReturnType<typeof setTimeout> | undefined
     let initialNavigationPending = true
@@ -202,7 +246,7 @@ export function useFoliate(
         open: (file: File) => Promise<void>
         goTo: (target: string | number) => Promise<unknown>
         goToFraction?: (f: number) => void | Promise<void>
-        book?: { toc?: unknown[] }
+        book?: { toc?: unknown[]; media?: { activeClass?: string } }
         getSectionFractions?: () => number[]
         prev?: () => void
         next?: () => void
@@ -212,6 +256,8 @@ export function useFoliate(
         deleteAnnotation?: (ann: { value: string }) => void
         search?: (opts: { query: string }) => AsyncIterable<unknown>
         clearSearch?: () => void
+        mediaOverlay?: FoliateMediaOverlay | null
+        startMediaOverlay?: () => unknown
       }
       view.style.cssText = 'width:100%;height:100%;display:block;'
       getViewEl()?.destroy?.()
@@ -239,6 +285,7 @@ export function useFoliate(
         annotations.reAddAll(view)
         if (detail?.doc) {
           notifyDocumentLoad(detail.doc)
+          onChapterLoad?.(detail.doc as Document, view as HTMLElement)
         } else {
           notifyDocumentLoad(view.renderer?.getContents?.()?.[0]?.doc)
         }
@@ -286,18 +333,7 @@ export function useFoliate(
       view.addEventListener('relocate', (e: Event) => {
         const detail = (e as CustomEvent).detail
         fraction.value = detail?.fraction ?? 0
-        if (import.meta.env.DEV) {
-          console.info('[foliate.relocate]', {
-            source: detail?.source ?? null,
-            koboLocationType: detail?.koboLocationType ?? null,
-            koboLocationValue: detail?.koboLocationValue ?? null,
-            contentSourceProgressPercent: detail?.contentSourceProgressPercent ?? null,
-            koreaderProgress: detail?.koreaderProgress ?? null,
-            fraction: detail?.fraction ?? null,
-            cfi: detail?.cfi ?? null,
-          })
-        }
-        onRelocate?.(detail)
+        onRelocate?.(initialNavigationPending ? { ...detail, restoring: true } : detail)
       })
 
       view.addEventListener('error', (e: Event) => {
@@ -312,7 +348,7 @@ export function useFoliate(
 
       loadTimeoutId = setTimeout(() => {
         if (loading.value || restoring.value) {
-          error.value = 'Could not open the book. Your browser may not fully support the reader. Try refreshing or using a different browser.'
+          error.value = i18n.global.t('reader.bookLoadTimeout')
           loading.value = false
           restoring.value = false
           finishInitialRestore()
@@ -340,9 +376,11 @@ export function useFoliate(
           | undefined
         if (!makeStreamingBook) throw new Error('makeStreamingBook not available')
         const book = await makeStreamingBook(bookId, '/api/v1/epub', bookInfo, makeFoliateFetchFile(), null, fileId)
+        ensureMediaOverlayActiveClass(book)
         applyEpubOpenOptions(book, options)
         shouldRestoreByFraction = isFixedLayoutBook(book)
         isFixedLayout.value = shouldRestoreByFraction
+        if (!shouldRestoreByFraction) scalePublisherFontSizes(book)
         await view.open(book as never)
       } else {
         const mimeType = format === 'pdf' ? 'application/pdf' : 'application/zip'
@@ -353,15 +391,25 @@ export function useFoliate(
         const file = new File([blob], `book-file-${fileId}.${ext}`, { type: mimeType })
         await view.open(file)
       }
+      hasMediaOverlay.value = !!view.mediaOverlay
       // Apply flow/font metrics before the first navigation so paginated pages and
       // scrolled offsets resolve against the reader's real layout, not defaults.
       if (onApplyStyles) onApplyStyles(view.renderer)
+      const navigateTo = async (target: string | number | null | undefined) => {
+        if (target === null || target === undefined) return false
+        try {
+          const result = await view.goTo(target)
+          return isResolvedNavigation(result)
+        } catch {
+          return false
+        }
+      }
 
       type RestoreMode = 'cfi' | 'fraction' | 'section' | 'start'
       let restoreMode: RestoreMode = 'start'
       let didNavigate = false
 
-      if (options?.initialSectionIndex !== undefined) {
+      if (options.initialSectionIndex !== undefined) {
         await view
           .goTo(options.initialSectionIndex)
           .then((result) => {
@@ -370,25 +418,29 @@ export function useFoliate(
           })
           .catch(() => {})
       }
-      if (!didNavigate && cfi && !shouldRestoreByFraction) {
-        await view
-          .goTo(cfi)
-          .then((result) => {
-            didNavigate = isResolvedNavigation(result)
-            if (didNavigate) restoreMode = 'cfi'
-          })
-          .catch(() => {})
+      if (!didNavigate && options.cfi && !shouldRestoreByFraction) {
+        didNavigate = await navigateTo(options.cfi)
+        if (didNavigate) restoreMode = 'cfi'
       }
-      if (!didNavigate && fallbackFraction !== undefined && fallbackFraction > 0) {
+      if (!didNavigate && options.fallbackFraction !== undefined && options.fallbackFraction > 0) {
         if (typeof view.goToFraction === 'function') {
           try {
-            await view.goToFraction(fallbackFraction)
+            await view.goToFraction(options.fallbackFraction)
             didNavigate = true
             restoreMode = 'fraction'
           } catch {
             didNavigate = false
           }
         }
+      }
+      if (!didNavigate && options.fallbackFraction === 0) {
+        didNavigate = await navigateTo(0)
+      }
+      if (!didNavigate && options.mediaOverlayFragment) {
+        didNavigate = await navigateTo(options.mediaOverlayFragment)
+      }
+      if (!didNavigate && options.mediaOverlaySectionIndex !== null && options.mediaOverlaySectionIndex !== undefined) {
+        didNavigate = await navigateTo(options.mediaOverlaySectionIndex)
       }
       if (!didNavigate) {
         await view.goTo(0).catch(() => {})
@@ -403,16 +455,16 @@ export function useFoliate(
         if (onApplyStyles) onApplyStyles(view.renderer)
         await waitForReaderLayoutSettle(view)
 
-        if (restoreMode === 'cfi' && cfi) {
-          await view.goTo(cfi).catch(() => {})
-        } else if (restoreMode === 'fraction' && fallbackFraction !== undefined && fallbackFraction > 0) {
+        if (restoreMode === 'cfi' && options.cfi) {
+          await view.goTo(options.cfi).catch(() => {})
+        } else if (restoreMode === 'fraction' && options.fallbackFraction !== undefined && options.fallbackFraction > 0) {
           if (typeof view.goToFraction === 'function') {
-            await view.goToFraction(fallbackFraction).catch(() => {})
+            await Promise.resolve(view.goToFraction(options.fallbackFraction)).catch(() => {})
           }
         }
 
         // After CFI/fraction, re-snap paginated view to the exact saved page.
-        const sectionFraction = options?.sectionFraction
+        const sectionFraction = options.sectionFraction
         if (
           typeof sectionFraction === 'number' &&
           Number.isFinite(sectionFraction) &&
@@ -432,7 +484,7 @@ export function useFoliate(
     } catch (e) {
       console.error('[useFoliate]', e)
       clearTimeout(loadTimeoutId)
-      error.value = e instanceof Error ? e.message : 'Failed to open book'
+      error.value = e instanceof Error && e.message ? e.message : i18n.global.t('reader.failedToLoadBook')
       loading.value = false
       restoring.value = false
       finishInitialRestore()
@@ -449,9 +501,11 @@ export function useFoliate(
           getSectionFractions?: () => number[]
           resolveNavigation?: (target: string | number) => { index?: number } | Promise<{ index?: number }>
           getTOCItemOf?: (target: string | number) => Promise<{ label?: string } | null>
-          book?: { toc?: unknown[] }
+          book?: { toc?: unknown[]; media?: { activeClass?: string } }
           renderer?: FoliateRenderer
           destroy?: () => void
+          mediaOverlay?: FoliateMediaOverlay | null
+          startMediaOverlay?: () => unknown
         })
       | null
   }
@@ -501,9 +555,12 @@ export function useFoliate(
     fraction,
     bookLanguage,
     isFixedLayout,
+    hasMediaOverlay,
+    getMediaOverlay: (): FoliateMediaOverlay | null => getViewEl()?.mediaOverlay ?? null,
+    startMediaOverlay: (): unknown => getViewEl()?.startMediaOverlay?.(),
+    getMediaActiveClass: (): string | null => getViewEl()?.book?.media?.activeClass ?? null,
     view: viewRef,
-    open: (bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number, options?: EpubOpenOptions) =>
-      open(bookId, fileId, format, cfi, fallbackFraction, options),
+    open,
     prev: () => getViewEl()?.prev?.(),
     next: () => getViewEl()?.next?.(),
     goTo: (t: string | number) => getViewEl()?.goTo?.(t),
@@ -520,6 +577,7 @@ export function useFoliate(
     deleteAnnotation: (cfi: string) => annotations.deleteAnnotation(viewRef.value, cfi),
     redrawAnnotation: (cfi: string, color: string, style: string) => annotations.redrawAnnotation(viewRef.value, cfi, color, style),
     setTextSelectedHandler: selection.setHandler,
+    setSelectionInteractionStartHandler: selection.setInteractionStartHandler,
     setAnnotationClickHandler,
   }
 }

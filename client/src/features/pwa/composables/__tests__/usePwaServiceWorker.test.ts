@@ -7,8 +7,8 @@ type RegisterOptions = {
   onOfflineReady?: () => void
 }
 
-const registerSW = vi.fn()
-const updateServiceWorker = vi.fn(async () => undefined)
+const registerSW = vi.fn<(...args: unknown[]) => unknown>()
+const updateServiceWorker = vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined)
 let lastOptions: RegisterOptions | undefined
 
 vi.mock('virtual:pwa-register', () => ({
@@ -31,7 +31,7 @@ describe('usePwaServiceWorker', () => {
     Object.defineProperty(navigator, 'serviceWorker', {
       configurable: true,
       value: {
-        getRegistration: vi.fn(),
+        getRegistration: vi.fn<(...args: unknown[]) => unknown>(),
       },
     })
 
@@ -123,7 +123,7 @@ describe('usePwaServiceWorker', () => {
   })
 
   it('restartNow clears dismiss state before reload', async () => {
-    const reload = vi.fn()
+    const reload = vi.fn<() => void>()
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: { ...window.location, reload },

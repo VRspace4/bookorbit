@@ -290,13 +290,11 @@ describe('useReaderProgress', () => {
       (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
     )
     expect(saveCalls.length).toBe(1)
-    expect(JSON.parse((saveCalls[0]![1] as { body: string }).body)).toMatchObject({
-      cfi: 'epubcfi(/6/8)',
-      percentage: 42,
-      positionSeconds: null,
-      ttsSectionIndex: null,
-      ttsWordIndex: null,
-    })
+    const body = JSON.parse((saveCalls[0]![1] as { body: string }).body)
+    expect(body).toMatchObject({ cfi: 'epubcfi(/6/8)', percentage: 42 })
+    // A page turn must not clear a narration or read-aloud position another device saved.
+    expect(body).not.toHaveProperty('positionSeconds')
+    expect(body).not.toHaveProperty('ttsSectionIndex')
 
     vi.useRealTimers()
   })
@@ -414,10 +412,10 @@ describe('useReaderProgress', () => {
     vi.useRealTimers()
   })
 
-  it('can update relocate UI without writing to localStorage during restore', () => {
+  it('updates relocate UI without caching a reflow that moves no reader', () => {
     const progress = useReaderProgress(1, 17, elapsedMinutes)
 
-    progress.onRelocate(makeDetail({ cfi: 'epubcfi(/6/12)', fraction: 0.62 }), { persist: false })
+    progress.onRelocate(makeDetail({ cfi: 'epubcfi(/6/12)', fraction: 0.62, reason: 'anchor' }))
 
     expect(progress.cfi.value).toBe('epubcfi(/6/12)')
     expect(progress.percentage.value).toBe(62)

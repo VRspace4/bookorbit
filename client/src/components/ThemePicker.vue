@@ -1,27 +1,81 @@
 <script setup lang="ts">
-import { Moon, Sun } from '@lucide/vue'
+import { Monitor, Moon, Sun } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
 import { useThemeStore } from '@/stores/theme'
 
 const { t } = useI18n()
 const themeStore = useThemeStore()
+const props = withDefaults(
+  defineProps<{
+    touch?: boolean
+    /** Fill the row at a readable size, for panels where every other control spans the width. */
+    block?: boolean
+  }>(),
+  { touch: false, block: false },
+)
+
+function handleLightTheme() {
+  themeStore.setTheme('light')
+}
+
+function handleDarkTheme() {
+  themeStore.setTheme('dark')
+}
+
+function handleSystemTheme() {
+  themeStore.setTheme('system')
+}
 </script>
 
 <template>
-  <div class="flex items-center gap-1 p-1 rounded-md border border-border bg-muted/50 w-fit">
+  <div
+    class="flex items-center rounded-md border border-border bg-muted/50 p-1"
+    :class="props.touch ? 'w-full gap-0.5' : props.block ? 'w-full gap-1' : 'w-fit gap-1'"
+  >
     <button
-      class="flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-medium transition-colors focus:outline-none"
-      :class="themeStore.theme === 'light' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'"
-      @click="themeStore.theme = 'light'"
+      type="button"
+      class="flex items-center gap-1.5 rounded-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      :class="[
+        props.touch
+          ? 'h-9 min-w-0 flex-1 justify-center px-1.5 text-sm'
+          : props.block
+            ? 'h-8 min-w-0 flex-1 justify-center px-2 text-[13px]'
+            : 'px-2.5 py-1 text-[10px]',
+        themeStore.theme === 'light' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground',
+      ]"
+      @click="handleLightTheme"
     >
       <Sun :size="12" /> {{ t('components.themePicker.light') }}
     </button>
     <button
-      class="flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-medium transition-colors focus:outline-none"
-      :class="themeStore.theme === 'dark' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground'"
-      @click="themeStore.theme = 'dark'"
+      type="button"
+      class="flex items-center gap-1.5 rounded-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      :class="[
+        props.touch
+          ? 'h-9 min-w-0 flex-1 justify-center px-1.5 text-sm'
+          : props.block
+            ? 'h-8 min-w-0 flex-1 justify-center px-2 text-[13px]'
+            : 'px-2.5 py-1 text-[10px]',
+        themeStore.theme === 'dark' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground',
+      ]"
+      @click="handleDarkTheme"
     >
       <Moon :size="12" /> {{ t('components.themePicker.dark') }}
+    </button>
+    <button
+      type="button"
+      class="flex items-center gap-1.5 rounded-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+      :class="[
+        props.touch
+          ? 'h-9 min-w-0 flex-1 justify-center px-1.5 text-sm'
+          : props.block
+            ? 'h-8 min-w-0 flex-1 justify-center px-2 text-[13px]'
+            : 'px-2.5 py-1 text-[10px]',
+        themeStore.theme === 'system' ? 'bg-background shadow-sm text-foreground' : 'text-muted-foreground hover:text-foreground',
+      ]"
+      @click="handleSystemTheme"
+    >
+      <Monitor :size="12" /> {{ t('components.themePicker.system') }}
     </button>
   </div>
 </template>

@@ -1,8 +1,8 @@
-import { AuthorAutoEnrichmentWriteMode } from '@bookorbit/types';
 import { NotificationType } from '@bookorbit/types';
 
 import { AUTHOR_ENRICHMENT_REASONS } from './author-enrichment-reasons';
 import { AuthorEnrichmentSessionService } from './author-enrichment-session.service';
+import { AuthorMetadataPreferenceResolver } from './metadata/author-metadata-preference-resolver';
 import { AuthorEnrichmentOrchestratorService } from './author-enrichment-orchestrator.service';
 
 describe('AuthorEnrichmentOrchestratorService', () => {
@@ -27,8 +27,8 @@ describe('AuthorEnrichmentOrchestratorService', () => {
     execute: vi.fn(),
   };
 
-  const appSettings = {
-    isAuthorsProviderAudnexusEnabled: vi.fn(),
+  const metadataPreferences = {
+    getPreferences: vi.fn(),
   };
 
   const enrichmentConfig = {
@@ -71,6 +71,7 @@ describe('AuthorEnrichmentOrchestratorService', () => {
       processing: 0,
       rateLimited: 0,
       failed: 0,
+      latestFailureAt: null,
       done: 0,
       total: 0,
     });
@@ -84,13 +85,14 @@ describe('AuthorEnrichmentOrchestratorService', () => {
       provider: 'audnexus',
       descriptionUpdated: true,
       imageUpdated: false,
+      outboundRequests: 1,
+      cacheServed: [],
     });
 
-    appSettings.isAuthorsProviderAudnexusEnabled.mockResolvedValue(true);
+    metadataPreferences.getPreferences.mockResolvedValue(new AuthorMetadataPreferenceResolver().getDefaultPreferences());
     enrichmentConfig.getConfig.mockResolvedValue({
       enabled: true,
       triggerOnImport: true,
-      writeMode: AuthorAutoEnrichmentWriteMode.MISSING_ONLY,
       conditions: { neverEnriched: true, missingBio: false, missingPhoto: false },
     });
     enrichmentConfig.isPaused.mockResolvedValue(false);
@@ -100,8 +102,8 @@ describe('AuthorEnrichmentOrchestratorService', () => {
     service = new AuthorEnrichmentOrchestratorService(
       queueRepo as never,
       executor as never,
-      appSettings as never,
       enrichmentConfig as never,
+      metadataPreferences as never,
       metadataEvents as never,
       session,
       notificationService as never,
@@ -113,7 +115,6 @@ describe('AuthorEnrichmentOrchestratorService', () => {
     enrichmentConfig.getConfig.mockResolvedValue({
       enabled: false,
       triggerOnImport: true,
-      writeMode: AuthorAutoEnrichmentWriteMode.MISSING_ONLY,
       conditions: { neverEnriched: true, missingBio: false, missingPhoto: false },
     });
 
@@ -128,13 +129,137 @@ describe('AuthorEnrichmentOrchestratorService', () => {
     await (service as any).pollOnce();
 
     expect(queueRepo.markProcessing).toHaveBeenCalledWith(22);
-    expect(executor.execute).toHaveBeenCalledWith({
-      authorId: 22,
-      writeMode: AuthorAutoEnrichmentWriteMode.MISSING_ONLY,
-      audnexusEnabled: true,
-    });
+    expect(executor.execute).toHaveBeenCalledWith(
+      {
+        authorId: 22,
+        preferences: expect.objectContaining({ fields: expect.any(Object) }),
+      },
+      { policy: 'default', allowFallback: false },
+    );
     expect(queueRepo.markDone).toHaveBeenCalledWith(22, false);
     expect(queueRepo.markFailed).not.toHaveBeenCalled();
+  });
+
+  describe('metadata cache directive', () => {
+    it('uses the cache without fallback before the final attempt', async () => {
+      await (service as any).processOne(10, 0);
+      await (service as any).processOne(11, 4);
+
+      expect(executor.execute).toHaveBeenNthCalledWith(1, expect.anything(), { policy: 'default', allowFallback: false });
+      expect(executor.execute).toHaveBeenNthCalledWith(2, expect.anything(), { policy: 'default', allowFallback: false });
+    });
+
+    it('allows a saved answer to stand in for a failing provider only on the final attempt', async () => {
+      await (service as any).processOne(12, 5);
+
+      expect(executor.execute).toHaveBeenCalledWith(expect.anything(), { policy: 'default', allowFallback: true });
+    });
+
+    it('still requeues a transient failure before the final attempt', async () => {
+      executor.execute.mockResolvedValue({
+        kind: 'failed',
+        message: 'provider unavailable',
+        provider: 'audnexus',
+        httpStatus: 503,
+        retryAfterMs: null,
+        transient: true,
+        descriptionUpdated: false,
+        imageUpdated: false,
+        outboundRequests: 1,
+        cacheServed: [],
+      });
+
+      await (service as any).processOne(13, 4);
+
+      expect(queueRepo.markFailed).toHaveBeenCalledWith(expect.objectContaining({ authorId: 13, nextAttemptAt: expect.any(Date) }));
+    });
+
+    it('goes live for rows queued with ignore_cache', async () => {
+      queueRepo.fetchDue.mockResolvedValue([{ authorId: 23, attemptCount: 0, authorName: null, reason: 'manual_backfill', ignoreCache: true }]);
+      vi.spyOn(service as any, 'randomDelay').mockResolvedValue(undefined);
+
+      await (service as any).pollOnce();
+
+      expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({ authorId: 23 }), { policy: 'refresh', allowFallback: false });
+    });
+
+    it('keeps fallback on the final attempt of an ignore_cache row', async () => {
+      await (service as any).processOne(24, 5, null, AUTHOR_ENRICHMENT_REASONS.MANUAL_BACKFILL, true);
+
+      expect(executor.execute).toHaveBeenCalledWith(expect.anything(), { policy: 'refresh', allowFallback: true });
+    });
+  });
+
+  describe('pacing', () => {
+    it('skips the provider delay when an item made no outbound requests', async () => {
+      queueRepo.fetchDue.mockResolvedValue([{ authorId: 30, attemptCount: 0, authorName: null, reason: 'manual_backfill', ignoreCache: false }]);
+      executor.execute.mockResolvedValue({
+        kind: 'done',
+        provider: 'audnexus',
+        descriptionUpdated: true,
+        imageUpdated: false,
+        outboundRequests: 0,
+        cacheServed: [{ provider: 'audnexus', source: 'cache', stale: false, cachedAt: '2026-09-01T00:00:00.000Z' }],
+      });
+      const randomDelay = vi.spyOn(service as any, 'randomDelay').mockResolvedValue(undefined);
+      const cacheOnlyYield = vi.spyOn(service as any, 'cacheOnlyYield').mockResolvedValue(undefined);
+
+      await (service as any).pollOnce();
+
+      expect(cacheOnlyYield).toHaveBeenCalledTimes(1);
+      expect(randomDelay).not.toHaveBeenCalled();
+    });
+
+    it('keeps the provider delay when an item went out', async () => {
+      queueRepo.fetchDue.mockResolvedValue([{ authorId: 31, attemptCount: 0, authorName: null, reason: 'manual_backfill', ignoreCache: false }]);
+      executor.execute.mockResolvedValue({
+        kind: 'skipped',
+        reason: 'no_match',
+        provider: null,
+        descriptionUpdated: false,
+        imageUpdated: false,
+        outboundRequests: 2,
+        cacheServed: [],
+      });
+      const randomDelay = vi.spyOn(service as any, 'randomDelay').mockResolvedValue(undefined);
+      const cacheOnlyYield = vi.spyOn(service as any, 'cacheOnlyYield').mockResolvedValue(undefined);
+
+      await (service as any).pollOnce();
+
+      expect(randomDelay).toHaveBeenCalledTimes(1);
+      expect(cacheOnlyYield).not.toHaveBeenCalled();
+    });
+
+    it('yields for about 100 ms instead of the 1-3 s provider delay', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolved = false;
+        void (service as any).cacheOnlyYield().then(() => {
+          resolved = true;
+        });
+        await vi.advanceTimersByTimeAsync(99);
+        expect(resolved).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(resolved).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('backfills pass ignoreCache through to the queue', async () => {
+    queueRepo.enqueueEligibleLinkedAuthors.mockResolvedValue(2);
+    queueRepo.enqueueAllLinkedAuthors.mockResolvedValue(3);
+
+    await service.backfillLinkedAuthors({ ignoreCache: true });
+    await service.backfillAllLinkedAuthors({ ignoreCache: true });
+    await service.backfillLinkedAuthors();
+
+    expect(queueRepo.enqueueEligibleLinkedAuthors).toHaveBeenNthCalledWith(1, AUTHOR_ENRICHMENT_REASONS.MANUAL_BACKFILL, expect.any(Object), {
+      ignoreCache: true,
+    });
+    expect(queueRepo.enqueueAllLinkedAuthors).toHaveBeenCalledWith(AUTHOR_ENRICHMENT_REASONS.MANUAL_BACKFILL_ALL, { ignoreCache: true });
+    expect(queueRepo.enqueueEligibleLinkedAuthors).toHaveBeenNthCalledWith(2, AUTHOR_ENRICHMENT_REASONS.MANUAL_BACKFILL, expect.any(Object), {});
   });
 
   it('marks rate-limited failures for retry with delayed nextAttemptAt', async () => {
@@ -331,8 +456,24 @@ describe('AuthorEnrichmentOrchestratorService', () => {
     session.incrementDone();
     session.incrementDone(true);
     queueRepo.getStatusSummary
-      .mockResolvedValueOnce({ queued: 0, processing: 0, rateLimited: 0, failed: 152, done: 0, total: 152 })
-      .mockResolvedValueOnce({ queued: 0, processing: 0, rateLimited: 0, failed: 152, done: 0, total: 152 });
+      .mockResolvedValueOnce({
+        queued: 0,
+        processing: 0,
+        rateLimited: 0,
+        failed: 152,
+        latestFailureAt: '2026-01-01T00:00:00.000Z',
+        done: 0,
+        total: 152,
+      })
+      .mockResolvedValueOnce({
+        queued: 0,
+        processing: 0,
+        rateLimited: 0,
+        failed: 152,
+        latestFailureAt: '2026-01-01T00:00:00.000Z',
+        done: 0,
+        total: 152,
+      });
 
     await (service as any).checkAndResetSession();
 
@@ -354,7 +495,15 @@ describe('AuthorEnrichmentOrchestratorService', () => {
 
   it('does not reset an active session or emit repeatedly for an empty session', async () => {
     session.addToTotal(1);
-    queueRepo.getStatusSummary.mockResolvedValueOnce({ queued: 1, processing: 0, rateLimited: 0, failed: 0, done: 0, total: 1 });
+    queueRepo.getStatusSummary.mockResolvedValueOnce({
+      queued: 1,
+      processing: 0,
+      rateLimited: 0,
+      failed: 0,
+      latestFailureAt: null,
+      done: 0,
+      total: 1,
+    });
 
     await (service as any).checkAndResetSession();
 
@@ -363,14 +512,30 @@ describe('AuthorEnrichmentOrchestratorService', () => {
     expect(gateway.emitStatus).not.toHaveBeenCalled();
 
     session.reset();
-    queueRepo.getStatusSummary.mockResolvedValueOnce({ queued: 0, processing: 0, rateLimited: 0, failed: 0, done: 0, total: 0 });
+    queueRepo.getStatusSummary.mockResolvedValueOnce({
+      queued: 0,
+      processing: 0,
+      rateLimited: 0,
+      failed: 0,
+      latestFailureAt: null,
+      done: 0,
+      total: 0,
+    });
     await (service as any).checkAndResetSession();
     expect(gateway.emitStatus).not.toHaveBeenCalled();
   });
 
   it('does not let a stale drained summary reset newly scheduled session work', async () => {
     session.addToTotal(1);
-    let resolveSummary!: (summary: { queued: number; processing: number; rateLimited: number; failed: number; done: number; total: number }) => void;
+    let resolveSummary!: (summary: {
+      queued: number;
+      processing: number;
+      rateLimited: number;
+      failed: number;
+      latestFailureAt: string | null;
+      done: number;
+      total: number;
+    }) => void;
     queueRepo.getStatusSummary.mockReturnValueOnce(
       new Promise((resolve) => {
         resolveSummary = resolve;
@@ -379,7 +544,7 @@ describe('AuthorEnrichmentOrchestratorService', () => {
 
     const resetPromise = (service as any).checkAndResetSession();
     session.addToTotal(1);
-    resolveSummary({ queued: 0, processing: 0, rateLimited: 0, failed: 0, done: 0, total: 0 });
+    resolveSummary({ queued: 0, processing: 0, rateLimited: 0, failed: 0, latestFailureAt: null, done: 0, total: 0 });
     await resetPromise;
 
     expect(session.getSnapshot()).toMatchObject({ sessionTotal: 2, sessionDone: 0, sessionFailed: 0 });

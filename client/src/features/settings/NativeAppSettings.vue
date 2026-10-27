@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed } from 'vue'
 import { CheckCircle2, Download, Smartphone } from '@lucide/vue'
 import { useInstallPrompt } from '@/features/pwa/composables/useInstallPrompt'
@@ -37,10 +38,10 @@ async function installApp() {
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <button v-if="installPrompt.isInstallable.value && !installPrompt.isInstalled.value" class="settings-btn-primary" @click="installApp">
+      <Button v-if="installPrompt.isInstallable.value && !installPrompt.isInstalled.value" @click="installApp">
         <Download :size="14" />
         Install BookOrbit
-      </button>
+      </Button>
       <p v-else-if="installPrompt.isIosInstallCandidate.value" class="text-xs text-muted-foreground">Use Share, then Add to Home Screen.</p>
       <p v-else-if="!installPrompt.isInstalled.value" class="text-xs text-muted-foreground">Use the browser install option when it appears.</p>
     </div>

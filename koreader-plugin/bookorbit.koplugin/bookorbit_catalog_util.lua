@@ -16,9 +16,19 @@ local CatalogUtil = {}
 
 CatalogUtil.DEFAULT_GRID_COLUMNS = 4
 CatalogUtil.DEFAULT_GRID_ROWS = 3
-CatalogUtil.THUMBNAIL_BATCH_SIZE = 2
+-- Covers fetched per background worker round. One subprocess covers the whole
+-- batch and the page rebuilds once when it lands.
+CatalogUtil.THUMBNAIL_BATCH_SIZE = 3
 CatalogUtil.MAX_RECENT_SEARCHES = 8
+-- The server caps its ids filter at 200, so both device-derived lists are
+-- bounded by it rather than by the size of the library.
 CatalogUtil.ON_DEVICE_MAX_IDS = 200
+CatalogUtil.NOT_ON_DEVICE_MAX_IDS = 200
+-- Not-on-device has no server-side filter, so the list is assembled by walking
+-- the newest books. Both bounds keep that walk to a fixed number of requests
+-- however large the library is.
+CatalogUtil.NOT_ON_DEVICE_SCAN_PAGES = 5
+CatalogUtil.NOT_ON_DEVICE_SCAN_SIZE = 100
 
 CatalogUtil.SORTS = {
     { id = "title", text = _("Title") },
@@ -82,6 +92,7 @@ CatalogUtil.READ_STATUS_LABELS = {
 -- Read statuses the user can set from the catalog detail page. Kept in sync
 -- with the server's manual read-status enum.
 CatalogUtil.SETTABLE_READ_STATUSES = {
+    { id = "unread", text = _("Unread") },
     { id = "want_to_read", text = _("To read") },
     { id = "reading", text = _("Reading") },
     { id = "on_hold", text = _("On hold") },
@@ -117,6 +128,32 @@ function CatalogUtil.formatBytes(bytes)
     return tostring(bytes) .. " B"
 end
 
+-- Browse badges sit in a narrow column beside the label, so a five-digit
+-- library would eat the room the label needs. Counts stay at most four
+-- characters. The scaled forms truncate rather than round, so a badge never
+-- claims more than the library holds and 999999 cannot carry to "1000K".
+function CatalogUtil.formatCount(value)
+    local count = tonumber(value)
+    if not count or count < 0 then return nil end
+    count = math.floor(count)
+    if count < 1000 then return tostring(count) end
+
+    local function scaled(divisor, suffix)
+        local units = count / divisor
+        if units >= 10 then
+            return string.format("%d%s", math.floor(units), suffix)
+        end
+        local tenths = math.floor(units * 10) / 10
+        if tenths == math.floor(tenths) then
+            return string.format("%d%s", tenths, suffix)
+        end
+        return string.format("%.1f%s", tenths, suffix)
+    end
+
+    if count < 1000000 then return scaled(1000, "K") end
+    return scaled(1000000, "M")
+end
+
 function CatalogUtil.formatDuration(seconds)
     if not seconds then return nil end
     local minutes = math.floor(seconds / 60 + 0.5)
@@ -136,6 +173,62 @@ function CatalogUtil.formatProgress(value)
     return tostring(math.floor(value + 0.5)) .. "%"
 end
 
+-- Parses an ISO-8601 UTC timestamp ("2026-07-30T12:34:56.000Z") to an epoch,
+-- or nil for anything unparseable. os.time reads the fields as local time, so
+-- the current UTC offset is added back.
+local function parseIsoTimestamp(value)
+    if type(value) ~= "string" then return nil end
+    local year, month, day, hour, min, sec = value:match("^(%d%d%d%d)-(%d%d)-(%d%d)T(%d%d):(%d%d):(%d%d)")
+    if not year then return nil end
+    local as_local = os.time({
+        year = tonumber(year),
+        month = tonumber(month),
+        day = tonumber(day),
+        hour = tonumber(hour),
+        min = tonumber(min),
+        sec = tonumber(sec),
+    })
+    if not as_local then return nil end
+    -- The probe table must infer DST exactly like the parsed table above did
+    -- (os.date("!*t") pins isdst=false, which skews zones currently in DST by
+    -- an hour), so both conversions share the same offset.
+    local probe = os.date("!*t")
+    probe.isdst = nil
+    local offset = os.time() - os.time(probe)
+    return as_local + offset
+end
+
+-- A coarse relative label for a UTC timestamp: "just now", "12 min ago",
+-- "3 h ago", "yesterday", "5 days ago". Nil when the value cannot be parsed.
+function CatalogUtil.formatRelativeTime(value, now)
+    local timestamp = parseIsoTimestamp(value)
+    if not timestamp then return nil end
+    now = now or os.time()
+    local delta = now - timestamp
+    if delta < 0 then delta = 0 end
+    if delta < 60 then
+        return _("just now")
+    end
+    if delta < 3600 then
+        return T(_("%1 min ago"), math.floor(delta / 60))
+    end
+    if delta < 86400 then
+        return T(_("%1 h ago"), math.floor(delta / 3600))
+    end
+    local days = math.floor(delta / 86400)
+    if days == 1 then
+        return _("yesterday")
+    end
+    return T(_("%1 days ago"), days)
+end
+
+function CatalogUtil.readingStreakDays(dashboard, fallback)
+    local reading_streak = dashboard and dashboard.readingStreak
+    local current_streak = reading_streak and tonumber(reading_streak.currentStreak)
+    if current_streak then return current_streak end
+    return tonumber(fallback) or 0
+end
+
 function CatalogUtil.formatRating(value)
     if not value then return nil end
     if value == math.floor(value) then
@@ -152,6 +245,35 @@ function CatalogUtil.shortText(text, max_len)
     text = tostring(text or "")
     if #text <= max_len then return text end
     return util.fixUtf8(text:sub(1, max_len - 3), "?") .. "..."
+end
+
+-- Walks the newest books through fetchPage(page) and keeps the ids isOnDevice
+-- rejects. There is no server-side filter for this: which books are linked is
+-- local KOReader state the server never sees, so the walk is bounded by both
+-- the page count and the server's cap on the ids filter to stay predictable on
+-- a large library. Returns nil plus the fetch error if a page fails.
+function CatalogUtil.scanNotOnDeviceIds(fetchPage, isOnDevice)
+    local ids = {}
+    for page = 1, CatalogUtil.NOT_ON_DEVICE_SCAN_PAGES do
+        local body, err = fetchPage(page)
+        if not body then return nil, err end
+        for _, book in ipairs(body.items or {}) do
+            if book.id ~= nil and not isOnDevice(book) then
+                table.insert(ids, book.id)
+                if #ids >= CatalogUtil.NOT_ON_DEVICE_MAX_IDS then return ids end
+            end
+        end
+        if body.hasNext ~= true then break end
+    end
+    return ids
+end
+
+-- Paths carry their meaning at the end, so an over-long one keeps its tail
+-- rather than its root the way shortText would.
+function CatalogUtil.shortPath(path, max_len)
+    path = tostring(path or "")
+    if #path <= max_len then return path end
+    return "..." .. util.fixUtf8(path:sub(#path - max_len + 4), "?")
 end
 
 function CatalogUtil.joinNames(items, key)
@@ -230,6 +352,8 @@ function CatalogUtil.cleanDescriptionText(text)
     text = text:gsub("<%s*[Bb][Rr]%s*/?%s*>", "\n")
     text = text:gsub("<%s*/%s*[Pp]%s*>", "\n\n")
     text = text:gsub("<%s*[Pp][^>]*>", "")
+    text = text:gsub("<%s*/%s*[Hh][1-6]%s*>", "\n\n")
+    text = text:gsub("<%s*[Hh][1-6][^>]*>", "\n\n")
     text = text:gsub("<%s*/%s*[Dd][Ii][Vv]%s*>", "\n\n")
     text = text:gsub("<%s*[Dd][Ii][Vv][^>]*>", "")
     text = text:gsub("<%s*/%s*[Ll][Ii]%s*>", "\n")
@@ -262,6 +386,23 @@ function CatalogUtil.safeFilenameBase(detail)
     base = base:gsub("[\"\\/:*?<>|]+", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
     if base == "" then base = "book-" .. tostring(detail.id) end
     return base
+end
+
+function CatalogUtil.transferErrorText(err)
+    if err == "unsafe_destination" then
+        return _("The download destination is outside the selected folder or contains a symbolic link.")
+    elseif err == "temp_dir_failed" then
+        return _("Could not create a temporary download folder in the selected folder.")
+    elseif err == "hash_mismatch" then
+        return _("The downloaded file failed its integrity check. Retry the download. The previous file was kept.")
+    elseif err == "size_mismatch" then
+        return _("The download was incomplete. Retry the download. The previous file was kept.")
+    elseif err == "response_too_large" then
+        return _("The download exceeded its expected size. The previous file was kept.")
+    elseif err == "publish_failed" then
+        return _("Could not save the download. Check free space and folder permissions. The previous file was kept.")
+    end
+    return nil
 end
 
 function CatalogUtil.coverLabel(book)

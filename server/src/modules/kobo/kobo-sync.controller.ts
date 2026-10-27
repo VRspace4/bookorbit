@@ -5,7 +5,9 @@ import {
   Get,
   Header,
   HttpCode,
+  HttpException,
   HttpStatus,
+  Inject,
   Logger,
   Param,
   Post,
@@ -16,6 +18,7 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { Public } from '../../common/decorators/public.decorator';
@@ -28,10 +31,31 @@ import { KoboTokenGuard } from './guards/kobo-token.guard';
 import { KoboSettingsService } from './services/kobo-settings.service';
 import { KoboSyncService } from './services/kobo-sync.service';
 import { KoboReadingStateService } from './services/kobo-reading-state.service';
+import type { KoboProxyResponse } from './services/kobo-proxy.service';
 import { KoboProxyService } from './services/kobo-proxy.service';
+import { DEV_CLIENT_ORIGIN } from '../../config/dev-client-origin';
+import { appConfig } from '../../config/config';
 import { KOBO_STORE_RESOURCES } from './kobo-store-resources';
 import { KoboBookIdentityService } from './services/kobo-book-identity.service';
 import { KoboSyncHistoryService } from './services/kobo-sync-history.service';
+import { decodeSyncToken, isUsableKoboSyncToken, withKoboSyncToken } from './services/kobo-sync-token';
+
+const STORE_SYNC_TIMEOUT_MS = 8_000;
+// A request that reached the API through the Vite dev proxy names the client's port, not the API's.
+const DEV_CLIENT_PORT = new URL(DEV_CLIENT_ORIGIN).port;
+const KOBO_SYNC_TOKEN_HEADER = 'x-kobo-synctoken';
+
+// Kobo answers a delete for a tag it does not know with a client error, and the device keeps the
+// operation queued until it succeeds, so relaying that error strands a tag that no longer exists
+// anywhere in a delete it can never complete. Server faults and auth failures still reach the
+// device, because those mean "try again later" rather than "already gone".
+const TAG_ALREADY_GONE_STATUSES: number[] = [HttpStatus.BAD_REQUEST, HttpStatus.NOT_FOUND, HttpStatus.GONE];
+
+type StoreSyncResult = {
+  entitlements: unknown[];
+  hasMore: boolean;
+  syncToken: string | undefined;
+};
 
 function readHeaderValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
@@ -41,7 +65,7 @@ function isBookOrbitTag(tagId: string): boolean {
   return tagId.startsWith('col-') || tagId.startsWith('ss-');
 }
 
-function buildBaseUrl(req: FastifyRequest): string {
+function buildBaseUrl(req: FastifyRequest, appUrl: string): string {
   const fwdHost = readHeaderValue(req.headers['x-forwarded-host']);
   const fwdPort = readHeaderValue(req.headers['x-forwarded-port']);
   const fwdProto = readHeaderValue(req.headers['x-forwarded-proto']);
@@ -56,6 +80,8 @@ function buildBaseUrl(req: FastifyRequest): string {
       const isDefault = (proto === 'http' && port === '80') || (proto === 'https' && port === '443');
       if (!isDefault) host = host + ':' + port;
     } else if (!hasForwarded) {
+      const appOrigin = appOriginForHost(appUrl, host);
+      if (appOrigin) return appOrigin;
       const localPort = req.socket?.localPort;
       const isDefault = (proto === 'http' && localPort === 80) || (proto === 'https' && localPort === 443);
       if (localPort && !isDefault) host = host + ':' + String(localPort);
@@ -65,12 +91,26 @@ function buildBaseUrl(req: FastifyRequest): string {
   return proto + '://' + host;
 }
 
+/**
+ * A Kobo leaves the port out of its Host header, and behind a published port mapping the port the
+ * server listens on is not the one the Kobo reached (#1281). APP_URL names the reachable origin, so
+ * it is used when it is for the same host; any other host keeps the listening port.
+ */
+function appOriginForHost(appUrl: string, host: string): string | null {
+  try {
+    const url = new URL(appUrl);
+    return url.hostname.toLowerCase() === host.toLowerCase() ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildReadingServicesBaseUrl(req: FastifyRequest, baseUrl: string): string {
   const localPort = req.socket?.localPort;
   if (!localPort) return baseUrl;
 
   const url = new URL(baseUrl);
-  if (url.port !== '5173') return baseUrl;
+  if (url.port !== DEV_CLIENT_PORT) return baseUrl;
 
   const proto = readHeaderValue(req.headers['x-forwarded-proto']) ?? req.protocol;
   url.protocol = proto + ':';
@@ -91,12 +131,13 @@ export class KoboSyncController {
     private readonly proxyService: KoboProxyService,
     private readonly bookIdentityService: KoboBookIdentityService,
     private readonly historyService: KoboSyncHistoryService,
+    @Inject(appConfig.KEY) private readonly app: ConfigType<typeof appConfig>,
   ) {}
 
   @Get('v1/initialization')
   @Header('x-kobo-apitoken', 'e30=')
   initialization(@KoboDevice() device: KoboDeviceContext, @Req() req: FastifyRequest) {
-    const baseUrl = buildBaseUrl(req);
+    const baseUrl = buildBaseUrl(req, this.app.appUrl);
     const readingServicesBaseUrl = buildReadingServicesBaseUrl(req, baseUrl);
     const t = device.deviceToken;
     return {
@@ -106,6 +147,7 @@ export class KoboSyncController {
         image_url_template: `${baseUrl}/api/v1/kobo/${t}/v1/books/{ImageId}/thumbnail/{Width}/{Height}/false/image.jpg`,
         image_url_quality_template: `${baseUrl}/api/v1/kobo/${t}/v1/books/{ImageId}/thumbnail/{Width}/{Height}/{Quality}/{IsGreyscale}/image.jpg`,
         library_sync: `${baseUrl}/api/v1/kobo/${t}/v1/library/sync`,
+        reading_state: `${baseUrl}/api/v1/kobo/${t}/v1/library/{Ids}/state`,
         get_tests_request: `${baseUrl}/api/v1/kobo/${t}/v1/analytics/gettests`,
         post_analytics_event: `${baseUrl}/api/v1/kobo/${t}/v1/analytics/event`,
         reading_services_host: readingServicesBaseUrl,
@@ -122,7 +164,7 @@ export class KoboSyncController {
   ) {
     const startedAt = Date.now();
     this.logger.debug(`[kobo.library_sync] [start] userId=${user.id} deviceId=${device.deviceId} - library sync started`);
-    const baseUrl = buildBaseUrl(req);
+    const baseUrl = buildBaseUrl(req, this.app.appUrl);
     let result: { entitlements: unknown[]; hasMore: boolean; syncToken: string };
     try {
       result = await this.syncService.getDelta(user.id, device.deviceId, device.deviceToken, baseUrl);
@@ -144,19 +186,121 @@ export class KoboSyncController {
       throw error;
     }
     const { entitlements, hasMore, syncToken } = result;
+
+    // Reach for the store only once BookOrbit has drained its own pages, so the device is never
+    // asked to reconcile two independent cursors out of a single response.
+    const incomingKoboSyncToken = decodeSyncToken(readHeaderValue(req.headers[KOBO_SYNC_TOKEN_HEADER])).koboSyncToken;
+    const store = hasMore ? null : await this.fetchStoreEntitlements(req, device, user.id, incomingKoboSyncToken);
+
+    const merged = store ? [...entitlements, ...store.entitlements] : entitlements;
+
+    // Kobo's cursor rides inside our token, so one too large to carry means the next store sync
+    // starts over. Say so rather than letting the store silently resend its whole library.
+    const storeCursorCarried = store?.syncToken !== undefined && isUsableKoboSyncToken(store.syncToken);
+    if (store?.syncToken !== undefined && !storeCursorCarried) {
+      this.logger.warn(
+        `[kobo.store_sync] [fail] userId=${user.id} deviceId=${device.deviceId} errorClass=StoreCursorTooLarge tokenLength=${store.syncToken.length} - upstream cursor dropped, the next store sync starts from the beginning`,
+      );
+    }
+
+    // Replaying an unchanged cursor returns the same page forever, and so does a dropped one, which
+    // sends the store back to its first page. Keep paging the store only while the cursor the device
+    // will send back actually advances. The page just fetched is still delivered either way.
+    const storeCursorAdvanced = storeCursorCarried && store?.syncToken !== incomingKoboSyncToken;
+    if (store?.hasMore === true && !storeCursorAdvanced) {
+      this.logger.warn(
+        `[kobo.store_sync] [fail] userId=${user.id} deviceId=${device.deviceId} errorClass=StoreCursorStalled error="continue without an advanced sync token" - store paging stopped to avoid a sync loop`,
+      );
+    }
+    const combinedHasMore = hasMore || (store?.hasMore === true && storeCursorAdvanced);
+
     this.logger.debug(
-      `[kobo.library_sync] [end] userId=${user.id} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} entitlementCount=${entitlements.length} hasMore=${hasMore} - library sync completed`,
+      `[kobo.library_sync] [end] userId=${user.id} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} entitlementCount=${entitlements.length} storeEntitlementCount=${store?.entitlements.length ?? 0} hasMore=${combinedHasMore} - library sync completed`,
     );
     await this.historyService.recordSuccess({
       userId: user.id,
       deviceId: device.deviceId,
       event: 'library_sync',
       durationMs: Date.now() - startedAt,
-      counts: { entitlements: entitlements.length, hasMore },
+      counts: {
+        entitlements: merged.length,
+        hasMore: combinedHasMore,
+        ...(store ? { storeEntitlements: store.entitlements.length } : {}),
+      },
     });
-    reply.header('x-kobo-sync', hasMore ? 'continue' : '');
-    reply.header('x-kobo-synctoken', syncToken);
-    reply.send(entitlements);
+    reply.header('x-kobo-sync', combinedHasMore ? 'continue' : '');
+    reply.header('x-kobo-synctoken', withKoboSyncToken(syncToken, store?.syncToken ?? incomingKoboSyncToken));
+    reply.send(merged);
+  }
+
+  /**
+   * Pulls the device's Kobo Plus and Kobo store entitlements using the device's own Kobo
+   * credentials, which reach us because initialization leaves device_auth and device_refresh
+   * pointing at Kobo. Returns null when the user has store sync switched off.
+   *
+   * Never throws: reading the setting, or a store that is slow, down or unauthorized, costs the
+   * store page and never the BookOrbit half of the sync.
+   */
+  private async fetchStoreEntitlements(
+    req: FastifyRequest,
+    device: KoboDeviceContext,
+    userId: number,
+    koboSyncToken: string | undefined,
+  ): Promise<StoreSyncResult | null> {
+    const startedAt = Date.now();
+    try {
+      const { storeSync } = await this.settingsService.getSettings(userId);
+      if (!storeSync) return null;
+
+      this.logger.debug(
+        `[kobo.store_sync] [start] userId=${userId} deviceId=${device.deviceId} hasKoboToken=${Boolean(koboSyncToken)} - upstream store sync started`,
+      );
+
+      // Our own composite token means nothing to Kobo, so it is replaced when we hold Kobo's
+      // cursor and dropped entirely when we do not, which asks the store for a full sync.
+      const response = await this.proxyService.request(req, device.deviceToken, {
+        ...(koboSyncToken ? { extraHeaders: { [KOBO_SYNC_TOKEN_HEADER]: koboSyncToken } } : { omitHeaders: [KOBO_SYNC_TOKEN_HEADER] }),
+        timeoutMs: STORE_SYNC_TIMEOUT_MS,
+      });
+
+      if (response.status < 200 || response.status >= 300) {
+        this.logger.warn(
+          `[kobo.store_sync] [fail] userId=${userId} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} status=${response.status} - upstream store sync returned an error status`,
+        );
+        return null;
+      }
+
+      // An empty body carries no cursor we can trust, so treat it as no store data this round
+      // rather than advancing past a page Kobo may still owe us.
+      const rawBody = response.body.toString('utf8').trim();
+      if (rawBody.length === 0) {
+        this.logger.warn(
+          `[kobo.store_sync] [fail] userId=${userId} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} status=${response.status} - upstream store sync returned an empty body`,
+        );
+        return null;
+      }
+
+      const parsed: unknown = JSON.parse(rawBody);
+      if (!Array.isArray(parsed)) {
+        this.logger.warn(
+          `[kobo.store_sync] [fail] userId=${userId} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} status=${response.status} - upstream store sync returned a non-array body`,
+        );
+        return null;
+      }
+
+      const hasMore = response.headers['x-kobo-sync']?.trim().toLowerCase() === 'continue';
+      this.logger.debug(
+        `[kobo.store_sync] [end] userId=${userId} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} storeEntitlementCount=${parsed.length} hasMore=${hasMore} - upstream store sync completed`,
+      );
+      return { entitlements: parsed, hasMore, syncToken: response.headers[KOBO_SYNC_TOKEN_HEADER] };
+    } catch (error: unknown) {
+      const errorClass = error instanceof Error ? error.name : 'UnknownError';
+      const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : 'unknown error');
+      this.logger.warn(
+        `[kobo.store_sync] [fail] userId=${userId} deviceId=${device.deviceId} durationMs=${Date.now() - startedAt} errorClass=${errorClass} error="${errorMessage}" - upstream store sync failed, serving BookOrbit entitlements only`,
+      );
+      return null;
+    }
   }
 
   @Post('v1/library/tags/:tagId/items/delete')
@@ -167,7 +311,7 @@ export class KoboSyncController {
     @Req() req: FastifyRequest,
     @Res() reply: FastifyReply,
   ) {
-    if (!isBookOrbitTag(tagId)) return this.proxyService.forward(req, reply, device.deviceToken);
+    if (!isBookOrbitTag(tagId)) return this.forwardTagDelete(req, reply, device, tagId);
     reply.status(HttpStatus.OK).send({ RequestResult: 'Success' });
   }
 
@@ -181,8 +325,41 @@ export class KoboSyncController {
   @Delete('v1/library/tags/:tagId')
   @HttpCode(HttpStatus.OK)
   async deleteTag(@Param('tagId') tagId: string, @KoboDevice() device: KoboDeviceContext, @Req() req: FastifyRequest, @Res() reply: FastifyReply) {
-    if (!isBookOrbitTag(tagId)) return this.proxyService.forward(req, reply, device.deviceToken);
+    if (!isBookOrbitTag(tagId)) return this.forwardTagDelete(req, reply, device, tagId);
     reply.status(HttpStatus.OK).send({ RequestResult: 'Success' });
+  }
+
+  /**
+   * Forwards a delete for a tag BookOrbit does not own, reporting success when Kobo says the tag is
+   * not there. Only deletes get this treatment: a failed add must stay a failure, because reporting
+   * success would drop the device's pending change instead of retrying it.
+   */
+  private async forwardTagDelete(req: FastifyRequest, reply: FastifyReply, device: KoboDeviceContext, tagId: string): Promise<void> {
+    let response: KoboProxyResponse;
+    try {
+      response = await this.proxyService.request(req, device.deviceToken);
+    } catch (error: unknown) {
+      // A path that does not resolve to Kobo is rejected before the request leaves, and that stays
+      // the client error the shared proxy raises rather than becoming an upstream fault.
+      if (error instanceof HttpException) throw error;
+      const errorClass = error instanceof Error ? error.name : 'UnknownError';
+      const errorMessage = sanitizeLogValue(error instanceof Error ? error.message : 'unknown error');
+      this.logger.warn(
+        `[kobo.tag_delete] [fail] deviceId=${device.deviceId} errorClass=${errorClass} error="${errorMessage}" - upstream tag delete failed`,
+      );
+      reply.status(HttpStatus.BAD_GATEWAY).send({ message: 'Upstream Kobo API unavailable' });
+      return;
+    }
+
+    if (TAG_ALREADY_GONE_STATUSES.includes(response.status)) {
+      this.logger.warn(
+        `[kobo.tag_delete] [end] deviceId=${device.deviceId} tagId="${sanitizeLogValue(tagId)}" status=${response.status} - upstream does not know this tag, reporting success so the device stops retrying`,
+      );
+      reply.status(HttpStatus.OK).send({ RequestResult: 'Success' });
+      return;
+    }
+
+    this.proxyService.sendUpstream(reply, response);
   }
 
   @Get('v1/library/:bookId/metadata')
@@ -195,7 +372,7 @@ export class KoboSyncController {
   ) {
     const id = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, bookId);
     if (id === null) return this.proxyService.forward(req, reply, device.deviceToken);
-    const baseUrl = buildBaseUrl(req);
+    const baseUrl = buildBaseUrl(req, this.app.appUrl);
     const metadata = await this.syncService.getBookMetadata(user.id, id, device.deviceToken, baseUrl);
     reply.send(metadata);
   }
@@ -225,7 +402,7 @@ export class KoboSyncController {
   ) {
     const id = await this.bookIdentityService.resolveBookIdByEntitlementId(user.id, bookId);
     if (id === null) return this.proxyService.forward(req, reply, device.deviceToken);
-    const state = await this.readingStateService.getRawState(user.id, id);
+    const state = await this.readingStateService.getRawState(user.id, id, device.deviceId);
     reply.send(state ? [state] : []);
   }
 

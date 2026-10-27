@@ -1,10 +1,14 @@
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 
+import { createPostgresClientConfig } from '../db/postgres-connection-config';
+import { dropUnreleasedMigrationRows, reconcileMigrationLedgerTimestamps } from './migration-ledger-compatibility';
 import { installPostgresExtensions } from './postgres-extensions';
+import { prepareLegacySeriesIndexColumns } from './series-index-migration-compatibility';
 
 function resolveMigrationsFolder(): string {
   const candidates = [
@@ -27,17 +31,22 @@ async function runMigrations() {
     throw new Error('DATABASE_URL is required');
   }
 
-  const pool = new Pool({
-    connectionString,
-    max: 3,
-    idleTimeoutMillis: 10_000,
-    connectionTimeoutMillis: 5_000,
-  });
+  const pool = new Pool(
+    createPostgresClientConfig(connectionString, {
+      max: 3,
+      idleTimeoutMillis: 10_000,
+      connectionTimeoutMillis: 5_000,
+    }),
+  );
 
   try {
     await installPostgresExtensions(pool);
-
     const migrationsFolder = resolveMigrationsFolder();
+    const migrationFiles = readMigrationFiles({ migrationsFolder });
+    await dropUnreleasedMigrationRows(pool, migrationFiles);
+    await reconcileMigrationLedgerTimestamps(pool, migrationFiles);
+    await prepareLegacySeriesIndexColumns(pool);
+
     await migrate(drizzle(pool), { migrationsFolder });
 
     console.log(`Migrations applied successfully from ${migrationsFolder}`);

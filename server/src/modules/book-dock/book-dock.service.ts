@@ -1,9 +1,9 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { unlink } from 'fs/promises';
+import { BadRequestException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { rmdir, unlink } from 'fs/promises';
 import { eq, inArray } from 'drizzle-orm';
 import { NodePgDatabase } from 'drizzle-orm/node-postgres';
 
-import type { BookDockFile, BookDockFilesPage, BookDockMetadata, BookDockSummary } from '@bookorbit/types';
+import type { BookDockFile, BookDockFilesPage, BookDockMetadata, BookDockSummary, BookDockUnitFile } from '@bookorbit/types';
 import { DB } from '../../db';
 import * as schema from '../../db/schema';
 import { libraries, libraryFolders } from '../../db/schema';
@@ -12,9 +12,11 @@ import { BookDockRepository, type ListOptions } from './book-dock.repository';
 import { BookDockIngestService } from './book-dock-ingest.service';
 import { BookDockFinalizeService } from './book-dock-finalize.service';
 import { BookDockGateway } from './book-dock.gateway';
+import { normalizeBookDockMetadata, normalizeBookDockMetadataSources } from './book-dock-metadata.utils';
 import { BookDockProcessingStateService } from './book-dock-processing-state.service';
 import { BookDockWatcherService } from './book-dock-watcher.service';
-import type { BookDockFileRow } from '../../db/schema';
+import { inspectEpubMediaOverlayFields } from '../reader/epub/epub-media-overlay-capability';
+import type { BookDockFileRow, BookDockUnitFileRow } from '../../db/schema';
 
 type Db = NodePgDatabase<typeof schema>;
 const BULK_SELECTION_BATCH_SIZE = 500;
@@ -36,40 +38,60 @@ export class BookDockService {
 
   async listFiles(query: ListOptions): Promise<BookDockFilesPage> {
     const { items, total } = await this.repo.findAll(query);
+    // One query for the whole page rather than one per unit row, which at a page of 100 units
+    // would be 100 round trips for a list nobody has even expanded yet.
+    const unitFiles = await this.repo.findUnitFilesByDockFileIds(items.map((row) => row.id));
+
     return {
-      items: items.map(toDto),
+      items: items.map((row) => toDto(row, unitFiles.get(row.id) ?? [])),
       total,
       page: query.page,
       size: query.limit,
     };
   }
 
-  async getFile(id: number): Promise<BookDockFile> {
-    const row = await this.repo.findById(id);
-    if (!row) throw new NotFoundException('Book Dock file not found');
-    return toDto(row);
+  async getFile(id: number, userId: number, canManageAll: boolean, options: { readAlong?: boolean } = {}): Promise<BookDockFile> {
+    const row = await this.findFileForUser(id, userId, canManageAll);
+    const dto = toDto(row, await this.repo.findUnitFiles(row.id));
+    if (!options.readAlong || row.format?.toLowerCase() !== 'epub') return dto;
+    const startedAt = Date.now();
+    const { mediaOverlayAvailable } = await inspectEpubMediaOverlayFields(row.absolutePath, row.format, (err) => {
+      this.logger.warn(
+        `[book_dock.media_overlay_capability] [fail] path="${sanitizeLogValue(row.absolutePath)}" durationMs=${Date.now() - startedAt} errorClass=${err instanceof Error ? err.name : 'Error'} error="${sanitizeLogValue(err instanceof Error ? err.message : String(err))}" - EPUB media-overlay inspection failed`,
+      );
+    });
+    return { ...dto, readAlong: mediaOverlayAvailable };
+  }
+
+  async getCoverPath(id: number, userId: number, canManageAll: boolean): Promise<string> {
+    const row = await this.findFileForUser(id, userId, canManageAll);
+    if (!row.coverPath) throw new NotFoundException('No cover available');
+    return row.coverPath;
   }
 
   async updateFile(
     id: number,
     data: { selectedMetadata?: Partial<BookDockMetadata>; targetLibraryId?: number | null; targetFolderId?: number | null },
+    userId: number,
+    canManageAll: boolean,
   ): Promise<BookDockFile> {
-    const row = await this.repo.findById(id);
-    if (!row) throw new NotFoundException('Book Dock file not found');
+    await this.findFileForUser(id, userId, canManageAll);
 
     if (data.targetLibraryId !== undefined || data.targetFolderId !== undefined) {
       await this.assertValidTarget(data.targetLibraryId, data.targetFolderId);
     }
 
-    const updateData = data.selectedMetadata !== undefined ? { ...data, metadataEditedAt: new Date() } : data;
+    const updateData =
+      data.selectedMetadata !== undefined
+        ? { ...data, selectedMetadata: normalizeBookDockMetadata(data.selectedMetadata) ?? {}, metadataEditedAt: new Date() }
+        : data;
     const updated = await this.repo.update(id, updateData);
     if (!updated) throw new NotFoundException('Book Dock file not found');
     return toDto(updated);
   }
 
-  async discardFile(id: number): Promise<void> {
-    const row = await this.repo.findById(id);
-    if (!row) throw new NotFoundException('Book Dock file not found');
+  async discardFile(id: number, userId: number, canManageAll: boolean): Promise<void> {
+    const row = await this.findFileForUser(id, userId, canManageAll);
 
     await this.cleanupFiles(row);
     await this.repo.deleteById(id);
@@ -82,7 +104,9 @@ export class BookDockService {
     status?: string,
     search?: string,
     userId?: number,
-    isSuperuser?: boolean,
+    canManageAll?: boolean,
+    needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<void> {
     await this.processSelectionRows(
       {
@@ -91,8 +115,10 @@ export class BookDockService {
         excludedIds,
         status,
         search,
+        needsReview,
+        readyToFile,
         userId,
-        isSuperuser,
+        canManageAll,
       },
       async (rows) => {
         for (const row of rows) {
@@ -113,7 +139,9 @@ export class BookDockService {
     status?: string,
     search?: string,
     userId?: number,
-    isSuperuser?: boolean,
+    canManageAll?: boolean,
+    needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<{ total: number; updated: number; failed: number }> {
     let updated = 0;
     let failed = 0;
@@ -124,13 +152,15 @@ export class BookDockService {
         excludedIds,
         status,
         search,
+        needsReview,
+        readyToFile,
         userId,
-        isSuperuser,
+        canManageAll,
       },
       async (rows) => {
         for (const row of rows) {
           try {
-            const current: Record<string, unknown> = { ...(row.selectedMetadata ?? row.embeddedMetadata ?? {}) };
+            const current: Record<string, unknown> = { ...(normalizeBookDockMetadata(row.selectedMetadata ?? row.embeddedMetadata) ?? {}) };
 
             for (const field of enabledFields) {
               const value = (fields as Record<string, unknown>)[field];
@@ -163,7 +193,9 @@ export class BookDockService {
     status?: string,
     search?: string,
     userId?: number,
-    isSuperuser?: boolean,
+    canManageAll?: boolean,
+    needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<{ total: number; applied: number; skipped: number; skippedEdited: number }> {
     let applied = 0;
     let skipped = 0;
@@ -175,8 +207,10 @@ export class BookDockService {
         excludedIds,
         status,
         search,
+        needsReview,
+        readyToFile,
         userId,
-        isSuperuser,
+        canManageAll,
       },
       async (rows) => {
         for (const row of rows) {
@@ -188,7 +222,10 @@ export class BookDockService {
             skipped++;
             continue;
           }
-          await this.repo.update(row.id, { selectedMetadata: row.fetchedMetadata, metadataEditedAt: null });
+          await this.repo.update(row.id, {
+            selectedMetadata: normalizeBookDockMetadata(row.fetchedMetadata) ?? {},
+            metadataEditedAt: null,
+          });
           applied++;
         }
       },
@@ -204,7 +241,9 @@ export class BookDockService {
     status?: string,
     search?: string,
     userId?: number,
-    isSuperuser?: boolean,
+    canManageAll?: boolean,
+    needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<{ total: number; queued: number }> {
     let queued = 0;
     const total = await this.processSelectionRows(
@@ -214,8 +253,10 @@ export class BookDockService {
         excludedIds,
         status,
         search,
+        needsReview,
+        readyToFile,
         userId,
-        isSuperuser,
+        canManageAll,
       },
       (rows) => {
         const errorRows = rows.filter((row) => row.status === 'error');
@@ -229,6 +270,12 @@ export class BookDockService {
     return { total, queued };
   }
 
+  async refetchMetadata(id: number, userId: number, canManageAll: boolean): Promise<void> {
+    await this.findFileForUser(id, userId, canManageAll);
+    const queued = await this.ingestService.refetchMetadata(id);
+    if (!queued) throw new BadRequestException('Metadata can only be re-fetched for a ready or failed Book Dock file');
+  }
+
   async bulkSetTarget(
     fileIds: number[],
     selectAll?: boolean,
@@ -238,7 +285,9 @@ export class BookDockService {
     status?: string,
     search?: string,
     userId?: number,
-    isSuperuser?: boolean,
+    canManageAll?: boolean,
+    needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<{ total: number; updated: number; failed: number }> {
     await this.assertValidTarget(targetLibraryId, targetFolderId);
     let updated = 0;
@@ -249,8 +298,10 @@ export class BookDockService {
         excludedIds,
         status,
         search,
+        needsReview,
+        readyToFile,
         userId,
-        isSuperuser,
+        canManageAll,
       },
       async (rows) => {
         updated += await this.repo.setTargetsByIds(
@@ -271,7 +322,9 @@ export class BookDockService {
     status?: string,
     search?: string,
     userId?: number,
-    isSuperuser?: boolean,
+    canManageAll?: boolean,
+    needsReview?: boolean,
+    readyToFile?: boolean,
   ): Promise<{ total: number; withDestination: number; withoutDestination: number }> {
     const destinationPairCounts = new Map<string, number>();
     const folderIdSet = new Set<number>();
@@ -282,8 +335,10 @@ export class BookDockService {
         excludedIds,
         status,
         search,
+        needsReview,
+        readyToFile,
         userId,
-        isSuperuser,
+        canManageAll,
       },
       (rows) => {
         for (const row of rows) {
@@ -317,13 +372,13 @@ export class BookDockService {
     return { total, withDestination, withoutDestination: total - withDestination };
   }
 
-  async getSummary(userId?: number, isSuperuser?: boolean): Promise<BookDockSummary> {
-    const [summary, paused] = await Promise.all([this.repo.countsByStatus(userId, isSuperuser), this.processingState.isPaused()]);
+  async getSummary(userId?: number, canManageAll?: boolean): Promise<BookDockSummary> {
+    const [summary, paused] = await Promise.all([this.repo.countsByStatus(userId, canManageAll), this.processingState.isPaused()]);
     return { ...summary, paused };
   }
 
-  async getStatistics(userId?: number, isSuperuser?: boolean) {
-    return this.repo.getStatistics(userId, isSuperuser);
+  async getStatistics(userId?: number, canManageAll?: boolean) {
+    return this.repo.getStatistics(userId, canManageAll);
   }
 
   async pauseProcessing(): Promise<BookDockSummary> {
@@ -333,7 +388,7 @@ export class BookDockService {
       await this.processingState.pause();
       this.ingestService.pauseProcessing();
       this.finalizeService.pauseProcessing();
-      const summary = await this.emitSummary();
+      const summary = await this.emitChange();
       this.logger.log(`[book_dock.processing_pause] [end] durationMs=${Date.now() - startedAt} - Book Dock processing paused`);
       return summary;
     } catch (error) {
@@ -349,7 +404,7 @@ export class BookDockService {
       await this.processingState.resume();
       await Promise.all([this.ingestService.resumeProcessing(), this.finalizeService.resumeProcessing()]);
       this.startResumeBackgroundWork();
-      const summary = await this.emitSummary();
+      const summary = await this.emitChange();
       this.logger.log(`[book_dock.processing_resume] [end] durationMs=${Date.now() - startedAt} - Book Dock processing resumed`);
       return summary;
     } catch (error) {
@@ -358,13 +413,28 @@ export class BookDockService {
     }
   }
 
+  /** A unit is N files plus the directory holding them, and deleting it takes all of them. */
   private async cleanupFiles(row: BookDockFileRow): Promise<void> {
+    for (const file of await this.repo.findUnitFiles(row.id)) await safeUnlink(file.absolutePath);
+    if (row.unitDirectory) {
+      // Non-recursive: anything still in there is unaccounted for, and worth leaving for a human.
+      await rmdir(row.unitDirectory).catch(() => {});
+    }
     await safeUnlink(row.absolutePath);
     if (row.coverPath) {
       await safeUnlink(row.coverPath);
       const thumbPath = row.coverPath.replace(/\.\w+$/, '_thumb.jpg');
       await safeUnlink(thumbPath);
     }
+  }
+
+  private async findFileForUser(id: number, userId: number, canManageAll: boolean): Promise<BookDockFileRow> {
+    const row = await this.repo.findById(id);
+    if (!row) throw new NotFoundException('Book Dock file not found');
+    if (!canManageAll && row.uploadedBy !== userId) {
+      throw new ForbiddenException('You do not have access to this Book Dock file');
+    }
+    return row;
   }
 
   private startResumeBackgroundWork(): void {
@@ -389,9 +459,9 @@ export class BookDockService {
     }
   }
 
-  private async emitSummary(): Promise<BookDockSummary> {
+  private async emitChange(): Promise<BookDockSummary> {
     const summary = await this.getSummary();
-    this.gateway.emitSummary(summary);
+    this.gateway.emitChanged();
     return summary;
   }
 
@@ -439,14 +509,16 @@ export class BookDockService {
       excludedIds?: number[];
       status?: string;
       search?: string;
+      needsReview?: boolean;
+      readyToFile?: boolean;
       userId?: number;
-      isSuperuser?: boolean;
+      canManageAll?: boolean;
     },
     processBatch: (rows: BookDockFileRow[]) => Promise<void> | void,
   ): Promise<number> {
     let total = 0;
     const userId = options.userId ?? 0;
-    const isSuperuser = options.isSuperuser ?? true;
+    const canManageAll = options.canManageAll ?? true;
 
     if (options.selectAll) {
       let afterId: number | undefined;
@@ -457,8 +529,10 @@ export class BookDockService {
           excludedIds: options.excludedIds,
           status: options.status,
           search: options.search,
+          needsReview: options.needsReview,
+          readyToFile: options.readyToFile,
           userId,
-          isSuperuser,
+          canManageAll,
         });
         if (rows.length === 0) break;
         await processBatch(rows);
@@ -471,7 +545,7 @@ export class BookDockService {
     const ids = dedupeIds(options.fileIds);
     for (let index = 0; index < ids.length; index += BULK_SELECTION_BATCH_SIZE) {
       const batchIds = ids.slice(index, index + BULK_SELECTION_BATCH_SIZE);
-      const rows = await this.repo.findByIds(batchIds);
+      const rows = await this.repo.findByIds(batchIds, userId, canManageAll);
       if (rows.length === 0) continue;
       await processBatch(rows);
       total += rows.length;
@@ -481,24 +555,31 @@ export class BookDockService {
   }
 }
 
-function toDto(row: BookDockFileRow): BookDockFile {
+function toDto(row: BookDockFileRow, unitFiles: BookDockUnitFileRow[] = []): BookDockFile {
   return {
     id: row.id,
     fileName: row.fileName,
     fileSize: row.fileSize ? Number(row.fileSize) : null,
     format: row.format,
     status: row.status as BookDockFile['status'],
-    embeddedMetadata: row.embeddedMetadata ?? null,
-    selectedMetadata: row.selectedMetadata ?? null,
-    fetchedMetadata: row.fetchedMetadata ?? null,
+    embeddedMetadata: normalizeBookDockMetadata(row.embeddedMetadata),
+    selectedMetadata: normalizeBookDockMetadata(row.selectedMetadata),
+    fetchedMetadata: normalizeBookDockMetadata(row.fetchedMetadata),
     targetLibraryId: row.targetLibraryId,
     targetFolderId: row.targetFolderId,
     confidence: row.confidence ?? null,
-    fetchedMetadataSources: row.fetchedMetadataSources ?? null,
+    fetchedMetadataSources: normalizeBookDockMetadataSources(row.fetchedMetadataSources),
     errorMessage: row.errorMessage,
     metadataEditedAt: row.metadataEditedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    unitFiles: unitFiles.map((file) => ({
+      fileName: file.fileName,
+      fileSize: file.fileSize === null ? null : Number(file.fileSize),
+      format: file.format,
+      role: file.role as BookDockUnitFile['role'],
+      sortOrder: file.sortOrder,
+    })),
   };
 }
 

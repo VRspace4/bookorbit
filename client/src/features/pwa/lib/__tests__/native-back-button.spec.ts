@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Router } from 'vue-router'
 
-const addListener = vi.fn<(event: string, handler: () => void) => Promise<{ remove: () => void }>>(() => Promise.resolve({ remove: vi.fn() }))
+const addListener = vi.fn<(event: string, handler: () => void) => Promise<{ remove: () => void }>>(() =>
+  Promise.resolve({ remove: vi.fn<() => void>() }),
+)
 const minimizeApp = vi.fn<() => Promise<void>>(() => Promise.resolve())
 
 vi.mock('@capacitor/app', () => ({

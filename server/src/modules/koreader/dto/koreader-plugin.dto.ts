@@ -15,6 +15,8 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { KOREADER_DEVICE_ID_REGEX } from './koreader-device-param.dto';
+import { KOREADER_MAX_EVENT_DURATION_SECONDS } from '../koreader-stats.util';
 
 const MD5_HEX = /^[0-9a-f]{32}$/i;
 const DEVICE_DATETIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -22,7 +24,7 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 export class PluginDeviceDto {
   @IsString()
-  @Matches(/^[A-Za-z0-9-]{1,100}$/)
+  @Matches(KOREADER_DEVICE_ID_REGEX)
   deviceId!: string;
 
   @IsString()
@@ -68,6 +70,11 @@ export class MatchCheckBookDto {
   source?: 'current_file' | 'file' | 'statistics';
 
   @IsOptional()
+  @IsInt()
+  @Min(1)
+  bookFileId?: number;
+
+  @IsOptional()
   @IsBoolean()
   metadataAmbiguous?: boolean;
 }
@@ -99,7 +106,7 @@ export class PageStatEventDto {
 
   @IsInt()
   @Min(0)
-  @Max(86400)
+  @Max(KOREADER_MAX_EVENT_DURATION_SECONDS)
   durationSeconds!: number;
 
   @IsInt()
@@ -111,6 +118,11 @@ export class PageStatsBookDto {
   @IsString()
   @Matches(MD5_HEX)
   hash!: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  bookFileId?: number;
 
   @IsArray()
   @ArrayMinSize(1)

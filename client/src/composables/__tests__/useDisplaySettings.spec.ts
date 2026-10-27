@@ -12,15 +12,19 @@ function resetDisplaySettings() {
   settings.squareGridGap.value = 28
   settings.viewMode.value = 'grid'
   settings.cardOverlays.value = ['progress-bar', 'format', 'rating', 'read-status', 'series-position']
+  settings.showJumpRails.value = true
   settings.smartScopeFilterExpanded.value = true
   settings.authorCoverSize.value = 120
   settings.authorCoverShape.value = 'circle'
+  settings.authorRowDensity.value = 'comfortable'
+  settings.authorCoverFallback.value = false
   settings.tableZebraStriping.value = false
   settings.tableDensity.value = 'comfortable'
   settings.bookSpineOverlay.value = 'off'
   settings.showSpineOnComics.value = false
   settings.bookShadowStrength.value = 'default'
   settings.bookCoverDisplayMode.value = 'blurred-fit'
+  settings.bookDetailCoverTint.value = 'off'
   settings.seriesCardCoverMode.value = 'stack'
   settings.gridCardPrimaryLabel.value = 'hidden'
   settings.gridCardSecondaryLabel.value = 'hidden'
@@ -44,6 +48,7 @@ describe('useDisplaySettings preferences helpers', () => {
       coverSizeScope: 'per-view',
       viewMode: 'grid',
       cardOverlays: ['format', 'rating'],
+      showJumpRails: true,
       bookSpineOverlay: 'strong',
       bookCoverDisplayMode: 'natural-bottom',
       thumbnailClickAction: 'reader',
@@ -56,6 +61,7 @@ describe('useDisplaySettings preferences helpers', () => {
       squareCoverSize: 'large',
       coverSizeScope: 'synced',
       cardOverlays: ['format', 'unknown', 'format', 'lock-status'],
+      showJumpRails: false,
       bookCoverDisplayMode: 'fill-crop',
       thumbnailClickAction: 'details',
       tableDensity: 'huge',
@@ -66,6 +72,7 @@ describe('useDisplaySettings preferences helpers', () => {
       portraitCoverSize: 400,
       coverSizeScope: 'synced',
       cardOverlays: ['format', 'lock-status'],
+      showJumpRails: false,
       bookCoverDisplayMode: 'fill-crop',
       thumbnailClickAction: 'details',
     })
@@ -77,6 +84,7 @@ describe('useDisplaySettings preferences helpers', () => {
       gridGap: 120,
       viewMode: 'table',
       authorCoverShape: 'square',
+      showJumpRails: false,
       tableZebraStriping: true,
       bookShadowStrength: 'strong',
       bookCoverDisplayMode: 'natural-bottom',
@@ -88,6 +96,7 @@ describe('useDisplaySettings preferences helpers', () => {
     expect(settings.gridGap.value).toBe(80)
     expect(settings.viewMode.value).toBe('table')
     expect(settings.authorCoverShape.value).toBe('square')
+    expect(settings.showJumpRails.value).toBe(false)
     expect(settings.tableZebraStriping.value).toBe(true)
     expect(settings.tableDensity.value).toBe('comfortable')
     expect(settings.bookShadowStrength.value).toBe('strong')
@@ -98,6 +107,12 @@ describe('useDisplaySettings preferences helpers', () => {
   it('ignores non-object payloads', () => {
     expect(sanitizeDisplayPreferences(null)).toEqual({})
     expect(sanitizeDisplayPreferences('bad')).toEqual({})
+  })
+
+  it('sanitizes only boolean showJumpRails values', () => {
+    expect(sanitizeDisplayPreferences({ showJumpRails: true })).toEqual({ showJumpRails: true })
+    expect(sanitizeDisplayPreferences({ showJumpRails: false })).toEqual({ showJumpRails: false })
+    expect(sanitizeDisplayPreferences({ showJumpRails: 'false' })).toEqual({})
   })
 
   it('includes seriesCardCoverMode in snapshot', () => {
@@ -187,6 +202,26 @@ describe('useDisplaySettings preferences helpers', () => {
   it('applies showSpineOnComics from preferences', () => {
     applyDisplayPreferences({ showSpineOnComics: true })
     expect(settings.showSpineOnComics.value).toBe(true)
+  })
+
+  it('includes bookDetailCoverTint in snapshot', () => {
+    settings.bookDetailCoverTint.value = 'duotone'
+    expect(getDisplayPreferencesSnapshot().bookDetailCoverTint).toBe('duotone')
+  })
+
+  it('defaults bookDetailCoverTint to off', () => {
+    resetDisplaySettings()
+    expect(settings.bookDetailCoverTint.value).toBe('off')
+  })
+
+  it('sanitizes bookDetailCoverTint and drops unknown values', () => {
+    expect(sanitizeDisplayPreferences({ bookDetailCoverTint: 'off' })).toEqual({ bookDetailCoverTint: 'off' })
+    expect(sanitizeDisplayPreferences({ bookDetailCoverTint: 'rainbow' })).toEqual({})
+  })
+
+  it('applies bookDetailCoverTint from preferences', () => {
+    applyDisplayPreferences({ bookDetailCoverTint: 'off' })
+    expect(settings.bookDetailCoverTint.value).toBe('off')
   })
 
   it('includes thumbnailClickAction in snapshot', () => {

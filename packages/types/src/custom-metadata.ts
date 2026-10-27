@@ -4,6 +4,9 @@ export type CustomMetadataFieldType = (typeof CUSTOM_METADATA_FIELD_TYPES)[numbe
 
 export type CustomMetadataPrimitiveValue = string | number | boolean | null;
 
+/** Active field id to type, resolved per query so sorting can pick the matching value column. */
+export type CustomMetadataFieldTypeMap = ReadonlyMap<number, CustomMetadataFieldType>;
+
 export interface CustomMetadataFieldDefinition {
   id: number;
   key: string;
@@ -15,6 +18,11 @@ export interface CustomMetadataFieldDefinition {
   updatedAt: string;
   enabledLibraryIds: number[];
   usageCount: number;
+  /**
+   * Stored values per library id, summing to `usageCount`. Includes libraries the field is no longer
+   * enabled for: those values are kept but hidden until the library is turned back on.
+   */
+  usageByLibrary: Record<number, number>;
 }
 
 /** Lean summary used for table column building. Omits admin-only attributes (usageCount, timestamps). */

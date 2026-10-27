@@ -38,7 +38,7 @@ export function mergeThemeHighlightColorMaps(
 ): Record<string, ThemeHighlightColors> | undefined {
   if (!patch) return base
 
-  const merged: Record<string, ThemeHighlightColors> = { ...(base ?? {}) }
+  const merged: Record<string, ThemeHighlightColors> = { ...base }
   for (const [themeName, colors] of Object.entries(patch)) {
     const defaults = getThemeHighlightDefaults(themeName)
     const current = merged[themeName]
@@ -58,7 +58,7 @@ export function migrateLegacyThemeHighlightColors(settings: EpubReaderSettings):
     settings.ttsSentenceHighlightColor !== defaults.ttsSentenceHighlightColor || settings.ttsWordHighlightColor !== defaults.ttsWordHighlightColor
 
   const normalizedMap = mergeThemeHighlightColorMaps(settings.themeHighlightColors, {
-    ...(settings.themeHighlightColors ?? {}),
+    ...settings.themeHighlightColors,
     ...(hasLegacyOverrides
       ? {
           [settings.themeName]: {

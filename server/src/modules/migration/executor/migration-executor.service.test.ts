@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { ReadingAttemptEventsService } from '../../user-book-status/reading-attempt-events.service';
+import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import sharp from 'sharp';
@@ -27,9 +28,10 @@ function createRepoMock() {
   };
 }
 
-function createScanGatewayMock() {
+function createCoverStoreMock() {
   return {
-    emitCoverRefreshed: vi.fn(),
+    chooseWriteMedium: vi.fn().mockResolvedValue('ebook'),
+    saveCustom: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -50,7 +52,6 @@ function createImportRepoMock() {
     upsertTag: vi.fn(),
     insertBookTag: vi.fn(() => Promise.resolve()),
     markCoverAsCustom: vi.fn(() => Promise.resolve()),
-    clearUserBookStatuses: vi.fn(() => Promise.resolve()),
     upsertUserBookStatus: vi.fn(() => Promise.resolve()),
     clearReadingProgress: vi.fn(() => Promise.resolve()),
     upsertReadingProgress: vi.fn(() => Promise.resolve()),
@@ -86,7 +87,7 @@ function createImportRepoMock() {
     batchDeleteBookTags: vi.fn(() => Promise.resolve()),
     batchUpsertTags: vi.fn(() => Promise.resolve(new Map<string, number>())),
     batchInsertBookTags: vi.fn(() => Promise.resolve()),
-    batchUpsertUserBookStatuses: vi.fn(() => Promise.resolve()),
+    batchMergeUserBookStatuses: vi.fn(() => Promise.resolve()),
     batchUpsertReadingProgress: vi.fn(() => Promise.resolve()),
     batchUpsertAudiobookProgress: vi.fn(() => Promise.resolve()),
     syncImportedReadingSessions: vi.fn(() => Promise.resolve()),
@@ -106,7 +107,7 @@ describe('UserStateImporter audiobook progress import', () => {
     const importRepo = createImportRepoMock();
     importRepo.upsertAudiobookProgress.mockResolvedValue(undefined);
 
-    const importer = new UserStateImporter(repo as never, importRepo as never);
+    const importer = new UserStateImporter(repo as never, importRepo as never, new ReadingAttemptEventsService());
 
     const planned = {
       execution: {
@@ -135,6 +136,24 @@ describe('UserStateImporter audiobook progress import', () => {
       },
     };
 
+    const progressFiles = {
+      primaryFilesByBookId: new Map([
+        [101, 1001],
+        [102, 1002],
+      ]),
+      sourceFilesById: new Map(),
+      sourceFilesByBookId: new Map(),
+      sourceFileToTargetFile: new Map(),
+      targetFilesByBookId: new Map([
+        [101, [{ id: 1001, hash: null, absolutePath: '/audio.mp3', format: 'mp3', sortOrder: 0, durationSeconds: 300 }]],
+        [102, [{ id: 1002, hash: null, absolutePath: '/book.epub', format: 'epub', sortOrder: 0, durationSeconds: null }]],
+      ]),
+      targetFilesById: new Map([
+        [1001, { id: 1001, hash: null, absolutePath: '/audio.mp3', format: 'mp3', sortOrder: 0, durationSeconds: 300 }],
+        [1002, { id: 1002, hash: null, absolutePath: '/book.epub', format: 'epub', sortOrder: 0, durationSeconds: null }],
+      ]),
+    };
+
     await (importer as any).importAudiobookProgress(
       77,
       planned,
@@ -143,8 +162,7 @@ describe('UserStateImporter audiobook progress import', () => {
         ['source-audio', 101],
         ['source-ebook', 102],
       ]),
-      new Map([[101, 1001]]),
-      new Map(),
+      progressFiles,
       async () => {},
     );
 
@@ -179,7 +197,7 @@ describe('UserStateImporter audiobook progress import', () => {
     const importRepo = createImportRepoMock();
     importRepo.upsertAudiobookProgress.mockResolvedValue(undefined);
 
-    const importer = new UserStateImporter(repo as never, importRepo as never);
+    const importer = new UserStateImporter(repo as never, importRepo as never, new ReadingAttemptEventsService());
 
     const planned = {
       execution: {
@@ -199,13 +217,22 @@ describe('UserStateImporter audiobook progress import', () => {
       },
     };
 
+    const audioTargetFile = { id: 1001, hash: null, absolutePath: '/audio.mp3', format: 'mp3', sortOrder: 0, durationSeconds: 300 };
+    const progressFiles = {
+      primaryFilesByBookId: new Map([[101, 1001]]),
+      sourceFilesById: new Map(),
+      sourceFilesByBookId: new Map(),
+      sourceFileToTargetFile: new Map(),
+      targetFilesByBookId: new Map([[101, [audioTargetFile]]]),
+      targetFilesById: new Map([[1001, audioTargetFile]]),
+    };
+
     await (importer as any).importAudiobookProgress(
       88,
       planned,
       new Map([['u1', 10]]),
       new Map([['source-audio', 101]]),
-      new Map([[101, 1001]]),
-      new Map(),
+      progressFiles,
       async () => {},
     );
 
@@ -267,22 +294,17 @@ describe('SharedOverlaysImporter author import', () => {
 });
 
 describe('CoverImporter book cover import', () => {
-  it('copies source cover and thumbnail into target cover directory and marks cover source custom', async () => {
+  it('reads the source cover and stores it as a legacy custom slot', async () => {
     const sourceRoot = await mkdtemp(join(tmpdir(), 'migration-source-media-'));
-    const booksPath = await mkdtemp(join(tmpdir(), 'migration-target-books-'));
     try {
       const sourceDir = join(sourceRoot, 'images', 'source-1');
       await mkdir(sourceDir, { recursive: true });
       const sourceCoverBytes = await createSampleImageBytes();
-      const sourceThumbnailBytes = await createSampleImageBytes();
       await writeFile(join(sourceDir, 'cover.jpg'), sourceCoverBytes);
-      await writeFile(join(sourceDir, 'thumbnail.jpg'), sourceThumbnailBytes);
 
       const repo = createRepoMock();
-      const importRepo = createImportRepoMock();
-      const scanGateway = createScanGatewayMock();
-      importRepo.fetchLibraryIdsByBookIds.mockResolvedValue(new Map([[901, 1]]));
-      const importer = new CoverImporter(repo as never, importRepo as never, scanGateway as never);
+      const coverStore = createCoverStoreMock();
+      const importer = new CoverImporter(repo as never, coverStore as never);
 
       const planned = {
         execution: {
@@ -290,21 +312,10 @@ describe('CoverImporter book cover import', () => {
         },
       };
 
-      await importer.import(52, planned as never, booksPath, sourceRoot, async () => {});
+      await importer.import(52, planned as never, '/target-books', sourceRoot, async () => {});
 
-      const targetDir = join(booksPath, 'covers', '901');
-      const targetFiles = await readdir(targetDir);
-      const copiedCoverName = targetFiles.find((entry) => entry.startsWith('cover_custom.'));
-      expect(copiedCoverName).toBeTruthy();
-      expect(targetFiles).toContain('thumbnail.jpg');
-
-      const copiedCoverBytes = await readFile(join(targetDir, copiedCoverName!));
-      const copiedThumbnailBytes = await readFile(join(targetDir, 'thumbnail.jpg'));
-      expect(copiedCoverBytes.equals(sourceCoverBytes)).toBe(true);
-      expect(copiedThumbnailBytes.equals(sourceThumbnailBytes)).toBe(true);
-
-      expect(importRepo.markCoverAsCustom).toHaveBeenCalledWith(901);
-      expect(scanGateway.emitCoverRefreshed).toHaveBeenCalledWith({ bookId: 901, libraryId: 1 });
+      expect(coverStore.chooseWriteMedium).toHaveBeenCalledWith(901, sourceCoverBytes);
+      expect(coverStore.saveCustom).toHaveBeenCalledWith(901, 'ebook', sourceCoverBytes, { origin: 'legacy' });
       expect(repo.setRunMetric).toHaveBeenCalledWith(
         52,
         'book_covers',
@@ -313,23 +324,18 @@ describe('CoverImporter book cover import', () => {
       );
     } finally {
       await rm(sourceRoot, { recursive: true, force: true });
-      await rm(booksPath, { recursive: true, force: true });
     }
   });
 
-  it('generates target thumbnail when source thumbnail is missing', async () => {
+  it('counts a missing source cover as unresolved', async () => {
     const sourceRoot = await mkdtemp(join(tmpdir(), 'migration-source-media-'));
-    const booksPath = await mkdtemp(join(tmpdir(), 'migration-target-books-'));
     try {
       const sourceDir = join(sourceRoot, 'images', 'source-2');
       await mkdir(sourceDir, { recursive: true });
-      await writeFile(join(sourceDir, 'cover.jpg'), await createSampleImageBytes());
 
       const repo = createRepoMock();
-      const importRepo = createImportRepoMock();
-      const scanGateway = createScanGatewayMock();
-      importRepo.fetchLibraryIdsByBookIds.mockResolvedValue(new Map([[902, 1]]));
-      const importer = new CoverImporter(repo as never, importRepo as never, scanGateway as never);
+      const coverStore = createCoverStoreMock();
+      const importer = new CoverImporter(repo as never, coverStore as never);
 
       const planned = {
         execution: {
@@ -337,28 +343,24 @@ describe('CoverImporter book cover import', () => {
         },
       };
 
-      await importer.import(53, planned as never, booksPath, sourceRoot, async () => {});
+      await importer.import(53, planned as never, '/target-books', sourceRoot, async () => {});
 
-      const generatedThumbnail = await readFile(join(booksPath, 'covers', '902', 'thumbnail.jpg'));
-      expect(generatedThumbnail.length).toBeGreaterThan(0);
-      expect(scanGateway.emitCoverRefreshed).toHaveBeenCalledWith({ bookId: 902, libraryId: 1 });
+      expect(coverStore.saveCustom).not.toHaveBeenCalled();
       expect(repo.setRunMetric).toHaveBeenCalledWith(
         53,
         'book_covers',
         'book_covers',
-        expect.objectContaining({ processed: 1, imported: 1, unresolved: 0, failed: 0 }),
+        expect.objectContaining({ processed: 1, imported: 0, unresolved: 1, failed: 0 }),
       );
     } finally {
       await rm(sourceRoot, { recursive: true, force: true });
-      await rm(booksPath, { recursive: true, force: true });
     }
   });
 
   it('skips book cover stage when source media root is not configured', async () => {
     const repo = createRepoMock();
-    const importRepo = createImportRepoMock();
-    const scanGateway = createScanGatewayMock();
-    const importer = new CoverImporter(repo as never, importRepo as never, scanGateway as never);
+    const coverStore = createCoverStoreMock();
+    const importer = new CoverImporter(repo as never, coverStore as never);
 
     const planned = {
       execution: {
@@ -368,8 +370,7 @@ describe('CoverImporter book cover import', () => {
 
     await importer.import(54, planned as never, '/tmp/books', null, async () => {});
 
-    expect(importRepo.markCoverAsCustom).not.toHaveBeenCalled();
-    expect(scanGateway.emitCoverRefreshed).not.toHaveBeenCalled();
+    expect(coverStore.saveCustom).not.toHaveBeenCalled();
     expect(repo.setRunMetric).toHaveBeenCalledWith(
       54,
       'book_covers',
@@ -386,7 +387,7 @@ describe('UserStateImporter collection import', () => {
     importRepo.insertCollection.mockResolvedValue({ id: 701 });
     importRepo.upsertCollectionBook.mockResolvedValue(true);
 
-    const importer = new UserStateImporter(repo as never, importRepo as never);
+    const importer = new UserStateImporter(repo as never, importRepo as never, new ReadingAttemptEventsService());
 
     const planned = {
       execution: {
@@ -465,7 +466,7 @@ describe('UserStateImporter progress and bookmark edge cases', () => {
   it('marks user-state stages skipped when unavailable', async () => {
     const repo = createRepoMock();
     const importRepo = createImportRepoMock();
-    const importer = new UserStateImporter(repo as never, importRepo as never);
+    const importer = new UserStateImporter(repo as never, importRepo as never, new ReadingAttemptEventsService());
 
     const planned = {
       plan: {
@@ -508,7 +509,7 @@ describe('UserStateImporter progress and bookmark edge cases', () => {
   it('derives bookmark position from track index when source file id is missing', async () => {
     const repo = createRepoMock();
     const importRepo = createImportRepoMock();
-    const importer = new UserStateImporter(repo as never, importRepo as never);
+    const importer = new UserStateImporter(repo as never, importRepo as never, new ReadingAttemptEventsService());
 
     const planned = {
       execution: {

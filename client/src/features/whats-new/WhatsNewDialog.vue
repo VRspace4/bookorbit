@@ -45,7 +45,7 @@ useModal({
 <template>
   <Teleport to="body">
     <div
-      class="fixed inset-0 z-[75] flex items-end justify-center bg-black/50 motion-safe:animate-in motion-safe:fade-in sm:items-center sm:px-4"
+      class="fixed inset-0 z-[75] flex items-end justify-center bg-scrim motion-safe:animate-in motion-safe:fade-in sm:items-center sm:px-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="whats-new-title"
@@ -71,7 +71,7 @@ useModal({
                 <h2 id="whats-new-title" class="text-lg font-semibold tracking-tight text-foreground">{{ t('whatsNew.title') }}</h2>
                 <p class="text-sm text-muted-foreground">
                   <template v-if="version">{{ t('whatsNew.versionPrefix', { version }) }} · </template
-                  >{{ t('whatsNew.newUpdates', { count: releases.length }, releases.length) }}
+                  >{{ t('whatsNew.newUpdates', { count: releases.length }) }}
                 </p>
               </div>
             </div>
@@ -119,7 +119,7 @@ useModal({
               :href="release.changelogUrl"
               target="_blank"
               rel="noopener noreferrer"
-              class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary transition-colors hover:text-primary/85"
+              class="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary transition-colors hover:text-primary"
             >
               {{ t('whatsNew.fullChangelog') }}
               <ExternalLink :size="12" />
@@ -129,7 +129,7 @@ useModal({
           <RouterLink
             v-if="hasMore"
             to="/whats-new"
-            class="inline-flex items-center gap-1 text-sm font-medium text-primary transition-colors hover:text-primary/85"
+            class="inline-flex items-center gap-1 text-sm font-medium text-primary transition-colors hover:text-primary"
             @click="handleLater"
           >
             {{ t('whatsNew.seeAllReleases') }}

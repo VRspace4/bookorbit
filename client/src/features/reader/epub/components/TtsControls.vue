@@ -150,13 +150,7 @@ function selectRate(rate: number) {
             <span class="sr-only">{{ settings.ttsSkipBackSeconds }}</span>
           </button>
 
-          <button
-            v-if="isInitialLoading"
-            type="button"
-            class="tts-toolbar-play pointer-events-none opacity-70"
-            aria-label="Loading TTS"
-            disabled
-          >
+          <button v-if="isInitialLoading" type="button" class="tts-toolbar-play pointer-events-none opacity-70" aria-label="Loading TTS" disabled>
             <Loader2 class="tts-toolbar-play-icon animate-spin" />
           </button>
           <button v-else-if="canPause" type="button" class="tts-toolbar-play" aria-label="Pause TTS" @click="emit('pause')">

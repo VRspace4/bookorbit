@@ -13,6 +13,10 @@ function createThemeStore() {
     radius: 'rounded' as ThemePreferences['radius'],
     background: 'vinyl' as ThemePreferences['background'],
     brightness: 35,
+    surfaceOpacity: 92,
+    style: 'bookorbit' as NonNullable<ThemePreferences['style']>,
+    surfacePalette: 'ash' as NonNullable<ThemePreferences['surfacePalette']>,
+    glowReach: 100,
     setTheme(nextTheme: ThemePreferences['theme']) {
       this.theme = nextTheme
     },
@@ -27,6 +31,18 @@ function createThemeStore() {
     },
     setBrightness(nextBrightness: number) {
       this.brightness = nextBrightness
+    },
+    setSurfaceOpacity(nextSurfaceOpacity: number) {
+      this.surfaceOpacity = nextSurfaceOpacity
+    },
+    setStyle(nextStyle: NonNullable<ThemePreferences['style']>) {
+      this.style = nextStyle
+    },
+    setSurfacePalette(nextPalette: NonNullable<ThemePreferences['surfacePalette']>) {
+      this.surfacePalette = nextPalette
+    },
+    setGlowReach(reach: number) {
+      this.glowReach = reach
     },
   })
 }
@@ -92,6 +108,51 @@ describe('useThemeSync', () => {
     expect(themeStore.radius).toBe('pill')
     expect(themeStore.background).toBe('mesh')
     expect(themeStore.brightness).toBe(72)
+  })
+
+  it('loadFromServer applies surfaceOpacity within the supported range', async () => {
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'dark', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35, surfaceOpacity: 80 } }),
+    )
+
+    const { loadFromServer } = await import('../useThemeSync')
+    await loadFromServer()
+
+    expect(themeStore.surfaceOpacity).toBe(80)
+  })
+
+  it.each([79, 101, 92.5, 'full'])('loadFromServer ignores out-of-range surfaceOpacity %s', async (surfaceOpacity) => {
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'dark', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35, surfaceOpacity } }),
+    )
+
+    const { loadFromServer } = await import('../useThemeSync')
+    await loadFromServer()
+
+    expect(themeStore.surfaceOpacity).toBe(92)
+  })
+
+  it('loadFromServer keeps the local surfaceOpacity when the server predates the field', async () => {
+    themeStore.surfaceOpacity = 85
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'light', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35 } }),
+    )
+
+    const { loadFromServer } = await import('../useThemeSync')
+    await loadFromServer()
+
+    expect(themeStore.surfaceOpacity).toBe(85)
+  })
+
+  it('loadFromServer applies a synchronized system theme selection', async () => {
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'system', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35 } }),
+    )
+
+    const { loadFromServer } = await import('../useThemeSync')
+    await loadFromServer()
+
+    expect(themeStore.theme).toBe('system')
   })
 
   it('loadFromServer no-ops when server settings are null', async () => {
@@ -231,10 +292,82 @@ describe('useThemeSync', () => {
             radius: 'rounded',
             background: 'vinyl',
             brightness: 35,
+            surfaceOpacity: 92,
+            style: 'bookorbit',
+            surfacePalette: 'ash',
+            glowReach: 100,
           },
         }),
       }),
     )
+  })
+
+  it('saves a style or surface palette change like any other appearance setting', async () => {
+    user.value = { settings: { syncThemePreferences: true } }
+    apiMock.mockResolvedValue(mockJsonResponse({}, true))
+
+    const { initThemeSync } = await import('../useThemeSync')
+    initThemeSync()
+
+    themeStore.setStyle('nostalgia')
+    themeStore.setSurfacePalette('sepia')
+    await vi.advanceTimersByTimeAsync(1600)
+
+    expect(apiMock).toHaveBeenCalledTimes(1)
+    const body = JSON.parse((apiMock.mock.calls[0]![1] as { body: string }).body) as { settings: ThemePreferences }
+    expect(body.settings).toMatchObject({ style: 'nostalgia', surfacePalette: 'sepia' })
+  })
+
+  it('loadFromServer applies a synchronized style and surface palette', async () => {
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({
+        settings: {
+          theme: 'dark',
+          accent: 'blue',
+          radius: 'rounded',
+          background: 'vinyl',
+          brightness: 35,
+          style: 'nostalgia',
+          surfacePalette: 'olive',
+        },
+      }),
+    )
+
+    const { loadFromServer } = await import('../useThemeSync')
+    await loadFromServer()
+
+    expect(themeStore.style).toBe('nostalgia')
+    expect(themeStore.surfacePalette).toBe('olive')
+  })
+
+  it('loadFromServer applies a synchronized glow reach and ignores one out of range', async () => {
+    const { loadFromServer } = await import('../useThemeSync')
+
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'dark', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35, glowReach: 40 } }),
+    )
+    await loadFromServer()
+    expect(themeStore.glowReach).toBe(40)
+
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'dark', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35, glowReach: 900 } }),
+    )
+    await loadFromServer()
+    expect(themeStore.glowReach).toBe(40)
+  })
+
+  it('loadFromServer keeps the local style when the server value is unknown or absent', async () => {
+    themeStore.style = 'nostalgia'
+    themeStore.surfacePalette = 'pine'
+    apiMock.mockResolvedValueOnce(
+      mockJsonResponse({ settings: { theme: 'dark', accent: 'blue', radius: 'rounded', background: 'vinyl', brightness: 35, style: 'retro' } }),
+    )
+
+    const { loadFromServer } = await import('../useThemeSync')
+    await loadFromServer()
+
+    expect(themeStore.style).toBe('nostalgia')
+    expect(themeStore.surfacePalette).toBe('pine')
   })
 
   it('cancelPendingThemeSync prevents a scheduled save from firing', async () => {

@@ -1,10 +1,13 @@
-const HTML_ENTITY_REPLACEMENTS: Array<[RegExp, string]> = [
-  [/&amp;/g, '&'],
-  [/&lt;/g, '<'],
-  [/&gt;/g, '>'],
-  [/&quot;/g, '"'],
-  [/&#39;/g, "'"],
-];
+import { MetadataCandidate } from '@bookorbit/types';
+
+import { markProviderTruncated } from '../../../common/provider-cache/provider-call-context';
+import { htmlToPlainText } from '../../../common/utils/html-to-text.utils';
+import { ProviderThrottleError } from '../provider-throttle.error';
+import { MetadataSearchParams } from './metadata-search-params';
+
+export function allowsAudiobookProviders(params: MetadataSearchParams): boolean {
+  return params.includeAudiobookProviders ?? params.isAudiobook ?? false;
+}
 
 export function normalizeMaxCandidates(value: number | undefined, maxResults: number): number {
   if (!Number.isFinite(value) || value == null) return maxResults;
@@ -13,11 +16,56 @@ export function normalizeMaxCandidates(value: number | undefined, maxResults: nu
   return Math.min(rounded, maxResults);
 }
 
+/** How many records one search request asks for: the provider's own page, widened when a browsing search wants more. */
+export function searchPageSize(params: MetadataSearchParams, defaultSize: number): number {
+  const wanted = params.resultsPerProvider;
+  if (wanted === undefined || !Number.isFinite(wanted)) return defaultSize;
+  return Math.max(defaultSize, Math.floor(wanted));
+}
+
 export function buildRequestSignal(timeoutMs: number, parentSignal?: AbortSignal): AbortSignal {
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   if (!parentSignal) return timeoutSignal;
   if (parentSignal.aborted) return parentSignal;
   return AbortSignal.any([timeoutSignal, parentSignal]);
+}
+
+export interface SearchDeadline {
+  /** Epoch ms the budget runs out. */
+  readonly at: number;
+  /** Aborts in-flight work when the budget runs out, so partial results survive. */
+  readonly signal: AbortSignal;
+  expired(): boolean;
+  dispose(): void;
+}
+
+/**
+ * Budget for a search that spans many calls. The hard provider timeout throws the whole search
+ * away; this one cancels what is still running and leaves the caller holding what it already has,
+ * so it has to sit far enough below the hard timeout for the caller to finish assembling results.
+ */
+export function createSearchDeadline(budgetMs: number, parentSignal?: AbortSignal): SearchDeadline {
+  const at = Date.now() + budgetMs;
+  const controller = new AbortController();
+  // Runs in the caller's async context, so the metadata cache learns this search was cut short.
+  const timer = setTimeout(() => {
+    markProviderTruncated();
+    controller.abort();
+  }, budgetMs);
+  const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+
+  return {
+    at,
+    signal,
+    // A caller can see the budget spent before the timer has fired and then dispose of it, so the
+    // check itself has to report the truncation too.
+    expired: () => {
+      const spent = Date.now() >= at;
+      if (spent) markProviderTruncated();
+      return spent;
+    },
+    dispose: () => clearTimeout(timer),
+  };
 }
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -41,12 +89,20 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export function stripHtml(html: string): string {
-  let value = html.replace(/<[^>]*>/g, ' ');
-  for (const [pattern, replacement] of HTML_ENTITY_REPLACEMENTS) {
-    value = value.replace(pattern, replacement);
+/**
+ * Rethrows a throttle raised part-way through a per-result loop with the candidates gathered so far
+ * attached, so recording the cooldown does not also discard finished work. Anything else, and a
+ * throttle that already carries candidates from an inner loop, is rethrown untouched.
+ */
+export function rethrowWithPartialCandidates(error: unknown, candidates: readonly MetadataCandidate[]): never {
+  if (error instanceof ProviderThrottleError && candidates.length > 0 && error.partialCandidates.length === 0) {
+    throw new ProviderThrottleError(error.retryAfterSeconds, error.reason, [...candidates]);
   }
-  return value.replace(/\s+/g, ' ').trim();
+  throw error;
+}
+
+export function stripHtml(html: string): string {
+  return htmlToPlainText(html);
 }
 
 export function sanitizeLogError(error: unknown): string {

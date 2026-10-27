@@ -33,6 +33,30 @@ export class UserPreferencesController {
     await this.userPreferencesService.upsertDisplayPreferences(user.id, dto.settings);
   }
 
+  @Get('cover-search')
+  async getCoverSearchPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getCoverSearchPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('cover-search')
+  @HttpCode(204)
+  async upsertCoverSearchPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertCoverSearchPreferences(user.id, dto.settings);
+  }
+
+  @Get('book-requests')
+  async getBookRequestPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getBookRequestPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('book-requests')
+  @HttpCode(204)
+  async upsertBookRequestPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertBookRequestPreferences(user.id, dto.settings);
+  }
+
   @Get('locale')
   async getLocalePreferences(@CurrentUser() user: RequestUser) {
     const settings = await this.userPreferencesService.getLocalePreferences(user.id);
@@ -45,6 +69,30 @@ export class UserPreferencesController {
     await this.userPreferencesService.upsertLocalePreferences(user.id, dto.settings);
   }
 
+  @Get('server-fonts')
+  async getServerFontPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getServerFontPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('server-fonts')
+  @HttpCode(204)
+  async upsertServerFontPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertServerFontPreferences(user.id, dto.settings);
+  }
+
+  @Get('annotation-colors')
+  async getAnnotationColorNamePreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getAnnotationColorNamePreferences(user.id);
+    return { settings };
+  }
+
+  @Put('annotation-colors')
+  @HttpCode(204)
+  async upsertAnnotationColorNamePreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertAnnotationColorNamePreferences(user.id, dto.settings);
+  }
+
   @Get('whats-new')
   async getWhatsNewPreferences(@CurrentUser() user: RequestUser) {
     const settings = await this.userPreferencesService.getWhatsNewPreferences(user.id);
@@ -55,5 +103,29 @@ export class UserPreferencesController {
   @HttpCode(204)
   async upsertWhatsNewPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
     await this.userPreferencesService.upsertWhatsNewPreferences(user.id, dto.settings);
+  }
+
+  @Get('podcast-playback')
+  async getPodcastPlaybackPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getPodcastPlaybackPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('podcast-playback')
+  @HttpCode(204)
+  async upsertPodcastPlaybackPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertPodcastPlaybackPreferences(user.id, dto.settings);
+  }
+
+  @Get('podcast-playlists')
+  async getPodcastPlaylistPreferences(@CurrentUser() user: RequestUser) {
+    const settings = await this.userPreferencesService.getPodcastPlaylistPreferences(user.id);
+    return { settings };
+  }
+
+  @Put('podcast-playlists')
+  @HttpCode(204)
+  async upsertPodcastPlaylistPreferences(@Body() dto: UpsertUserPreferenceDto, @CurrentUser() user: RequestUser) {
+    await this.userPreferencesService.upsertPodcastPlaylistPreferences(user.id, dto.settings);
   }
 }

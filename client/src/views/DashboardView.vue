@@ -1,30 +1,35 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Settings2, Sparkles } from '@lucide/vue'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { AlertTriangle, Loader2, RefreshCw, Settings2, Sparkles } from '@lucide/vue'
+import { isPodcastScrollerType, type BookScrollerType } from '@bookorbit/types'
 
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { getDashboardGreetingLabel } from '@/features/dashboard/lib/greeting'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 import { useLibraries } from '@/features/library/composables/useLibraries'
+import PageTitleRow from '@/components/page-header/PageTitleRow.vue'
+import DashboardPodcastScroller from '@/features/dashboard/components/DashboardPodcastScroller.vue'
 import DashboardScroller from '@/features/dashboard/components/DashboardScroller.vue'
 import DashboardSettingsSheet from '@/features/dashboard/components/DashboardSettingsSheet.vue'
 import DashboardWelcome from '@/features/dashboard/components/DashboardWelcome.vue'
 import DashboardWidgetRow from '@/features/dashboard/components/DashboardWidgetRow.vue'
-import { useDashboardConfig } from '@/features/dashboard/composables/useDashboardConfig'
+import { SHELF_LAYOUT, useDashboardConfig } from '@/features/dashboard/composables/useDashboardConfig'
+import { useDashboardLabels } from '@/features/dashboard/composables/useDashboardLabels'
 import { useOnboardingTour } from '@/features/onboarding/composables/useOnboardingTour'
 import { useSmartScopes } from '@/features/smart-scope/composables/useSmartScopes'
 
 const { t } = useI18n()
 const { hasPermission } = usePermissions()
 const { user } = useAuth()
-const { libraries, loading: librariesLoading, fetchLibraries } = useLibraries()
-const { scrollers, pruneDeletedSmartScopeScrollers } = useDashboardConfig()
+const { libraries, loading: librariesLoading, loaded: librariesLoaded, error: librariesError, fetchLibraries } = useLibraries()
+const { scrollers, shelfLayout, pruneDeletedSmartScopeScrollers } = useDashboardConfig()
+const { shelfTitle } = useDashboardLabels()
 const { maybeStartTour } = useOnboardingTour()
 const { smartScopes, loaded: smartScopesLoaded, fetchSmartScopes } = useSmartScopes()
 
 const settingsOpen = ref(false)
+const dashboardRevision = ref(0)
 const now = ref(new Date())
 let greetingTimer: number | null = null
 
@@ -32,7 +37,31 @@ const enabledScrollers = computed(() =>
   (Array.isArray(scrollers.value) ? scrollers.value : []).filter((s) => s.enabled).sort((a, b) => a.order - b.order),
 )
 
-const hasNoLibraries = computed(() => !librariesLoading.value && libraries.value.length === 0)
+// Book shelves and the podcast shelf render through different components and load from different
+// endpoints, so the split resolves here rather than as a type check in the template.
+type DashboardShelf =
+  | { kind: 'podcast'; key: string; title: string; limit: number }
+  | { kind: 'book'; key: string; title: string; limit: number; rows: number; type: BookScrollerType; smartScopeId?: number }
+
+const shelves = computed<DashboardShelf[]>(() =>
+  enabledScrollers.value.map((scroller) => {
+    const key = `${scroller.id}-${scroller.type}-${scroller.smartScopeId ?? 0}-${scroller.rows}`
+    const title = shelfTitle(scroller)
+    if (isPodcastScrollerType(scroller.type)) return { kind: 'podcast', key, title, limit: scroller.limit }
+    return { kind: 'book', key, title, limit: scroller.limit, rows: scroller.rows, type: scroller.type, smartScopeId: scroller.smartScopeId }
+  }),
+)
+
+const shelfLayoutClass = computed(() =>
+  shelfLayout.value === SHELF_LAYOUT.TWO_COLUMNS ? 'grid min-w-0 items-start gap-5 xl:grid-cols-2' : 'space-y-5',
+)
+
+const libraryState = computed(() => {
+  if (librariesLoaded.value) return libraries.value.length === 0 ? 'empty' : 'ready'
+  if (librariesError.value) return 'error'
+  return 'loading'
+})
+
 const greetingText = computed(() => t(`views.dashboard.greeting.${getDashboardGreetingLabel(now.value, user.value?.settings?.timezone)}`))
 const greetingName = computed(() => {
   const fullName = user.value?.name?.trim()
@@ -41,7 +70,7 @@ const greetingName = computed(() => {
 })
 
 watch(
-  [smartScopesLoaded, smartScopes],
+  [smartScopesLoaded, smartScopes, scrollers],
   ([isLoaded, allSmartScopes]) => {
     if (!isLoaded) return
     pruneDeletedSmartScopeScrollers(allSmartScopes.map((smartScope) => smartScope.id))
@@ -49,9 +78,21 @@ watch(
   { immediate: true },
 )
 
+function handleRetryLibraries() {
+  void fetchLibraries()
+}
+
+function handleOpenSettings() {
+  settingsOpen.value = true
+}
+
+function handleDashboardSettingsSaved() {
+  dashboardRevision.value += 1
+}
+
 onMounted(() => {
-  fetchLibraries()
-  fetchSmartScopes()
+  void fetchLibraries()
+  void fetchSmartScopes()
   greetingTimer = window.setInterval(() => {
     now.value = new Date()
   }, 60_000)
@@ -71,57 +112,81 @@ onUnmounted(() => {
 <template>
   <div>
     <main class="relative flex-none">
-      <!-- Floating Settings Button -->
-      <div class="pointer-events-none fixed bottom-6 right-6 z-50">
-        <div
-          class="pointer-events-auto animate-fade-up"
-          style="animation-delay: 400ms; animation-duration: 0.3s; animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1)"
-        >
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <button
-                class="flex h-11 w-11 items-center justify-center rounded-full border-2 border-primary/40 bg-background/90 text-primary shadow-2xl backdrop-blur-md transition-all hover:bg-primary hover:text-primary-foreground active:scale-95"
-                @click="settingsOpen = true"
-              >
-                <Settings2 :size="18" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="left" align="center">{{ t('views.dashboard.customize') }}</TooltipContent>
-          </Tooltip>
-        </div>
-      </div>
-
       <!-- Scrollers / Welcome -->
-      <div class="space-y-5 pb-8 pt-4 sm:pr-2">
-        <DashboardWelcome v-if="hasNoLibraries" :can-create="hasPermission('manage_libraries')" />
+      <div class="space-y-5 pb-8 pt-2 sm:pr-2">
+        <PageTitleRow class="animate-fade-up" style="animation-delay: 40ms" :eyebrow="t('components.sidebar.dashboard')" :icon="Sparkles">
+          <template #title>
+            <span class="block truncate text-[19px] leading-[25px] font-bold tracking-[-0.015em] text-foreground sm:text-[22px] sm:leading-[27px]">
+              {{ greetingText }}<span class="ms-1.5 text-primary">{{ greetingName }}</span>
+            </span>
+          </template>
+          <template v-if="libraryState === 'ready'" #actions>
+            <!-- Icon-only below sm so the greeting keeps its width; the label stays available to assistive tech. -->
+            <button
+              type="button"
+              :aria-label="t('views.dashboard.customize')"
+              class="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-input px-3 text-[13px] font-medium whitespace-nowrap text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:px-2"
+              @click="handleOpenSettings"
+            >
+              <Settings2 :size="14" class="text-muted-foreground" aria-hidden="true" />
+              <span class="hidden sm:inline">{{ t('views.dashboard.customize') }}</span>
+            </button>
+          </template>
+        </PageTitleRow>
+        <div v-if="libraryState === 'loading'" role="status" class="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+          <Loader2 :size="18" class="animate-spin" aria-hidden="true" />
+          <span>{{ t('common.loading') }}</span>
+        </div>
+        <div
+          v-else-if="libraryState === 'error'"
+          role="alert"
+          class="mx-auto flex max-w-md flex-col items-center rounded-2xl border border-destructive/30 bg-card/30 px-8 py-12 text-center shadow-sm"
+        >
+          <AlertTriangle :size="28" class="mb-4 text-destructive" aria-hidden="true" />
+          <h2 class="text-lg font-semibold text-foreground">{{ t('dashboard.libraryLoad.errorTitle') }}</h2>
+          <p class="mt-2 text-sm leading-relaxed text-muted-foreground">{{ t('dashboard.libraryLoad.errorDescription') }}</p>
+          <button
+            type="button"
+            class="mt-6 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="librariesLoading"
+            @click="handleRetryLibraries"
+          >
+            <RefreshCw :size="15" aria-hidden="true" />
+            {{ t('common.retry') }}
+          </button>
+        </div>
+        <DashboardWelcome v-else-if="libraryState === 'empty'" :can-create="hasPermission('manage_libraries')" />
         <template v-else>
-          <div class="animate-fade-up flex items-center gap-2 px-1" style="animation-delay: 40ms">
-            <Sparkles :size="16" class="shrink-0 text-primary/85" />
-            <p class="text-[1.05rem] font-medium leading-tight tracking-[-0.01em] text-foreground/90 sm:text-[1.18rem]">
-              <span class="text-foreground/88">{{ greetingText }}</span>
-              <span class="ml-1 font-semibold text-primary">{{ greetingName }}</span>
-            </p>
+          <DashboardWidgetRow :key="`widgets-${dashboardRevision}`" class="animate-fade-up" />
+          <div v-if="enabledScrollers.length > 0" :class="shelfLayoutClass">
+            <template v-for="(shelf, index) in shelves" :key="`${dashboardRevision}-${shelf.key}`">
+              <DashboardPodcastScroller
+                v-if="shelf.kind === 'podcast'"
+                :title="shelf.title"
+                :limit="shelf.limit"
+                class="min-w-0 animate-fade-up"
+                :style="{ animationDelay: `${index * 100}ms` }"
+              />
+              <DashboardScroller
+                v-else
+                :type="shelf.type"
+                :title="shelf.title"
+                :limit="shelf.limit"
+                :rows="shelf.rows"
+                :smartScope-id="shelf.smartScopeId"
+                class="min-w-0 animate-fade-up"
+                :style="{ animationDelay: `${index * 100}ms` }"
+              />
+            </template>
           </div>
-
-          <DashboardWidgetRow class="animate-fade-up" />
-          <DashboardScroller
-            v-for="(scroller, index) in enabledScrollers"
-            :key="`${scroller.id}-${scroller.type}-${scroller.smartScopeId ?? 0}`"
-            :type="scroller.type"
-            :title="scroller.label"
-            :limit="scroller.limit"
-            :smartScope-id="scroller.smartScopeId"
-            class="animate-fade-up"
-            :style="{ animationDelay: `${index * 100}ms` }"
-          />
           <div v-if="enabledScrollers.length === 0" class="px-2 py-12 text-center">
             <p class="text-sm text-muted-foreground">{{ t('views.dashboard.allShelvesHidden') }}</p>
-            <button class="mt-2 text-sm text-primary hover:underline" @click="settingsOpen = true">{{ t('views.dashboard.customize') }}</button>
+            <button class="mt-2 text-sm text-primary hover:underline" @click="handleOpenSettings">{{ t('views.dashboard.customize') }}</button>
           </div>
         </template>
       </div>
     </main>
 
-    <DashboardSettingsSheet v-model:open="settingsOpen" />
+    <DashboardSettingsSheet v-model:open="settingsOpen" @saved="handleDashboardSettingsSaved" />
   </div>
 </template>

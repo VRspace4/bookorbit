@@ -2,6 +2,7 @@ import { ref, watch } from 'vue'
 import {
   AUTHOR_COVER_SHAPES,
   BOOK_COVER_DISPLAY_MODES,
+  BOOK_DETAIL_COVER_TINTS,
   BOOK_SHADOW_STRENGTHS,
   BOOK_SPINE_OVERLAYS,
   BOOK_THUMBNAIL_CLICK_ACTION,
@@ -10,10 +11,12 @@ import {
   CARD_OVERLAY_KEYS,
   COVER_SIZE_SCOPES,
   GRID_CARD_LABEL_FIELDS,
+  PLACEHOLDER_COVER_STYLES,
   SERIES_CARD_COVER_MODES,
   TABLE_DENSITIES,
   type AuthorCoverShape,
   type BookCoverDisplayMode,
+  type BookDetailCoverTint,
   type BookShadowStrength,
   type BookSpineOverlay,
   type BookThumbnailClickAction,
@@ -23,6 +26,7 @@ import {
   type CoverSizeScope,
   type DisplayPreferences,
   type GridCardLabelField,
+  type PlaceholderCoverStyle,
   type SeriesCardCoverMode,
   type TableDensity,
 } from '@bookorbit/types'
@@ -31,6 +35,7 @@ import { storage } from '@/services/storage'
 export type {
   AuthorCoverShape,
   BookCoverDisplayMode,
+  BookDetailCoverTint,
   BookShadowStrength,
   BookSpineOverlay,
   BookThumbnailClickAction,
@@ -40,6 +45,7 @@ export type {
   CoverSizeScope,
   DisplayPreferences,
   GridCardLabelField,
+  PlaceholderCoverStyle,
   SeriesCardCoverMode,
   TableDensity,
 } from '@bookorbit/types'
@@ -50,8 +56,10 @@ const DEFAULT_GRID_GAP = 28
 const DEFAULT_BOOK_SPINE_OVERLAY: BookSpineOverlay = 'off'
 const DEFAULT_BOOK_SHADOW_STRENGTH: BookShadowStrength = 'default'
 const DEFAULT_BOOK_COVER_DISPLAY_MODE: BookCoverDisplayMode = 'blurred-fit'
+const DEFAULT_BOOK_DETAIL_COVER_TINT: BookDetailCoverTint = 'off'
 const DEFAULT_SERIES_CARD_COVER_MODE: SeriesCardCoverMode = 'stack'
 const DEFAULT_BOOK_THUMBNAIL_CLICK_ACTION: BookThumbnailClickAction = 'reader'
+const DEFAULT_PLACEHOLDER_COVER_STYLE: PlaceholderCoverStyle = 'bauhaus'
 const DEFAULT_CARD_OVERLAYS: CardOverlayKey[] = ['progress-bar', 'format', 'rating', 'read-status', 'series-position']
 
 function normalizeBookSpineOverlay(value: unknown): BookSpineOverlay {
@@ -72,6 +80,12 @@ function normalizeBookCoverDisplayMode(value: unknown): BookCoverDisplayMode {
     : DEFAULT_BOOK_COVER_DISPLAY_MODE
 }
 
+function normalizeBookDetailCoverTint(value: unknown): BookDetailCoverTint {
+  return typeof value === 'string' && BOOK_DETAIL_COVER_TINTS.includes(value as BookDetailCoverTint)
+    ? (value as BookDetailCoverTint)
+    : DEFAULT_BOOK_DETAIL_COVER_TINT
+}
+
 function normalizeSeriesCardCoverMode(value: unknown): SeriesCardCoverMode {
   return typeof value === 'string' && SERIES_CARD_COVER_MODES.includes(value as SeriesCardCoverMode)
     ? (value as SeriesCardCoverMode)
@@ -80,6 +94,12 @@ function normalizeSeriesCardCoverMode(value: unknown): SeriesCardCoverMode {
 
 function normalizeCardInfoMode(value: unknown): CardInfoMode {
   return typeof value === 'string' && CARD_INFO_MODES.includes(value as CardInfoMode) ? (value as CardInfoMode) : 'hover-overlay'
+}
+
+function normalizePlaceholderCoverStyle(value: unknown): PlaceholderCoverStyle {
+  return typeof value === 'string' && PLACEHOLDER_COVER_STYLES.includes(value as PlaceholderCoverStyle)
+    ? (value as PlaceholderCoverStyle)
+    : DEFAULT_PLACEHOLDER_COVER_STYLE
 }
 
 function normalizeThumbnailClickAction(value: unknown): BookThumbnailClickAction {
@@ -140,23 +160,31 @@ function normalizeViewMode(v: unknown): BookViewMode {
 
 const viewMode = ref<BookViewMode>(normalizeViewMode(storage.get('viewMode', 'grid')))
 const cardOverlays = ref<CardOverlayKey[]>(normalizeCardOverlays(storage.get('cardOverlays', DEFAULT_CARD_OVERLAYS)))
+const showJumpRails = ref(storage.get<boolean>('showJumpRails', true) !== false)
 const smartScopeFilterExpanded = ref(storage.get<boolean>('smartScopeFilterExpanded', true) === true)
 const authorCoverSize = ref(normalizePositiveInteger(storage.get('authorCoverSize', 120), 120, 100, 400))
 const authorCoverShape = ref<AuthorCoverShape>(normalizeAuthorCoverShape(storage.get('authorCoverShape', 'circle')))
 const tableZebraStriping = ref(storage.get<boolean>('tableZebraStriping', false) === true)
 const tableDensity = ref<TableDensity>(normalizeTableDensity(storage.get('tableDensity', 'comfortable')))
+const authorRowDensity = ref<TableDensity>(normalizeTableDensity(storage.get('authorRowDensity', 'comfortable')))
+// Off by default: a book cover under a person's name reads as their photograph.
+const authorCoverFallback = ref(storage.get<boolean>('authorCoverFallback', false) === true)
 const bookSpineOverlay = ref<BookSpineOverlay>(normalizeBookSpineOverlay(storage.get('bookSpineOverlay', DEFAULT_BOOK_SPINE_OVERLAY)))
 const showSpineOnComics = ref(storage.get<boolean>('showSpineOnComics', false) === true)
 const bookShadowStrength = ref<BookShadowStrength>(normalizeBookShadowStrength(storage.get('bookShadowStrength', DEFAULT_BOOK_SHADOW_STRENGTH)))
 const bookCoverDisplayMode = ref<BookCoverDisplayMode>(
   normalizeBookCoverDisplayMode(storage.get('bookCoverDisplayMode', DEFAULT_BOOK_COVER_DISPLAY_MODE)),
 )
+const bookDetailCoverTint = ref<BookDetailCoverTint>(normalizeBookDetailCoverTint(storage.get('bookDetailCoverTint', DEFAULT_BOOK_DETAIL_COVER_TINT)))
 const seriesCardCoverMode = ref<SeriesCardCoverMode>(normalizeSeriesCardCoverMode(storage.get('seriesCardCoverMode', DEFAULT_SERIES_CARD_COVER_MODE)))
 const gridCardPrimaryLabel = ref<GridCardLabelField>(normalizeGridCardLabelField(storage.get('gridCardPrimaryLabel', 'hidden')))
 const gridCardSecondaryLabel = ref<GridCardLabelField>(normalizeGridCardLabelField(storage.get('gridCardSecondaryLabel', 'hidden')))
 const cardInfoMode = ref<CardInfoMode>(normalizeCardInfoMode(storage.get('cardInfoMode', 'hover-overlay')))
 const thumbnailClickAction = ref<BookThumbnailClickAction>(
   normalizeThumbnailClickAction(storage.get('thumbnailClickAction', DEFAULT_BOOK_THUMBNAIL_CLICK_ACTION)),
+)
+const placeholderCoverStyle = ref<PlaceholderCoverStyle>(
+  normalizePlaceholderCoverStyle(storage.get('placeholderCoverStyle', DEFAULT_PLACEHOLDER_COVER_STYLE)),
 )
 
 watch(portraitCoverSize, (v) => storage.set('portraitCoverSize', v))
@@ -167,20 +195,25 @@ watch(portraitGridGap, (v) => storage.set('portraitGridGap', v))
 watch(squareGridGap, (v) => storage.set('squareGridGap', v))
 watch(viewMode, (v) => storage.set('viewMode', v))
 watch(cardOverlays, (v) => storage.set('cardOverlays', normalizeCardOverlays(v)), { deep: true })
+watch(showJumpRails, (v) => storage.set('showJumpRails', v))
 watch(smartScopeFilterExpanded, (v) => storage.set('smartScopeFilterExpanded', v))
 watch(authorCoverSize, (v) => storage.set('authorCoverSize', v))
 watch(authorCoverShape, (v) => storage.set('authorCoverShape', normalizeAuthorCoverShape(v)))
 watch(tableZebraStriping, (v) => storage.set('tableZebraStriping', v))
 watch(tableDensity, (v) => storage.set('tableDensity', normalizeTableDensity(v)))
+watch(authorRowDensity, (v) => storage.set('authorRowDensity', normalizeTableDensity(v)))
+watch(authorCoverFallback, (v) => storage.set('authorCoverFallback', v))
 watch(bookSpineOverlay, (value) => storage.set('bookSpineOverlay', normalizeBookSpineOverlay(value)))
 watch(showSpineOnComics, (v) => storage.set('showSpineOnComics', v))
 watch(bookShadowStrength, (value) => storage.set('bookShadowStrength', normalizeBookShadowStrength(value)))
 watch(bookCoverDisplayMode, (value) => storage.set('bookCoverDisplayMode', normalizeBookCoverDisplayMode(value)))
+watch(bookDetailCoverTint, (value) => storage.set('bookDetailCoverTint', normalizeBookDetailCoverTint(value)))
 watch(seriesCardCoverMode, (value) => storage.set('seriesCardCoverMode', normalizeSeriesCardCoverMode(value)))
 watch(gridCardPrimaryLabel, (value) => storage.set('gridCardPrimaryLabel', normalizeGridCardLabelField(value)))
 watch(gridCardSecondaryLabel, (value) => storage.set('gridCardSecondaryLabel', normalizeGridCardLabelField(value)))
 watch(cardInfoMode, (value) => storage.set('cardInfoMode', normalizeCardInfoMode(value)))
 watch(thumbnailClickAction, (value) => storage.set('thumbnailClickAction', normalizeThumbnailClickAction(value)))
+watch(placeholderCoverStyle, (value) => storage.set('placeholderCoverStyle', normalizePlaceholderCoverStyle(value)))
 
 export function getDisplayPreferencesSnapshot(): DisplayPreferences {
   return {
@@ -192,20 +225,25 @@ export function getDisplayPreferencesSnapshot(): DisplayPreferences {
     squareGridGap: normalizePositiveInteger(squareGridGap.value, DEFAULT_GRID_GAP, 1, 80),
     viewMode: normalizeViewMode(viewMode.value),
     cardOverlays: normalizeCardOverlays(cardOverlays.value),
+    showJumpRails: showJumpRails.value !== false,
     smartScopeFilterExpanded: smartScopeFilterExpanded.value === true,
     authorCoverSize: normalizePositiveInteger(authorCoverSize.value, 120, 100, 400),
     authorCoverShape: normalizeAuthorCoverShape(authorCoverShape.value),
+    authorRowDensity: normalizeTableDensity(authorRowDensity.value),
+    authorCoverFallback: authorCoverFallback.value === true,
     tableZebraStriping: tableZebraStriping.value === true,
     tableDensity: normalizeTableDensity(tableDensity.value),
     bookSpineOverlay: normalizeBookSpineOverlay(bookSpineOverlay.value),
     showSpineOnComics: showSpineOnComics.value === true,
     bookShadowStrength: normalizeBookShadowStrength(bookShadowStrength.value),
     bookCoverDisplayMode: normalizeBookCoverDisplayMode(bookCoverDisplayMode.value),
+    bookDetailCoverTint: normalizeBookDetailCoverTint(bookDetailCoverTint.value),
     seriesCardCoverMode: normalizeSeriesCardCoverMode(seriesCardCoverMode.value),
     gridCardPrimaryLabel: normalizeGridCardLabelField(gridCardPrimaryLabel.value),
     gridCardSecondaryLabel: normalizeGridCardLabelField(gridCardSecondaryLabel.value),
     cardInfoMode: normalizeCardInfoMode(cardInfoMode.value),
     thumbnailClickAction: normalizeThumbnailClickAction(thumbnailClickAction.value),
+    placeholderCoverStyle: normalizePlaceholderCoverStyle(placeholderCoverStyle.value),
   }
 }
 
@@ -224,9 +262,12 @@ export function sanitizeDisplayPreferences(raw: unknown): Partial<DisplayPrefere
   if (typeof obj.squareGridGap === 'number') out.squareGridGap = normalizePositiveInteger(obj.squareGridGap, DEFAULT_GRID_GAP, 1, 80)
   if (BOOK_VIEW_MODES.includes(obj.viewMode as BookViewMode)) out.viewMode = obj.viewMode as BookViewMode
   if (Array.isArray(obj.cardOverlays)) out.cardOverlays = normalizeCardOverlays(obj.cardOverlays)
+  if (typeof obj.showJumpRails === 'boolean') out.showJumpRails = obj.showJumpRails
   if (typeof obj.smartScopeFilterExpanded === 'boolean') out.smartScopeFilterExpanded = obj.smartScopeFilterExpanded
   if (typeof obj.authorCoverSize === 'number') out.authorCoverSize = normalizePositiveInteger(obj.authorCoverSize, 120, 100, 400)
   if (AUTHOR_COVER_SHAPES.includes(obj.authorCoverShape as AuthorCoverShape)) out.authorCoverShape = obj.authorCoverShape as AuthorCoverShape
+  if (TABLE_DENSITIES.includes(obj.authorRowDensity as TableDensity)) out.authorRowDensity = obj.authorRowDensity as TableDensity
+  if (typeof obj.authorCoverFallback === 'boolean') out.authorCoverFallback = obj.authorCoverFallback
   if (typeof obj.tableZebraStriping === 'boolean') out.tableZebraStriping = obj.tableZebraStriping
   if (TABLE_DENSITIES.includes(obj.tableDensity as TableDensity)) out.tableDensity = obj.tableDensity as TableDensity
   if (BOOK_SPINE_OVERLAYS.includes(obj.bookSpineOverlay as BookSpineOverlay)) out.bookSpineOverlay = obj.bookSpineOverlay as BookSpineOverlay
@@ -235,6 +276,9 @@ export function sanitizeDisplayPreferences(raw: unknown): Partial<DisplayPrefere
     out.bookShadowStrength = obj.bookShadowStrength as BookShadowStrength
   if (BOOK_COVER_DISPLAY_MODES.includes(obj.bookCoverDisplayMode as BookCoverDisplayMode)) {
     out.bookCoverDisplayMode = obj.bookCoverDisplayMode as BookCoverDisplayMode
+  }
+  if (BOOK_DETAIL_COVER_TINTS.includes(obj.bookDetailCoverTint as BookDetailCoverTint)) {
+    out.bookDetailCoverTint = obj.bookDetailCoverTint as BookDetailCoverTint
   }
   if (SERIES_CARD_COVER_MODES.includes(obj.seriesCardCoverMode as SeriesCardCoverMode)) {
     out.seriesCardCoverMode = obj.seriesCardCoverMode as SeriesCardCoverMode
@@ -251,6 +295,9 @@ export function sanitizeDisplayPreferences(raw: unknown): Partial<DisplayPrefere
   if (BOOK_THUMBNAIL_CLICK_ACTION.includes(obj.thumbnailClickAction as BookThumbnailClickAction)) {
     out.thumbnailClickAction = obj.thumbnailClickAction as BookThumbnailClickAction
   }
+  if (PLACEHOLDER_COVER_STYLES.includes(obj.placeholderCoverStyle as PlaceholderCoverStyle)) {
+    out.placeholderCoverStyle = obj.placeholderCoverStyle as PlaceholderCoverStyle
+  }
 
   return out
 }
@@ -265,20 +312,25 @@ export function applyDisplayPreferences(raw: unknown): void {
   if (prefs.squareGridGap !== undefined) squareGridGap.value = prefs.squareGridGap
   if (prefs.viewMode !== undefined) viewMode.value = prefs.viewMode
   if (prefs.cardOverlays !== undefined) cardOverlays.value = prefs.cardOverlays
+  if (prefs.showJumpRails !== undefined) showJumpRails.value = prefs.showJumpRails
   if (prefs.smartScopeFilterExpanded !== undefined) smartScopeFilterExpanded.value = prefs.smartScopeFilterExpanded
   if (prefs.authorCoverSize !== undefined) authorCoverSize.value = prefs.authorCoverSize
   if (prefs.authorCoverShape !== undefined) authorCoverShape.value = prefs.authorCoverShape
+  if (prefs.authorRowDensity !== undefined) authorRowDensity.value = prefs.authorRowDensity
+  if (prefs.authorCoverFallback !== undefined) authorCoverFallback.value = prefs.authorCoverFallback
   if (prefs.tableZebraStriping !== undefined) tableZebraStriping.value = prefs.tableZebraStriping
   if (prefs.tableDensity !== undefined) tableDensity.value = prefs.tableDensity
   if (prefs.bookSpineOverlay !== undefined) bookSpineOverlay.value = prefs.bookSpineOverlay
   if (prefs.showSpineOnComics !== undefined) showSpineOnComics.value = prefs.showSpineOnComics
   if (prefs.bookShadowStrength !== undefined) bookShadowStrength.value = prefs.bookShadowStrength
   if (prefs.bookCoverDisplayMode !== undefined) bookCoverDisplayMode.value = prefs.bookCoverDisplayMode
+  if (prefs.bookDetailCoverTint !== undefined) bookDetailCoverTint.value = prefs.bookDetailCoverTint
   if (prefs.seriesCardCoverMode !== undefined) seriesCardCoverMode.value = prefs.seriesCardCoverMode
   if (prefs.gridCardPrimaryLabel !== undefined) gridCardPrimaryLabel.value = prefs.gridCardPrimaryLabel
   if (prefs.gridCardSecondaryLabel !== undefined) gridCardSecondaryLabel.value = prefs.gridCardSecondaryLabel
   if (prefs.cardInfoMode !== undefined) cardInfoMode.value = prefs.cardInfoMode
   if (prefs.thumbnailClickAction !== undefined) thumbnailClickAction.value = prefs.thumbnailClickAction
+  if (prefs.placeholderCoverStyle !== undefined) placeholderCoverStyle.value = prefs.placeholderCoverStyle
 }
 
 export function useDisplaySettings() {
@@ -291,19 +343,24 @@ export function useDisplaySettings() {
     squareGridGap,
     viewMode,
     cardOverlays,
+    showJumpRails,
     smartScopeFilterExpanded,
     authorCoverSize,
     authorCoverShape,
+    authorRowDensity,
+    authorCoverFallback,
     tableZebraStriping,
     tableDensity,
     bookSpineOverlay,
     showSpineOnComics,
     bookShadowStrength,
     bookCoverDisplayMode,
+    bookDetailCoverTint,
     seriesCardCoverMode,
     gridCardPrimaryLabel,
     gridCardSecondaryLabel,
     cardInfoMode,
     thumbnailClickAction,
+    placeholderCoverStyle,
   }
 }

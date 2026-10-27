@@ -1,0 +1,126 @@
+import { readdir, readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+const clientRoot = fileURLToPath(new URL('..', import.meta.url))
+const sourceDirectory = path.join(clientRoot, 'src')
+
+/**
+ * Text colours that resolve from a per-theme tuned token. Fading these with alpha
+ * composites over the surface and bypasses the tuning: `--muted-foreground` is 0.52
+ * lightness in light mode and 0.725 in dark, so the same alpha step lands at a very
+ * different contrast ratio per theme and reliably fails AA in dark mode.
+ *
+ * Alpha on fills, borders, rings and shadows is fine. Only text is restricted.
+ */
+const TUNED_TEXT_TOKENS = [
+  'foreground',
+  'muted-foreground',
+  'sidebar-foreground',
+  'sidebar-accent-foreground',
+  'card-foreground',
+  'popover-foreground',
+  'primary',
+  'primary-foreground',
+  'secondary-foreground',
+  'accent-foreground',
+  'destructive',
+  'destructive-foreground',
+]
+
+// Matches `text-muted-foreground/70` including any Tailwind variant prefix
+// (`hover:`, `placeholder:`, `group-data-[active=true]/item:` and so on).
+const FADED_TEXT_PATTERN = new RegExp(String.raw`(?:[\w[\]=.\-/]+:)*text-(?:${TUNED_TEXT_TOKENS.join('|')})\/\d+`, 'g')
+const LEGACY_SETTINGS_BUTTON_PATTERN = /\bsettings-btn-(?:primary|outline|secondary|danger)\b/g
+
+/**
+ * Modal backdrops take their veil from `bg-scrim`, or `bg-scrim-media` behind image viewers, so
+ * every dialog and sheet dims the page the same way in both themes. A backdrop tinted with a theme
+ * colour inverts in dark mode: `--foreground` is near-white there, so the veil washes the page grey
+ * instead of dimming it. A full-screen layer counts as a backdrop when it is fixed or dismisses on
+ * click; tinted overlays that only decorate a cover or card are left alone.
+ */
+const ELEMENT_OPENING_TAG_PATTERN = /<[A-Za-z][\w-]*\b[^<>]*>/g
+const DIALOG_OVERLAY_TAG_PATTERN = /^<(?:Dialog|AlertDialog)Overlay\b/
+const SCRIM_CLASS_PATTERN = /\bbg-scrim(?:-media)?\b/
+const TINTED_BACKDROP_PATTERN = /\bbg-(?:black|white|foreground|background)\/\d+/
+const BACKDROP_ROLE_PATTERN = /\bfixed\b|@click/
+const BUTTON_OPENING_TAG_PATTERN = /<Button\b[\s\S]*?>/g
+const DESTRUCTIVE_BUTTON_VARIANT_PATTERN = /\bvariant=["']destructive(?:-outline|-ghost)?["']/
+const DESTRUCTIVE_BUTTON_COLOR_OVERRIDE_PATTERN =
+  /\b(?:text|bg|border)-(?:destructive|destructive-foreground|muted-foreground)\b|\bhover:(?:text|bg|border)-/
+
+/**
+ * Decorative, non-informational text that is deliberately near-invisible. Contrast
+ * requirements do not apply because the text carries no meaning, so a tuned token
+ * would be wrong here rather than merely dimmer.
+ *
+ * `text-white/*` and `text-black/*` are intentionally out of scope: they sit over book
+ * covers, reader scrims and lightboxes rather than over a theme surface.
+ */
+const ALLOWED = new Map([['views/NotFoundView.vue', 'oversized decorative 404 numeral, carries no information']])
+
+async function sourceFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true })
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = path.join(directory, entry.name)
+      if (entry.isDirectory()) return entry.name === '__tests__' ? [] : sourceFiles(entryPath)
+      return entry.isFile() && /\.(css|ts|vue)$/.test(entry.name) && !/\.(spec|test)\.ts$/.test(entry.name) ? [entryPath] : []
+    }),
+  )
+  return files.flat()
+}
+
+const errors = []
+const unusedAllowances = new Set(ALLOWED.keys())
+
+for (const file of await sourceFiles(sourceDirectory)) {
+  // normalise separators so the ALLOWED keys (POSIX-style) also match on Windows
+  const relativePath = path.relative(sourceDirectory, file).split(path.sep).join('/')
+  const source = await readFile(file, 'utf8')
+  const lines = source.split('\n')
+
+  for (const match of source.matchAll(BUTTON_OPENING_TAG_PATTERN)) {
+    if (!DESTRUCTIVE_BUTTON_VARIANT_PATTERN.test(match[0]) || !DESTRUCTIVE_BUTTON_COLOR_OVERRIDE_PATTERN.test(match[0])) continue
+    const line = source.slice(0, match.index).split('\n').length
+    errors.push(`${relativePath}:${line}: destructive Button color override - keep destructive styling centralized in the shared Button variants.`)
+  }
+
+  for (const match of source.matchAll(ELEMENT_OPENING_TAG_PATTERN)) {
+    const tag = match[0]
+    const isDialogOverlay = DIALOG_OVERLAY_TAG_PATTERN.test(tag)
+    const isTintedBackdrop = /\binset-0\b/.test(tag) && BACKDROP_ROLE_PATTERN.test(tag) && TINTED_BACKDROP_PATTERN.test(tag)
+    if ((!isDialogOverlay || SCRIM_CLASS_PATTERN.test(tag)) && !isTintedBackdrop) continue
+    const line = source.slice(0, match.index).split('\n').length
+    errors.push(
+      `${relativePath}:${line}: modal backdrop - use bg-scrim, or bg-scrim-media behind an image viewer, so it dims the page in both themes.`,
+    )
+  }
+
+  for (const [index, line] of lines.entries()) {
+    for (const match of line.matchAll(LEGACY_SETTINGS_BUTTON_PATTERN)) {
+      errors.push(`${relativePath}:${index + 1}: ${match[0]} - use the shared Button component and its variants.`)
+    }
+
+    for (const match of line.matchAll(FADED_TEXT_PATTERN)) {
+      if (ALLOWED.has(relativePath)) {
+        unusedAllowances.delete(relativePath)
+        continue
+      }
+      errors.push(
+        `${relativePath}:${index + 1}: ${match[0]} - fade-free text only. Use --foreground for interactive elements, --muted-foreground for secondary text, --primary for active state.`,
+      )
+    }
+  }
+}
+
+for (const stalePath of unusedAllowances) {
+  errors.push(`${stalePath}: listed in the validate-styles allowlist but no longer has faded text. Remove the entry.`)
+}
+
+if (errors.length > 0) {
+  throw new Error(`Style validation failed:\n${errors.join('\n')}`)
+}
+
+console.log('Validated style tokens, modal backdrops and shared settings buttons')

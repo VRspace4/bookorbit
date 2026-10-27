@@ -276,12 +276,7 @@ describe('TTS word indexing', () => {
       }) as DOMRect
 
     const scrollBy = vi.fn<(dx: number, dy: number) => void>()
-    scrollActiveWordIntoView(
-      root,
-      'instant',
-      { scrolled: true, size: 1268, start: 1415, scrollBy },
-      { mode: 'center' },
-    )
+    scrollActiveWordIntoView(root, 'instant', { scrolled: true, size: 1268, start: 1415, scrollBy }, { mode: 'center' })
     expect(scrollBy).toHaveBeenCalledWith(-622, 0)
   })
 

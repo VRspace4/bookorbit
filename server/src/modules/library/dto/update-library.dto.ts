@@ -1,3 +1,6 @@
+import { RegexMetadataConfigDto } from './regex-metadata.dto';
+import { Type } from 'class-transformer';
+import { IsObject, ValidateNested } from 'class-validator';
 import {
   ArrayMinSize,
   IsArray,
@@ -8,18 +11,17 @@ import {
   IsNumber,
   IsOptional,
   IsString,
-  Matches,
   Max,
   MaxLength,
   Min,
   ValidateIf,
 } from 'class-validator';
+import { IsOptionalNotNull } from './optional-not-null.decorator';
 import { Transform } from 'class-transformer';
-import { ICON_VALUE_MAX_LENGTH, type CoverAspectRatio, type OrganizationMode } from '@bookorbit/types';
+import { ICON_VALUE_MAX_LENGTH, type AddedAtSource, type CoverAspectRatio, type OrganizationMode } from '@bookorbit/types';
 
 import {
-  LIBRARY_AUTO_SCAN_CRON_EXPRESSION_ERROR,
-  LIBRARY_AUTO_SCAN_CRON_EXPRESSION_REGEX,
+  LIBRARY_ADDED_AT_SOURCES,
   LIBRARY_COVER_ASPECT_RATIOS,
   LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX,
   LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN,
@@ -29,13 +31,14 @@ import {
   LIBRARY_READING_THRESHOLD_MAX,
   LIBRARY_READING_THRESHOLD_MIN,
 } from '../library.constants';
+import { IsLibraryAutoScanCronExpression } from '../library-cron.validator';
 
 function trimString(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;
 }
 
 export class UpdateLibraryDto {
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsString()
   @IsNotEmpty()
   @MaxLength(255)
@@ -48,66 +51,86 @@ export class UpdateLibraryDto {
   @MaxLength(ICON_VALUE_MAX_LENGTH)
   icon?: string;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(0)
   displayOrder?: number;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsArray()
   @ArrayMinSize(1)
   @IsString({ each: true })
   @IsNotEmpty({ each: true })
   folders?: string[];
 
-  @IsOptional()
+  /** Podcast-only: roots holding podcast folders the user already has. Never written to. */
+  @IsOptionalNotNull()
+  @IsArray()
+  @IsString({ each: true })
+  @IsNotEmpty({ each: true })
+  localFolders?: string[];
+
+  /** Podcast-only: automatically discover changes beneath local podcast roots. */
+  @IsOptionalNotNull()
+  @IsBoolean()
+  watchLocalFolders?: boolean;
+
+  @IsOptionalNotNull()
   @IsIn(LIBRARY_COVER_ASPECT_RATIOS)
   coverAspectRatio?: CoverAspectRatio;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   watch?: boolean;
 
   @IsOptional()
   @IsString()
   @ValidateIf((o: { autoScanCronExpression?: unknown }) => o.autoScanCronExpression !== null)
-  @Matches(LIBRARY_AUTO_SCAN_CRON_EXPRESSION_REGEX, {
-    message: LIBRARY_AUTO_SCAN_CRON_EXPRESSION_ERROR,
-  })
+  @IsLibraryAutoScanCronExpression()
   autoScanCronExpression?: string | null;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsArray()
   @IsString({ each: true })
   metadataPrecedence?: string[];
 
   @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => RegexMetadataConfigDto)
+  regexMetadata?: RegexMetadataConfigDto | null;
+
+  @IsOptionalNotNull()
   @IsArray()
   @IsString({ each: true })
   formatPriority?: string[];
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsArray()
   @IsString({ each: true })
   allowedFormats?: string[];
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsIn(LIBRARY_ORGANIZATION_MODES)
   organizationMode?: OrganizationMode;
 
-  @IsOptional()
+  @ValidateIf((_, value) => value !== undefined)
+  @IsIn(LIBRARY_ADDED_AT_SOURCES)
+  addedAtSource?: AddedAtSource;
+
+  @IsOptionalNotNull()
   @IsArray()
   @IsString({ each: true })
   excludePatterns?: string[];
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsNumber()
   @Min(LIBRARY_READING_THRESHOLD_MIN)
   @Max(LIBRARY_READING_THRESHOLD_MAX)
   readingThreshold?: number;
 
-  @IsOptional()
-  @IsInt()
+  @IsOptionalNotNull()
+  @IsNumber()
   @Min(LIBRARY_MARK_AS_FINISHED_MIN)
   @Max(LIBRARY_MARK_AS_FINISHED_MAX)
   markAsFinishedPercentComplete?: number;
@@ -118,55 +141,89 @@ export class UpdateLibraryDto {
   @MaxLength(500)
   fileNamingPattern?: string | null;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   fileWriteEnabled?: boolean;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   fileWriteWriteCover?: boolean;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   fileWriteEpubEnabled?: boolean;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
   @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
   fileWriteEpubMaxFileSizeMb?: number;
 
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsBoolean()
+  fileWriteFb2Enabled?: boolean;
+
+  @IsOptionalNotNull()
+  @IsInt()
+  @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
+  @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
+  fileWriteFb2MaxFileSizeMb?: number;
+
+  @IsOptionalNotNull()
   @IsBoolean()
   fileWritePdfEnabled?: boolean;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
   @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
   fileWritePdfMaxFileSizeMb?: number;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsBoolean()
   fileWriteCbxEnabled?: boolean;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
   @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
   fileWriteCbxMaxFileSizeMb?: number;
 
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsBoolean()
+  fileWriteKindleEnabled?: boolean;
+
+  @IsOptionalNotNull()
+  @IsInt()
+  @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
+  @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
+  fileWriteKindleMaxFileSizeMb?: number;
+
+  @IsOptionalNotNull()
   @IsBoolean()
   fileWriteAudioEnabled?: boolean;
 
-  @IsOptional()
+  @IsOptionalNotNull()
   @IsInt()
   @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
   @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
   fileWriteAudioMaxFileSizeMb?: number;
 
-  @IsOptional()
+  @IsOptionalNotNull()
+  @IsBoolean()
+  fileWriteAllFiles?: boolean;
+
+  @IsOptionalNotNull()
+  @IsBoolean()
+  fileWriteReadAlongEnabled?: boolean;
+
+  @IsOptionalNotNull()
+  @IsInt()
+  @Min(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MIN)
+  @Max(LIBRARY_FILE_WRITE_MAX_SIZE_MB_MAX)
+  fileWriteReadAlongMaxFileSizeMb?: number;
+
+  @IsOptionalNotNull()
   @IsBoolean()
   fileRenameEnabled?: boolean;
 }

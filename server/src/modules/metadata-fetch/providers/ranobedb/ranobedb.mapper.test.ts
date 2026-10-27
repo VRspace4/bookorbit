@@ -137,7 +137,7 @@ describe('mapRanobeDbBook', () => {
       pageCount: 240,
       isbn13: '9780316371247',
       seriesName: 'Sword Art Online',
-      seriesIndex: 1,
+      seriesIndex: '1',
       communityRating: 4.25,
       communityRatingCount: 1200,
       coverUrl: 'https://images.ranobedb.org/covers/sao.jpg',
@@ -255,7 +255,7 @@ describe('mapRanobeDbBook', () => {
 
   it('computes seriesIndex as 1-based position', () => {
     const result = mapRanobeDbBook(baseBook);
-    expect(result?.seriesIndex).toBe(1);
+    expect(result?.seriesIndex).toBe('1');
   });
 
   it('returns undefined seriesIndex when book is not in series.books', () => {
@@ -277,6 +277,31 @@ describe('mapRanobeDbBook', () => {
     const book: RanobeDbBook = { ...baseBook, series: null };
     const result = mapRanobeDbBook(book);
     expect(result?.genres).toEqual([]);
+  });
+
+  describe('series total books', () => {
+    function seriesOf(bookIds: number[]): RanobeDbBook {
+      return {
+        ...baseBook,
+        series: {
+          ...baseBook.series!,
+          books: bookIds.map((id) => ({ id, lang: null, title: null, romaji: null, image: null })),
+        },
+      };
+    }
+
+    it('counts the roster RanobeDB already returns for the index calculation', () => {
+      expect(mapRanobeDbBook(seriesOf([1, 2, 3, 4]))?.seriesTotalBooks).toBe(4);
+    });
+
+    it('is undefined when the book has no series', () => {
+      const book: RanobeDbBook = { ...baseBook, series: null };
+      expect(mapRanobeDbBook(book)?.seriesTotalBooks).toBeUndefined();
+    });
+
+    it('is undefined for an empty roster rather than reporting a zero-length series', () => {
+      expect(mapRanobeDbBook(seriesOf([]))?.seriesTotalBooks).toBeUndefined();
+    });
   });
 
   it('returns no coverUrl when image is null', () => {

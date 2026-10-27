@@ -52,6 +52,7 @@ afterEach(() => {
 const missingBook: BookCard = {
   id: 1,
   status: 'missing',
+  coverAspectRatio: '2/3',
   title: 'Gone Book',
   authors: ['Test Author'],
   seriesName: null,
@@ -67,6 +68,7 @@ const missingBook: BookCard = {
   readStatus: null,
   addedAt: '2026-01-01T00:00:00.000Z',
   updatedAt: null,
+  coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
   metadataScore: null,
   hasCover: false,
   hasMetadataLocks: false,
@@ -82,6 +84,7 @@ const missingBook: BookCard = {
 const presentBook: BookCard = {
   id: 2,
   status: 'present',
+  coverAspectRatio: '2/3',
   title: 'Available Book',
   authors: ['Test Author'],
   seriesName: null,
@@ -97,6 +100,7 @@ const presentBook: BookCard = {
   readStatus: null,
   addedAt: '2026-01-01T00:00:00.000Z',
   updatedAt: null,
+  coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
   metadataScore: null,
   hasCover: false,
   hasMetadataLocks: false,
@@ -116,7 +120,7 @@ const collapsedSeriesBook: BookCard = {
   authors: ['Series Author'],
   seriesId: 99,
   seriesName: 'The Trilogy',
-  seriesIndex: 1,
+  seriesIndex: '1',
   readingProgress: 33,
   collapsedSeries: {
     bookCount: 4,
@@ -200,7 +204,7 @@ describe('BookListRow - present state', () => {
     thumbnailClickAction.value = 'details'
     const wrapper = mount(BookListRow, { props: { book: presentBook }, global: globalStubs })
 
-    const formatButton = wrapper.findAll('button').find((button) => button.text() === 'epub')
+    const formatButton = wrapper.findAll('button').find((button) => button.text() === 'EPUB')
     expect(formatButton).toBeDefined()
     await formatButton!.trigger('click')
 
@@ -217,6 +221,23 @@ describe('BookListRow - present state', () => {
   it('does not render the missing badge', () => {
     const wrapper = mount(BookListRow, { props: { book: presentBook }, global: globalStubs })
     expect(wrapper.find('[class*="bg-amber-500"]').exists()).toBe(false)
+  })
+
+  it('marks the EPUB format button for media-overlay read-along files', () => {
+    const wrapper = mount(BookListRow, {
+      props: {
+        book: {
+          ...presentBook,
+          files: [{ id: 10, format: 'epub', role: 'primary', sizeBytes: null, mediaOverlay: { available: true, durationSeconds: 42 } }],
+        },
+      },
+      global: globalStubs,
+    })
+
+    expect(wrapper.text()).toContain('EPUB')
+    expect(wrapper.text()).not.toContain('NARR')
+    expect(wrapper.text()).toContain('Open read-along EPUB')
+    expect(wrapper.find('.lucide-headphones').exists()).toBe(true)
   })
 
   it('applies hover:bg-muted/50 when present with a readable file', () => {
@@ -288,7 +309,7 @@ describe('BookListRow collapsed series', () => {
     expect(wrapper.emitted('action')).toBeUndefined()
   })
 
-  it('selects the collapsed row instead of navigating in selection mode', async () => {
+  it('does not select a representative book or navigate in selection mode', async () => {
     const wrapper = mount(BookListRow, {
       props: { book: collapsedSeriesBook, selectionMode: true },
       global: globalStubs,
@@ -296,8 +317,9 @@ describe('BookListRow collapsed series', () => {
 
     await wrapper.get('[data-testid="collapsed-series-list-row"]').trigger('click')
 
-    expect(wrapper.emitted('select')).toHaveLength(1)
+    expect(wrapper.emitted('select')).toBeUndefined()
     expect(routerPushMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="book-selection-checkbox"]').exists()).toBe(false)
   })
 
   it('renders a fallback cover when collapsed cover ids are unavailable', () => {

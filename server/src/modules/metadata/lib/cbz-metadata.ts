@@ -1,9 +1,11 @@
 import { readFile } from 'fs/promises';
 import { XMLParser } from 'fast-xml-parser';
 import { createExtractorFromData, UnrarError } from 'node-unrar-js';
+import { parseSeriesIndex } from '@bookorbit/types';
 import { extractCbzZipEntry, isSupportedCbzZipCompression, readCbzZipIndex } from '../../../common/cbz-zip-reader';
 import { getSevenZip } from '../../../common/sevenzip';
 import { parsePublishedDateKey, parsePublishedYear } from '../../../common/utils/published-date.utils';
+import { normalizeSeriesTotalBooks } from '../../../common/utils/series-total-books.utils';
 import { cleanupSevenZipArtifacts, createSevenZipTempId, type SevenZipInstance } from './sevenzip-vfs';
 
 export interface ParsedCbzComicMetadata {
@@ -24,7 +26,9 @@ export interface ParsedCbzMetadata {
   title: string | null;
   subtitle: string | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
+  /** Total books the tagger recorded for the series, from ComicInfo Count or ComicBookInfo numberOfIssues. */
+  seriesTotalBooks: number | null;
   description: string | null;
   publisher: string | null;
   publishedDate: string | null;
@@ -45,6 +49,7 @@ export interface ParsedCbzMetadata {
   openLibraryId: string | null;
   ranobedbId: string | null;
   koboId: string | null;
+  comicvineId: string | null;
   lubimyczytacId: string | null;
   aladinId: string | null;
   itunesId: string | null;
@@ -53,7 +58,7 @@ export interface ParsedCbzMetadata {
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
 
-const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseTagValue: false });
 
 function splitDelimited(value: string | null | undefined): string[] {
   if (!value) return [];
@@ -106,6 +111,20 @@ function parseProviderIdsFromWebUrl(
   return {};
 }
 
+function parseComicVineIdFromWebUrl(webUrl: string | null): string | null {
+  if (!webUrl) return null;
+  // Web may hold multiple space-separated URLs, so scan rather than match a fixed prefix.
+  // 4000- must start a path segment, otherwise a segment merely ending in it, such as "14000-777", matches too.
+  return /comicvine\.gamespot\.com\/(?:[^\s]*\/)?4000-(\d+)/i.exec(webUrl)?.[1] ?? null;
+}
+
+function parseComicVineIdFromNotes(notes: string | null): string | null {
+  if (!notes) return null;
+  // ComicTagger writes "using info from <source> on <date>. [Issue ID 140529]" for every metadata
+  // source it supports, so the id only belongs to Comic Vine when that source names it.
+  return /using info from Comic\s*Vine\b[^[]*\[Issue ID (\d+)\]/i.exec(notes)?.[1] ?? null;
+}
+
 function parseCbxRating(value: string | null): number | null {
   if (!value) return null;
   const parsed = Number(value);
@@ -145,8 +164,11 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
       year !== null && month !== null && day !== null
         ? (parsePublishedDateKey(`${year}-${String(Math.floor(month)).padStart(2, '0')}-${String(Math.floor(day)).padStart(2, '0')}`) ?? null)
         : null;
-    const managedNotes = parseProjectxManagedNotes(str('Notes'));
-    const providerIdsFromWeb = parseProviderIdsFromWebUrl(str('Web'));
+    const notesText = str('Notes');
+    const webText = str('Web');
+    const managedNotes = parseProjectxManagedNotes(notesText);
+    const providerIdsFromWeb = parseProviderIdsFromWebUrl(webText);
+    const comicvineId = managedNotes.get('comicvineId') ?? parseComicVineIdFromWebUrl(webText) ?? parseComicVineIdFromNotes(notesText) ?? null;
 
     const genres = splitDelimited(str('Genre'));
     const tags = splitDelimited(str('Tags'));
@@ -180,7 +202,8 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
       title: str('Title'),
       subtitle: managedNotes.get('subtitle') ?? null,
       seriesName: str('Series'),
-      seriesIndex: num('Number'),
+      seriesIndex: parseSeriesIndex(str('Number')),
+      seriesTotalBooks: normalizeSeriesTotalBooks(num('Count')) ?? null,
       description: str('Summary') ?? str('Description'),
       publisher: str('Publisher'),
       publishedDate,
@@ -201,6 +224,7 @@ function parseComicInfoXml(xmlBuf: Buffer): ParsedCbzMetadata | null {
       openLibraryId: managedNotes.get('openLibraryId') ?? providerIdsFromWeb.openLibraryId ?? null,
       ranobedbId: managedNotes.get('ranobedbId') ?? null,
       koboId: managedNotes.get('koboId') ?? providerIdsFromWeb.koboId ?? null,
+      comicvineId,
       lubimyczytacId: managedNotes.get('lubimyczytacId') ?? null,
       aladinId: managedNotes.get('aladinId') ?? null,
       itunesId: null,
@@ -235,6 +259,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       .filter((c) => c.role === 'Writer')
       .map((c) => ({ name: c.person, sortName: null }));
 
+    const genres = [...new Set(splitDelimited(typeof cbi['genre'] === 'string' ? cbi['genre'] : null))];
     const tags = ((cbi['tags'] as string[]) ?? []).filter(Boolean);
 
     const publicationYear = parsePublishedYear(cbi['publicationYear']) ?? null;
@@ -250,7 +275,8 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       title: (cbi['title'] as string) ?? null,
       subtitle: null,
       seriesName: (cbi['series'] as string) ?? null,
-      seriesIndex: cbi['issue'] != null ? (Number.isFinite(Number(cbi['issue'])) ? Number(cbi['issue']) : null) : null,
+      seriesIndex: parseSeriesIndex(cbi['issue']),
+      seriesTotalBooks: normalizeSeriesTotalBooks(cbi['numberOfIssues']) ?? null,
       description: (cbi['comments'] as string) ?? null,
       publisher: (cbi['publisher'] as string) ?? null,
       publishedDate,
@@ -261,7 +287,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       isbn10: null,
       isbn13: null,
       authors: writers,
-      genres: [],
+      genres,
       tags,
       googleBooksId: null,
       goodreadsId: null,
@@ -271,6 +297,7 @@ function parseComicBookInfoJson(comment: string): ParsedCbzMetadata | null {
       openLibraryId: null,
       ranobedbId: null,
       koboId: null,
+      comicvineId: null,
       lubimyczytacId: null,
       aladinId: null,
       itunesId: null,

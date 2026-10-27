@@ -25,6 +25,9 @@ export type BookShadowStrength = (typeof BOOK_SHADOW_STRENGTHS)[number];
 export const BOOK_COVER_DISPLAY_MODES = ["blurred-fit", "fill-crop", "natural-bottom"] as const;
 export type BookCoverDisplayMode = (typeof BOOK_COVER_DISPLAY_MODES)[number];
 
+export const BOOK_DETAIL_COVER_TINTS = ["off", "single", "duotone"] as const;
+export type BookDetailCoverTint = (typeof BOOK_DETAIL_COVER_TINTS)[number];
+
 export const SERIES_CARD_COVER_MODES = ["stack", "mosaic", "first-volume", "latest-volume", "first-unread"] as const;
 export type SeriesCardCoverMode = (typeof SERIES_CARD_COVER_MODES)[number];
 
@@ -33,6 +36,20 @@ export type CardInfoMode = (typeof CARD_INFO_MODES)[number];
 
 export const BOOK_THUMBNAIL_CLICK_ACTION = ["reader", "details"] as const;
 export type BookThumbnailClickAction = (typeof BOOK_THUMBNAIL_CLICK_ACTION)[number];
+
+/** The artwork drawn for a book that has no cover. */
+export const PLACEHOLDER_COVER_STYLES = [
+  "bauhaus",
+  "constructivist",
+  "memphis",
+  "clothbound",
+  "poster",
+  "aurora",
+  "vista",
+  "marbled",
+  "paperback",
+] as const;
+export type PlaceholderCoverStyle = (typeof PLACEHOLDER_COVER_STYLES)[number];
 
 export interface DisplayPreferences {
   portraitCoverSize: number;
@@ -43,18 +60,24 @@ export interface DisplayPreferences {
   squareGridGap: number;
   viewMode: BookViewMode;
   cardOverlays: CardOverlayKey[];
+  showJumpRails: boolean;
   smartScopeFilterExpanded: boolean;
   authorCoverSize: number;
   authorCoverShape: AuthorCoverShape;
+  authorRowDensity: TableDensity;
+  /** Stand a book's cover in for a missing author portrait. Off: monogram instead. */
+  authorCoverFallback: boolean;
   tableZebraStriping: boolean;
   tableDensity: TableDensity;
   bookSpineOverlay: BookSpineOverlay;
   showSpineOnComics: boolean;
   bookShadowStrength: BookShadowStrength;
   bookCoverDisplayMode: BookCoverDisplayMode;
+  bookDetailCoverTint: BookDetailCoverTint;
   seriesCardCoverMode: SeriesCardCoverMode;
   gridCardPrimaryLabel: GridCardLabelField;
   gridCardSecondaryLabel: GridCardLabelField;
   cardInfoMode: CardInfoMode;
   thumbnailClickAction: BookThumbnailClickAction;
+  placeholderCoverStyle: PlaceholderCoverStyle;
 }

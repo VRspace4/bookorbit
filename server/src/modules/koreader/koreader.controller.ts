@@ -28,9 +28,14 @@ import { KoreaderService } from './koreader.service';
 import {
   CreateKoreaderUserDto,
   DownloadPluginPackageDto,
+  KoreaderDeviceParamDto,
   KoreaderSaveProgressDto,
+  ReleaseResetHoldDto,
   LinkKoreaderUnmatchedBookDto,
   TestConnectionDto,
+  UpdateKoreaderDeviceDto,
+  UpdateKoreaderDeviceFilePatternDto,
+  UpdateKoreaderFilePatternDto,
   UpdateKoreaderManualHashLinkDto,
   UpdateKoreaderUserDto,
 } from './dto';
@@ -62,7 +67,7 @@ export class KoreaderController {
   @UseGuards(KoreaderAuthGuard)
   @Put('syncs/progress')
   async saveProgress(@CurrentUser() user: RequestUser, @Body() dto: KoreaderSaveProgressDto) {
-    return this.koreaderService.saveProgress(user.id, dto);
+    return this.koreaderService.saveProgress(user, dto);
   }
 
   @Public()
@@ -78,7 +83,7 @@ export class KoreaderController {
   @RequirePermission(Permission.KoreaderSync)
   @Post('credentials')
   async createCredentials(@CurrentUser() user: RequestUser, @Body() dto: CreateKoreaderUserDto) {
-    await this.koreaderService.createCredentials(user.id, dto.username, dto.password);
+    await this.koreaderService.createCredentials(user.id, dto.username, dto.password, dto.readAloudDelivery);
     return { success: true };
   }
 
@@ -115,9 +120,51 @@ export class KoreaderController {
   }
 
   @RequirePermission(Permission.KoreaderSync)
+  @Get('file-naming-pattern')
+  async getFileNamingPattern(@CurrentUser() user: RequestUser) {
+    return { pattern: await this.koreaderService.getKoreaderUserDefaultPattern(user.id) };
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Put('file-naming-pattern')
+  async setFileNamingPattern(@CurrentUser() user: RequestUser, @Body() dto: UpdateKoreaderFilePatternDto) {
+    await this.koreaderService.setKoreaderUserDefaultPattern(user.id, dto.pattern);
+    return dto;
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Put('devices/:deviceId/file-naming-pattern')
+  async setDeviceFileNamingPattern(
+    @CurrentUser() user: RequestUser,
+    @Param() params: KoreaderDeviceParamDto,
+    @Body() dto: UpdateKoreaderDeviceFilePatternDto,
+  ) {
+    await this.koreaderService.setDeviceFileNamingPattern(user.id, params.deviceId, {
+      fileNamingPattern: dto.pattern,
+      seriesFileNamingPattern: dto.seriesPattern,
+      standaloneFileNamingPattern: dto.standalonePattern,
+    });
+    return dto;
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Delete('devices/:deviceId/file-naming-pattern')
+  async clearDeviceFileNamingPattern(@CurrentUser() user: RequestUser, @Param() params: KoreaderDeviceParamDto) {
+    await this.koreaderService.clearDeviceFileNamingPattern(user.id, params.deviceId);
+    return { success: true };
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Patch('devices/:deviceId')
+  async updateDevice(@CurrentUser() user: RequestUser, @Param() params: KoreaderDeviceParamDto, @Body() dto: UpdateKoreaderDeviceDto) {
+    await this.koreaderService.setDeviceRetired(user.id, params.deviceId, dto.retired);
+    return { success: true };
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
   @Delete('devices/:deviceId')
-  async removeDevice(@CurrentUser() user: RequestUser, @Param('deviceId') deviceId: string) {
-    await this.koreaderService.removeDevice(user.id, deviceId);
+  async removeDevice(@CurrentUser() user: RequestUser, @Param() params: KoreaderDeviceParamDto) {
+    await this.koreaderService.removeDevice(user.id, params.deviceId);
     return { success: true };
   }
 
@@ -167,6 +214,13 @@ export class KoreaderController {
   @Get('books/:bookId/progress')
   getBookProgress(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number) {
     return this.koreaderService.getBookProgress(user.id, bookId);
+  }
+
+  @RequirePermission(Permission.KoreaderSync)
+  @Post('books/:bookId/reset-hold/release')
+  async releaseResetHold(@CurrentUser() user: RequestUser, @Param('bookId', ParseIntPipe) bookId: number, @Body() dto: ReleaseResetHoldDto) {
+    await this.koreaderService.releaseResetHold(user.id, bookId, dto.deviceId);
+    return { released: true };
   }
 
   @RequirePermission(Permission.KoreaderSync)

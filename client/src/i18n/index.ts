@@ -2,29 +2,10 @@ import type { WritableComputedRef } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { DEFAULT_LOCALE, LOCALE_DIRECTIONS, type Locale } from '@bookorbit/types'
 import en from '@/locales/en.json'
+import { compileIcuCatalog } from './icu'
 
 export type MessageSchema = typeof en
-
-export function slovenianPluralRule(choice: number, choicesLength: number): number {
-  const absoluteChoice = Math.abs(choice)
-  const remainder = Math.trunc(absoluteChoice) % 100
-  const category = !Number.isFinite(absoluteChoice)
-    ? 3
-    : !Number.isInteger(absoluteChoice)
-      ? 2
-      : remainder === 1
-        ? 0
-        : remainder === 2
-          ? 1
-          : remainder === 3 || remainder === 4
-            ? 2
-            : 3
-
-  if (choicesLength <= 1) return 0
-  if (choicesLength === 2) return category === 0 ? 0 : 1
-  if (choicesLength === 3) return Math.min(category, 2)
-  return category
-}
+type LocaleMessageTree = { [key: string]: string | LocaleMessageTree }
 
 // `legacy: false` selects the Composition API overload, so `i18n.global` is a Composer
 // and `i18n.global.locale` is a writable ref.
@@ -32,18 +13,18 @@ export const i18n = createI18n({
   legacy: false,
   locale: DEFAULT_LOCALE,
   fallbackLocale: DEFAULT_LOCALE,
-  messages: { en },
-  pluralRules: {
-    sl: slovenianPluralRule,
-  },
+  missingWarn: false,
+  fallbackWarn: false,
+  messages: { en: compileIcuCatalog(en, DEFAULT_LOCALE) },
 })
 
 const loaded = new Set<Locale>([DEFAULT_LOCALE])
 
 export async function loadLocaleMessages(locale: Locale): Promise<void> {
   if (loaded.has(locale)) return
-  const messages = (await import(`../locales/${locale}.json`)) as { default: MessageSchema }
-  i18n.global.setLocaleMessage(locale, messages.default)
+  const messages = (await import(`../locales/${locale}.json`)) as { default: LocaleMessageTree }
+  const compiled = compileIcuCatalog(messages.default, locale)
+  i18n.global.setLocaleMessage(locale, compiled as MessageSchema)
   loaded.add(locale)
 }
 

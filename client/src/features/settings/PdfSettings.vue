@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import type { PdfReaderSettings } from '@bookorbit/types'
 import { useReaderDefaultSettings } from '@/features/reader/shared/composables/useReaderSettings'
 import SettingsPageHeader from './SettingsPageHeader.vue'
+import SettingsResetAction from './SettingsResetAction.vue'
 
 const { t } = useI18n()
 
@@ -21,10 +22,6 @@ const { effective, load, update, reset } = useReaderDefaultSettings<PdfReaderSet
 onMounted(load)
 
 const showZoom = computed(() => effective.value.zoomMode === 'custom')
-
-function resetSettings() {
-  reset()
-}
 
 function selectPageLayout() {
   update({ scrollMode: 'page' })
@@ -68,34 +65,18 @@ function handleCustomScale(event: Event) {
   <div
     class="[&_.settings-hint]:overflow-hidden [&_.settings-hint]:text-ellipsis [&_.settings-hint]:whitespace-nowrap md:[&_.settings-hint]:overflow-visible md:[&_.settings-hint]:whitespace-normal"
   >
-    <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.pdf.title')" :subtitle="t('settings.reader.pdf.subtitle')">
-      <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="resetSettings">
-        Reset to defaults
-      </button>
-    </SettingsPageHeader>
-    <template v-else>
-      <div
-        class="md:hidden sticky top-11 z-10 -mx-4 mb-4 px-4 py-2 border-y border-border/70 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/75"
-      >
-        <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="resetSettings">
-          Reset to defaults
-        </button>
-      </div>
-      <div class="hidden md:flex justify-end mb-4">
-        <button class="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2" @click="resetSettings">
-          Reset to defaults
-        </button>
-      </div>
-    </template>
+    <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.pdf.title')" :subtitle="t('settings.reader.pdf.subtitle')" />
 
     <!-- Layout -->
     <div class="mb-6">
       <p class="settings-group-label">{{ t('settings.reader.pdf.layout') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
+      <div class="settings-card">
         <!-- Scroll mode -->
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div class="settings-row">
           <div>
-            <p class="settings-label">{{ t('settings.reader.pdf.scrollMode') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.pdf.scrollMode') }}
+            </p>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
               {{ t('settings.reader.pdf.scrollModeHint') }}
             </p>
@@ -128,9 +109,11 @@ function handleCustomScale(event: Event) {
         </div>
 
         <!-- Page spread -->
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div class="settings-row">
           <div>
-            <p class="settings-label">{{ t('settings.reader.pdf.pageSpread') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.pdf.pageSpread') }}
+            </p>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
               {{ t('settings.reader.pdf.pageSpreadHint') }}
             </p>
@@ -172,11 +155,13 @@ function handleCustomScale(event: Event) {
     <!-- Zoom -->
     <div class="mb-6">
       <p class="settings-group-label">{{ t('settings.reader.pdf.zoom') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border">
+      <div class="settings-card">
         <!-- Zoom mode -->
         <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
-            <p class="settings-label">{{ t('settings.reader.pdf.defaultFit') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.pdf.defaultFit') }}
+            </p>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
               {{ t('settings.reader.pdf.defaultFitHint') }}
             </p>
@@ -208,7 +193,9 @@ function handleCustomScale(event: Event) {
         <div v-if="showZoom" class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
           <div class="mb-3">
             <div class="flex items-center justify-between gap-3">
-              <p class="settings-label">{{ t('settings.reader.pdf.zoomLevel') }}</p>
+              <p class="settings-label">
+                {{ t('settings.reader.pdf.zoomLevel') }}
+              </p>
               <span class="settings-value">{{ Math.round(effective.customScale * 100) }}%</span>
             </div>
             <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:overflow-visible md:whitespace-normal">
@@ -227,5 +214,7 @@ function handleCustomScale(event: Event) {
         </div>
       </div>
     </div>
+
+    <SettingsResetAction @reset="reset" />
   </div>
 </template>

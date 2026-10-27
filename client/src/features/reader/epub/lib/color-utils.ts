@@ -6,9 +6,9 @@ export interface HslColor {
 
 export function normalizeHex(value: string): string | null {
   const trimmed = value.trim()
-  const match = trimmed.match(/^#?([0-9a-fA-F]{6})$/)
-  if (!match) return null
-  return `#${match[1].toLowerCase()}`
+  const hex = trimmed.match(/^#?([0-9a-fA-F]{6})$/)?.[1]
+  if (!hex) return null
+  return `#${hex.toLowerCase()}`
 }
 
 function clamp(value: number, min: number, max: number) {

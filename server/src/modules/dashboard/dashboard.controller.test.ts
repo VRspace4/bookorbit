@@ -25,13 +25,16 @@ function makeUser(overrides: Partial<RequestUser> = {}): RequestUser {
 function makeController() {
   const dashboardService = {
     getScroller: vi.fn(),
+    getScrollers: vi.fn(),
   };
   const widgetService = {
+    clearCacheForUser: vi.fn(),
     getReadingGoal: vi.fn(),
     getCurrentlyReading: vi.fn(),
     getReadingStreak: vi.fn(),
     getLibraryOverview: vi.fn(),
     getHighlightOfTheDay: vi.fn(),
+    getHighlights: vi.fn(),
     getMonthlyChallenge: vi.fn(),
     getYearProjection: vi.fn(),
     getNeglectedGems: vi.fn(),
@@ -39,6 +42,7 @@ function makeController() {
     getLongWait: vi.fn(),
     getDiversityScore: vi.fn(),
     getReadingRhythm: vi.fn(),
+    getWidgets: vi.fn(),
   };
 
   const controller = new DashboardController(dashboardService as never, widgetService as never);
@@ -62,9 +66,53 @@ describe('DashboardController', () => {
       expect(dashboardService.getScroller).toHaveBeenCalledWith('up-next-in-series', user, 33, 0);
       expect(result).toEqual(mockResult);
     });
+
+    it('getScrollers delegates the bounded batch to dashboardService', async () => {
+      const { controller, dashboardService } = makeController();
+      const user = makeUser({ id: 7 });
+      const dto = { items: [{ id: 'one', type: 'recently-added' as const, limit: 20 }] };
+      const mockResult = { items: [{ id: 'one', books: [], failed: false }] };
+      dashboardService.getScrollers.mockResolvedValue(mockResult);
+
+      const result = await controller.getScrollers(user, dto);
+
+      expect(dashboardService.getScrollers).toHaveBeenCalledWith(dto, user);
+      expect(result).toEqual(mockResult);
+    });
   });
 
   describe('widget endpoints', () => {
+    it('getWidgets delegates the batch to widgetService', async () => {
+      const { controller, widgetService } = makeController();
+      const user = makeUser();
+      const mockResult = { items: [{ type: 'reading-goal' as const, data: null, failed: false }] };
+      widgetService.getWidgets.mockResolvedValue(mockResult);
+
+      const result = await controller.getWidgets(user, { widgets: ['reading-goal', 'reading-dna'] });
+
+      expect(widgetService.getWidgets).toHaveBeenCalledWith(['reading-goal', 'reading-dna'], user);
+      expect(result).toBe(mockResult);
+    });
+
+    it('getWidgets asks for each widget once even when the client repeats one', async () => {
+      const { controller, widgetService } = makeController();
+      const user = makeUser();
+      widgetService.getWidgets.mockResolvedValue({ items: [] });
+
+      await controller.getWidgets(user, { widgets: ['reading-goal', 'reading-goal', 'reading-dna'] });
+
+      expect(widgetService.getWidgets).toHaveBeenCalledWith(['reading-goal', 'reading-dna'], user);
+    });
+
+    it('refresh clears cached widgets for the current user', () => {
+      const { controller, widgetService } = makeController();
+      const user = makeUser({ id: 7 });
+
+      controller.refresh(user);
+
+      expect(widgetService.clearCacheForUser).toHaveBeenCalledWith(7);
+    });
+
     it('getReadingGoal delegates to widgetService', async () => {
       const { controller, widgetService } = makeController();
       const user = makeUser();
@@ -125,6 +173,7 @@ describe('DashboardController', () => {
 
     it.each([
       ['getHighlightOfTheDay', { text: 'quote', bookId: 1 }],
+      ['getHighlights', [{ text: 'quote', bookId: 1 }]],
       ['getMonthlyChallenge', { challengeType: 'page-milestone', progress: 0, target: 500 }],
       ['getYearProjection', { projectedBooks: 30, daysRemaining: 200 }],
       ['getNeglectedGems', { gems: [] }],

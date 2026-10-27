@@ -1,13 +1,6 @@
 import type { TtsProvider } from "./reader-settings";
 
-export const TTS_PROVIDERS = [
-  "browser",
-  "azure",
-  "gcp-chirp3",
-  "xai",
-  "kokoro",
-  "gpt-4o-mini-tts",
-] as const satisfies readonly TtsProvider[];
+export const TTS_PROVIDERS = ["browser", "azure", "gcp-chirp3", "xai", "kokoro", "gpt-4o-mini-tts"] as const satisfies readonly TtsProvider[];
 
 export type TtsMonthlyUsage = Record<TtsProvider, number>;
 

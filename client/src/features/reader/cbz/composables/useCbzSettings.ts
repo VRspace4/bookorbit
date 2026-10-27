@@ -8,21 +8,25 @@ export type SpreadAlignment = 'normal' | 'shifted'
 export type WidePageSingletonMode = 'auto' | 'disable'
 export type BgColor = 'black' | 'gray' | 'white'
 
+export const CBZ_BG_VALUES: Record<BgColor, string> = {
+  black: '#0a0a0a',
+  gray: '#525659',
+  white: '#e8e8e8',
+}
+
 export function useCbzSettings() {
   const fitMode = ref<FitMode>('fit-page')
   const viewMode = ref<ViewMode>('single')
   const scrollMode = ref<ScrollMode>('paginated')
   const direction = ref<Direction>('ltr')
   const spreadAlignment = ref<SpreadAlignment>('normal')
+  const spreadGap = ref(0)
   const forceTwoPage = ref(false)
   const widePageSingletonMode = ref<WidePageSingletonMode>('auto')
   const bgColor = ref<BgColor>('black')
+  const autoAdvance = ref(false)
 
-  const bgValue = computed(() => {
-    if (bgColor.value === 'black') return '#0a0a0a'
-    if (bgColor.value === 'gray') return '#525659'
-    return '#e8e8e8'
-  })
+  const bgValue = computed(() => CBZ_BG_VALUES[bgColor.value])
 
   const isTwoPage = computed(() => viewMode.value === 'two-page' && scrollMode.value === 'paginated')
 
@@ -45,9 +49,11 @@ export function useCbzSettings() {
     scrollMode,
     direction,
     spreadAlignment,
+    spreadGap,
     forceTwoPage,
     widePageSingletonMode,
     bgColor,
+    autoAdvance,
     bgValue,
     isTwoPage,
     imgFitClass,

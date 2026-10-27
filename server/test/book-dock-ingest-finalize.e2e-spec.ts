@@ -1,19 +1,32 @@
-import { mkdir, readFile, writeFile } from 'fs/promises';
+// The audio extractor reads FFPROBE_PATH as it loads, so this has to run ahead of every import below.
+vi.hoisted(() => {
+  const requireFromHere = process.getBuiltinModule('node:module').createRequire(__filename);
+  process.env.FFPROBE_PATH ??= (requireFromHere('@ffprobe-installer/ffprobe') as { path: string }).path;
+});
+
+import { randomUUID } from 'crypto';
+import { mkdir, readFile, realpath, utimes, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { afterEach } from 'vitest';
 
 import { eq, inArray } from 'drizzle-orm';
 import {
   Permission,
+  type AudiobookManifest,
+  type AudiobookPlaybackState,
   type BookDockDiscardDuplicatesResult,
   type BookDockFile,
   type BookDockFinalizePreviewResult,
   type BookDockFinalizeResult,
+  type DashboardScrollerResponse,
 } from '@bookorbit/types';
 
 import * as schema from '../src/db/schema';
+import { parseFb2File } from '../src/modules/metadata/lib/fb2-parser';
+import { ScannerService } from '../src/modules/scanner/scanner.service';
+import { waitForCondition } from './e2e/app-harness';
 import { buildFb2Fixture } from './e2e/book-dock/book-dock-fixture-builder';
-import { createPdfFixture } from './e2e/metadata-write/metadata-write-fixture-builder';
+import { createM4bFixture, createPdfFixture } from './e2e/metadata-write/metadata-write-fixture-builder';
 import {
   authHeader,
   closeBookDockE2EContext,
@@ -123,6 +136,9 @@ describe('Book Dock ingest + finalize (e2e)', () => {
           title: 'Edited Review Title',
           authors: ['Edited Review Author'],
           genres: ['Mystery'],
+          hardcoverId: 'edited-review-book',
+          hardcoverEditionId: 'edited-review-edition',
+          openLibraryId: 'OL123W',
         },
         targetLibraryId: destination.libraryId,
         targetFolderId: destination.libraryFolderId,
@@ -135,6 +151,9 @@ describe('Book Dock ingest + finalize (e2e)', () => {
       title: 'Edited Review Title',
       authors: ['Edited Review Author'],
       genres: ['Mystery'],
+      hardcoverId: 'edited-review-book',
+      hardcoverEditionId: 'edited-review-edition',
+      openLibraryId: 'OL123W',
     });
     expect(updated.targetLibraryId).toBe(destination.libraryId);
     expect(updated.targetFolderId).toBe(destination.libraryFolderId);
@@ -304,6 +323,69 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     expect(await fileExists(untouched.absolutePath)).toBe(true);
   });
 
+  it.each(['finalize', 'discard'] as const)('rescans nested shared-folder books and %ss only the selected book', async (action) => {
+    const destination = await createLibraryWithFolder(context);
+    const dock = await realpath(context.fixture.bookDockPath);
+    const directory = join(dock, 'ebooks', 'Author', 'Title');
+    await mkdir(directory, { recursive: true });
+    const firstPath = join(directory, 'first.fb2');
+    const old = new Date(Date.now() - 120_000);
+    await writeFile(firstPath, buildFb2Fixture({ title: 'First Nested Book' }));
+    await utimes(firstPath, old, old);
+
+    const rescan = () => context.app.inject({ method: 'POST', url: '/api/v1/book-dock/rescan', headers: authHeader(context.adminToken) });
+    expect((await rescan()).statusCode).toBe(204);
+    const [first] = await context.db.select().from(schema.bookDockFiles).where(eq(schema.bookDockFiles.absolutePath, firstPath));
+    expect(first?.unitDirectory).toBe(directory);
+    await waitForBookDockStatus(context, first.id, ['ready']);
+
+    const secondPath = join(directory, 'second.fb2');
+    await writeFile(secondPath, buildFb2Fixture({ title: 'Second Nested Book' }));
+    const pdfPath = await createPdfFixture(directory, 'second.pdf', 'Second Nested Book');
+    await utimes(secondPath, old, old);
+    await utimes(pdfPath, old, old);
+    expect((await rescan()).statusCode).toBe(204);
+    expect((await rescan()).statusCode).toBe(204);
+    const dockRows = await context.db.select().from(schema.bookDockFiles);
+    expect(dockRows).toHaveLength(2);
+    const second = dockRows.find((row) => row.absolutePath === secondPath)!;
+    expect(second.unitDirectory).toBeNull();
+    await waitForBookDockStatus(context, second.id, ['ready']);
+
+    const detail = await context.app.inject({ method: 'GET', url: `/api/v1/book-dock/files/${second.id}`, headers: authHeader(context.adminToken) });
+    expect(detail.statusCode).toBe(200);
+    expect((detail.json() as BookDockFile).unitFiles.map((file) => file.fileName).sort()).toEqual(['second.fb2', 'second.pdf']);
+
+    if (action === 'finalize') {
+      const response = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/book-dock/finalize',
+        headers: authHeader(context.adminToken),
+        payload: { fileIds: [second.id], defaultLibraryId: destination.libraryId, defaultFolderId: destination.libraryFolderId },
+      });
+      expect(response.statusCode).toBe(201);
+      const result = response.json() as BookDockFinalizeResult;
+      expect(result).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+      const files = await context.db.select().from(schema.bookFiles).where(eq(schema.bookFiles.bookId, result.results[0].bookId!));
+      expect(files.map((file) => file.format).sort()).toEqual(['fb2', 'pdf']);
+      expect(new Set(files.map((file) => dirname(file.absolutePath))).size).toBe(1);
+      for (const file of files) expect(await fileExists(file.absolutePath)).toBe(true);
+    } else {
+      const response = await context.app.inject({
+        method: 'DELETE',
+        url: `/api/v1/book-dock/files/${second.id}`,
+        headers: authHeader(context.adminToken),
+      });
+      expect(response.statusCode).toBe(204);
+    }
+
+    expect(await fileExists(firstPath)).toBe(true);
+    expect(await getBookDockRow(context, first.id)).toBeDefined();
+    expect(await fileExists(secondPath)).toBe(false);
+    expect(await fileExists(pdfPath)).toBe(false);
+    expect(await getBookDockRow(context, second.id)).toBeUndefined();
+  });
+
   it('finalize moves files into destination and creates book records', async () => {
     const destination = await createLibraryWithFolder(context);
     const bookDockRow = await createBookDockRow(context, {
@@ -311,6 +393,9 @@ describe('Book Dock ingest + finalize (e2e)', () => {
       selectedMetadata: {
         title: 'Finalize Success Title',
         authors: ['Finalize Author'],
+        hardcoverId: 'finalize-success-book',
+        hardcoverEditionId: 'finalize-success-edition',
+        openLibraryId: 'OL456W',
       },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
@@ -358,12 +443,269 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     expect(await fileExists(bookDockRow.absolutePath)).toBe(false);
 
     const [metadata] = await context.db
-      .select({ title: schema.bookMetadata.title })
+      .select({
+        title: schema.bookMetadata.title,
+        hardcoverId: schema.bookMetadata.hardcoverId,
+        hardcoverEditionId: schema.bookMetadata.hardcoverEditionId,
+        openLibraryId: schema.bookMetadata.openLibraryId,
+      })
       .from(schema.bookMetadata)
       .where(eq(schema.bookMetadata.bookId, finalizedBookId))
       .limit(1);
-    expect(metadata?.title).toBe('Finalize Success Title');
+    expect(metadata).toMatchObject({
+      title: 'Finalize Success Title',
+      hardcoverId: 'finalize-success-book',
+      hardcoverEditionId: 'finalize-success-edition',
+      openLibraryId: 'OL456W',
+    });
     expect(await getBookDockRow(context, bookDockRow.id)).toBeUndefined();
+  });
+
+  /**
+   * An ebook and its audiobook finalized one after the other land in one folder, so the second joins
+   * the book the first created. The book has to open with whichever the library ranks first, not
+   * with whichever arrived first.
+   */
+  describe('when a second format joins a finalized book', () => {
+    const metadata = { title: 'Two Media Title', authors: ['Two Media Author'] };
+
+    async function libraryRanking(formatPriority: string[] | null) {
+      const destination = await createLibraryWithFolder(context, { allowedFormats: ['epub', 'm4b'] });
+      if (formatPriority) {
+        await context.db.update(schema.libraries).set({ formatPriority }).where(eq(schema.libraries.id, destination.libraryId));
+      }
+      return destination;
+    }
+
+    async function finalizeInto(destination: Awaited<ReturnType<typeof createLibraryWithFolder>>, fileName: string): Promise<number> {
+      const row = await createBookDockRow(context, {
+        fileName,
+        selectedMetadata: metadata,
+        targetLibraryId: destination.libraryId,
+        targetFolderId: destination.libraryFolderId,
+      });
+      const response = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/book-dock/finalize',
+        headers: authHeader(context.adminToken),
+        payload: { fileIds: [row.id] },
+      });
+      expect(response.statusCode).toBe(201);
+      const result = (response.json() as BookDockFinalizeResult).results[0];
+      expect(result).toMatchObject({ success: true, bookId: expect.any(Number) });
+      return result!.bookId!;
+    }
+
+    async function primaryFormatOf(bookId: number) {
+      const files = await context.db
+        .select({ id: schema.bookFiles.id, format: schema.bookFiles.format })
+        .from(schema.bookFiles)
+        .where(eq(schema.bookFiles.bookId, bookId));
+      const [book] = await context.db
+        .select({ primaryFileId: schema.books.primaryFileId })
+        .from(schema.books)
+        .where(eq(schema.books.id, bookId))
+        .limit(1);
+      return { formats: files.map((file) => file.format).sort(), primary: files.find((file) => file.id === book?.primaryFileId)?.format };
+    }
+
+    it('makes the audiobook primary when it joins an ebook in a library that ranks audio first', async () => {
+      const destination = await libraryRanking(['m4b', 'epub']);
+
+      const bookId = await finalizeInto(destination, 'two-media-audio-first.epub');
+      expect(await primaryFormatOf(bookId)).toEqual({ formats: ['epub'], primary: 'epub' });
+
+      expect(await finalizeInto(destination, 'two-media-audio-first.m4b')).toBe(bookId);
+      expect(await primaryFormatOf(bookId)).toEqual({ formats: ['epub', 'm4b'], primary: 'm4b' });
+    });
+
+    it('keeps the audiobook primary when an ebook joins it in a library that ranks audio first', async () => {
+      const destination = await libraryRanking(['m4b', 'epub']);
+
+      const bookId = await finalizeInto(destination, 'two-media-audio-kept.m4b');
+      expect(await finalizeInto(destination, 'two-media-audio-kept.epub')).toBe(bookId);
+
+      expect(await primaryFormatOf(bookId)).toEqual({ formats: ['epub', 'm4b'], primary: 'm4b' });
+    });
+
+    it('keeps the ebook primary when an audiobook joins it under the default ranking', async () => {
+      const destination = await libraryRanking(null);
+
+      const bookId = await finalizeInto(destination, 'two-media-default.epub');
+      expect(await finalizeInto(destination, 'two-media-default.m4b')).toBe(bookId);
+
+      expect(await primaryFormatOf(bookId)).toEqual({ formats: ['epub', 'm4b'], primary: 'epub' });
+    });
+  });
+
+  /**
+   * Issue 1757: finalize filed audiobooks with no per-file duration, and the player derives progress
+   * only from those, so listening stayed at 0% and the book never reached Continue Listening until
+   * the library was next scanned. These libraries are not watched, so nothing else measures them.
+   */
+  describe('listening to a filed audiobook', () => {
+    const AUDIO_SECONDS = 4;
+    const metadata = { title: 'Listening Title', authors: ['Listening Author'] };
+
+    async function finalizeRow(row: { id: number }): Promise<number> {
+      const response = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/book-dock/finalize',
+        headers: authHeader(context.adminToken),
+        payload: { fileIds: [row.id] },
+      });
+      expect(response.statusCode).toBe(201);
+      const result = (response.json() as BookDockFinalizeResult).results[0];
+      expect(result).toMatchObject({ success: true, bookId: expect.any(Number) });
+      return result!.bookId!;
+    }
+
+    async function dockAudiobook(destination: Awaited<ReturnType<typeof createLibraryWithFolder>>, fileName: string, selected = {}) {
+      const fixture = await createM4bFixture(context.fixture.booksPath, `audio-fixtures/${randomUUID()}.m4b`, {
+        title: metadata.title,
+        durationSeconds: AUDIO_SECONDS,
+      });
+      return createBookDockRow(context, {
+        fileName,
+        content: await readFile(fixture),
+        selectedMetadata: { ...metadata, ...selected },
+        targetLibraryId: destination.libraryId,
+        targetFolderId: destination.libraryFolderId,
+      });
+    }
+
+    async function audioDurations(bookId: number) {
+      const files = await context.db
+        .select({ format: schema.bookFiles.format, durationSeconds: schema.bookFiles.durationSeconds })
+        .from(schema.bookFiles)
+        .where(eq(schema.bookFiles.bookId, bookId));
+      const [meta] = await context.db
+        .select({ durationSeconds: schema.bookMetadata.durationSeconds })
+        .from(schema.bookMetadata)
+        .where(eq(schema.bookMetadata.bookId, bookId))
+        .limit(1);
+      return { files: files.filter((file) => file.format === 'm4b').map((file) => file.durationSeconds), book: meta?.durationSeconds ?? null };
+    }
+
+    /** What the web player and the iOS app do: read the manifest, then save a position halfway in. */
+    async function listenHalfway(bookId: number): Promise<AudiobookPlaybackState> {
+      const manifestResponse = await context.app.inject({
+        method: 'GET',
+        url: `/api/v1/audiobooks/${bookId}/manifest`,
+        headers: authHeader(context.adminToken),
+      });
+      expect(manifestResponse.statusCode).toBe(200);
+      const manifest = manifestResponse.json() as AudiobookManifest;
+      expect(manifest.assets).toHaveLength(1);
+      expect(manifest.assets[0]!.durationMs).toBe(AUDIO_SECONDS * 1000);
+      expect(manifest.totalDurationMs).toBe(AUDIO_SECONDS * 1000);
+
+      const saveResponse = await context.app.inject({
+        method: 'PUT',
+        url: `/api/v1/audiobooks/${bookId}/playback-state`,
+        headers: authHeader(context.adminToken),
+        payload: {
+          assetId: manifest.assets[0]!.assetId,
+          positionMs: (AUDIO_SECONDS * 1000) / 2,
+          capturedAt: new Date().toISOString(),
+          operationId: randomUUID(),
+          baseRevision: 0,
+          manifestRevision: manifest.revision,
+        },
+      });
+      expect(saveResponse.statusCode).toBe(200);
+      return saveResponse.json() as AudiobookPlaybackState;
+    }
+
+    async function continueListeningIds(): Promise<number[]> {
+      const response = await context.app.inject({
+        method: 'GET',
+        url: '/api/v1/dashboard/scrollers/continue-listening?limit=50',
+        headers: authHeader(context.adminToken),
+      });
+      expect(response.statusCode).toBe(200);
+      return (response.json() as DashboardScrollerResponse).books.map((book) => book.id);
+    }
+
+    it('measures a new audiobook, so listening moves its progress and puts it on Continue Listening', async () => {
+      const destination = await createLibraryWithFolder(context, { allowedFormats: ['m4b'] });
+      // A runtime from a metadata provider: the file's own length replaces it, as a scan would.
+      const row = await dockAudiobook(destination, 'listening-new.m4b', { durationSeconds: 3600 });
+
+      const bookId = await finalizeRow(row);
+
+      expect(await audioDurations(bookId)).toEqual({ files: [AUDIO_SECONDS], book: AUDIO_SECONDS });
+      expect(await listenHalfway(bookId)).toMatchObject({ percentage: 50, completed: false });
+      expect(await continueListeningIds()).toContain(bookId);
+    });
+
+    it('measures an audiobook that joins an ebook already on the shelf', async () => {
+      const destination = await createLibraryWithFolder(context, { allowedFormats: ['epub', 'm4b'] });
+      const ebook = await createBookDockRow(context, {
+        fileName: 'listening-joined.epub',
+        selectedMetadata: metadata,
+        targetLibraryId: destination.libraryId,
+        targetFolderId: destination.libraryFolderId,
+      });
+      const bookId = await finalizeRow(ebook);
+
+      expect(await finalizeRow(await dockAudiobook(destination, 'listening-joined.m4b'))).toBe(bookId);
+
+      expect(await audioDurations(bookId)).toEqual({ files: [AUDIO_SECONDS], book: AUDIO_SECONDS });
+      expect(await listenHalfway(bookId)).toMatchObject({ percentage: 50, completed: false });
+      expect(await continueListeningIds()).toContain(bookId);
+    });
+  });
+
+  it('finalize writes the dock metadata into the file when the library writes metadata to files', async () => {
+    const destination = await createLibraryWithFolder(context, {
+      fileWriteEnabled: true,
+      fileWriteFb2Enabled: true,
+    });
+    const uploader = await createUserAndLogin(context, { permissions: [Permission.ManageBookDock] });
+    const bookDockRow = await createBookDockRow(context, {
+      fileName: 'write-back.fb2',
+      content: buildFb2Fixture({ title: 'Uploaded File Title', authors: ['Uploaded File Author'] }),
+      embeddedMetadata: { title: 'Uploaded File Title', authors: ['Uploaded File Author'] },
+      selectedMetadata: { title: 'Dock Edited Title', authors: ['Dock Edited Author'] },
+      targetLibraryId: destination.libraryId,
+      targetFolderId: destination.libraryFolderId,
+      uploadedBy: uploader.userId,
+    });
+
+    const response = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize',
+      headers: authHeader(context.adminToken),
+      payload: { fileIds: [bookDockRow.id] },
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = response.json() as BookDockFinalizeResult;
+    expect(body).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+    const finalizedBookId = body.results[0]!.bookId!;
+
+    const [bookFile] = await context.db
+      .select({ absolutePath: schema.bookFiles.absolutePath })
+      .from(schema.bookFiles)
+      .where(eq(schema.bookFiles.bookId, finalizedBookId))
+      .limit(1);
+    expect(bookFile).toBeDefined();
+
+    // The write is debounced, so the file is polled rather than drained: draining cancels a timer
+    // that has not fired yet.
+    await waitForCondition(async () => {
+      const parsed = await parseFb2File(bookFile!.absolutePath);
+      expect(parsed?.title).toBe('Dock Edited Title');
+      expect(parsed?.authors.map((author) => author.name)).toEqual(['Dock Edited Author']);
+
+      const [writeLog] = await context.db
+        .select({ status: schema.fileWriteLog.status, triggeredBy: schema.fileWriteLog.triggeredBy, userId: schema.fileWriteLog.userId })
+        .from(schema.fileWriteLog)
+        .where(eq(schema.fileWriteLog.bookId, finalizedBookId))
+        .limit(1);
+      expect(writeLog).toMatchObject({ status: 'success', triggeredBy: 'auto', userId: uploader.userId });
+    });
   });
 
   it('finalize returns partial success with duplicate and destination conflicts', async () => {
@@ -385,8 +727,8 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     const existingBookId = seedBody.results[0]!.bookId!;
 
     const duplicateRow = await createBookDockRow(context, {
-      fileName: 'duplicate-input.fb2',
-      selectedMetadata: { title: 'Duplicate Candidate Title', authors: ['Another Author'], isbn13: '9780306406157' },
+      fileName: 'seed-duplicate.fb2',
+      selectedMetadata: { title: 'Duplicate Seed Title', authors: ['Duplicate Author'], isbn13: '9780306406157' },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
@@ -472,8 +814,8 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     const existingBookId = seedBody.results[0]!.bookId!;
 
     const duplicateRow = await createBookDockRow(context, {
-      fileName: 'preview-duplicate-input.fb2',
-      selectedMetadata: { title: 'Preview Duplicate Candidate', authors: ['Different Author'], isbn13: '9780306406157' },
+      fileName: 'preview-seed-duplicate.fb2',
+      selectedMetadata: { title: 'Preview Duplicate Seed', authors: ['Preview Author'], isbn13: '9780306406157' },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
@@ -553,12 +895,12 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     expect(await fileExists(readyRow.absolutePath)).toBe(true);
   });
 
-  it('finalize allows same title with different author when isbn is missing', async () => {
+  it('finalize allows the same ISBN when resolved destinations differ', async () => {
     const destination = await createLibraryWithFolder(context);
 
     const seedRow = await createBookDockRow(context, {
-      fileName: 'seed-same-title.fb2',
-      selectedMetadata: { title: 'Shared Title', authors: ['Author One'] },
+      fileName: 'same-isbn-first.fb2',
+      selectedMetadata: { title: 'Same ISBN First', authors: ['Author One'], isbn13: '9780306406157' },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
@@ -574,8 +916,8 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     const existingBookId = seedBody.results[0]!.bookId!;
 
     const candidateRow = await createBookDockRow(context, {
-      fileName: 'candidate-same-title.fb2',
-      selectedMetadata: { title: 'Shared Title', authors: ['Author Two'] },
+      fileName: 'same-isbn-second.fb2',
+      selectedMetadata: { title: 'Same ISBN Second', authors: ['Author Two'], isbn13: '9780306406157' },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
@@ -597,51 +939,166 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     expect(await getBookDockRow(context, candidateRow.id)).toBeUndefined();
   });
 
-  it('finalize stores a folder path even when the naming pattern is flat', async () => {
-    const destination = await createLibraryWithFolder(context);
-    await context.db.update(schema.libraries).set({ fileNamingPattern: '{title}' }).where(eq(schema.libraries.id, destination.libraryId));
+  it.each([
+    { mode: 'book_per_folder' as const, fileWriteEnabled: false },
+    { mode: 'book_per_folder' as const, fileWriteEnabled: true },
+    { mode: 'book_per_file' as const, fileWriteEnabled: false },
+    { mode: 'book_per_file' as const, fileWriteEnabled: true },
+  ])('preserves separate root books and metadata through repeated scans: $mode, writeBack=$fileWriteEnabled', async ({ mode, fileWriteEnabled }) => {
+    const destination = await createLibraryWithFolder(context, { mode, fileWriteEnabled, fileWriteFb2Enabled: fileWriteEnabled });
+    const reader = await createUserAndLogin(context);
+    await context.db
+      .update(schema.libraries)
+      .set({ fileNamingPattern: '<{title}|{originalFilename}> - <{authors:first}> - <{year}>' })
+      .where(eq(schema.libraries.id, destination.libraryId));
+
+    const bookIds: number[] = [];
+    const paths: string[] = [];
+    for (const label of ['First', 'Second']) {
+      const selectedMetadata = { title: `${label} Edited Title`, authors: [`${label} Edited Author`], publishedYear: 2024 };
+      const row = await createBookDockRow(context, {
+        fileName: `${label.toLowerCase()}-root.fb2`,
+        content: buildFb2Fixture({ title: `${label} Embedded Title`, authors: [`${label} Embedded Author`] }),
+        selectedMetadata,
+        targetLibraryId: destination.libraryId,
+        targetFolderId: destination.libraryFolderId,
+      });
+      const response = await context.app.inject({
+        method: 'POST',
+        url: '/api/v1/book-dock/finalize',
+        headers: authHeader(context.adminToken),
+        payload: { fileIds: [row.id] },
+      });
+      expect(response.statusCode).toBe(201);
+      const result = response.json() as BookDockFinalizeResult;
+      expect(result).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+      const bookId = result.results[0]!.bookId!;
+      expect(bookIds).not.toContain(bookId);
+      bookIds.push(bookId);
+      const path = join(destination.folderPath, `${selectedMetadata.title} - ${selectedMetadata.authors[0]} - 2024.fb2`);
+      paths.push(path);
+      expect(await fileExists(path)).toBe(true);
+      expect(await getBookDockRow(context, row.id)).toBeUndefined();
+
+      if (fileWriteEnabled) {
+        await waitForCondition(async () => {
+          expect((await parseFb2File(path))?.title).toBe(selectedMetadata.title);
+          const [log] = await context.db
+            .select({ status: schema.fileWriteLog.status })
+            .from(schema.fileWriteLog)
+            .where(eq(schema.fileWriteLog.bookId, bookId))
+            .limit(1);
+          expect(log?.status).toBe('success');
+        });
+      } else {
+        expect((await parseFb2File(path))?.title).toBe(`${label} Embedded Title`);
+      }
+
+      if (label === 'First') {
+        await context.db.insert(schema.userBookStatus).values({ userId: reader.userId, bookId, status: 'reading', source: 'manual' });
+      }
+    }
+
+    const readBooks = () =>
+      context.db
+        .select({
+          id: schema.books.id,
+          status: schema.books.status,
+          folderPath: schema.books.folderPath,
+          title: schema.bookMetadata.title,
+          primaryFileId: schema.books.primaryFileId,
+        })
+        .from(schema.books)
+        .innerJoin(schema.bookMetadata, eq(schema.bookMetadata.bookId, schema.books.id))
+        .where(eq(schema.books.libraryId, destination.libraryId))
+        .orderBy(schema.books.id);
+    const beforeScan = await readBooks();
+    expect(beforeScan).toHaveLength(2);
+    expect(beforeScan.map((book) => book.id)).toEqual(bookIds);
+    expect(beforeScan.map((book) => book.title)).toEqual(['First Edited Title', 'Second Edited Title']);
+    expect(beforeScan.map((book) => book.folderPath)).toEqual(paths);
+    const readFiles = () =>
+      context.db
+        .select({ bookId: schema.bookFiles.bookId, publicId: schema.bookFiles.publicId, path: schema.bookFiles.absolutePath })
+        .from(schema.bookFiles)
+        .where(inArray(schema.bookFiles.bookId, bookIds))
+        .orderBy(schema.bookFiles.bookId);
+    const beforeFiles = await readFiles();
+    expect(beforeFiles.map(({ bookId, path }) => ({ bookId, path }))).toEqual(bookIds.map((bookId, index) => ({ bookId, path: paths[index] })));
+
+    for (let scan = 0; scan < 2; scan++) {
+      const { jobId } = await context.app.get(ScannerService).startScan(destination.libraryId, 'manual', true);
+      await waitForCondition(async () => {
+        const [job] = await context.db.select().from(schema.scanJobs).where(eq(schema.scanJobs.id, jobId)).limit(1);
+        expect(job).toMatchObject({ status: 'completed', addedCount: 0, missingCount: 0 });
+      });
+      expect(await readBooks()).toEqual(beforeScan);
+      expect(await readFiles()).toEqual(beforeFiles);
+      const statuses = await context.db
+        .select({ bookId: schema.userBookStatus.bookId, status: schema.userBookStatus.status, source: schema.userBookStatus.source })
+        .from(schema.userBookStatus)
+        .where(inArray(schema.userBookStatus.bookId, bookIds));
+      expect(statuses).toEqual([{ bookId: bookIds[0], status: 'reading', source: 'manual' }]);
+    }
+  });
+
+  it('finalize files a book_per_file library under the shipped default pattern folders', async () => {
+    const destination = await createLibraryWithFolder(context, { mode: 'book_per_file' });
 
     const bookDockRow = await createBookDockRow(context, {
-      fileName: 'flat-pattern.fb2',
+      fileName: 'per-file-default-pattern.fb2',
       selectedMetadata: {
-        title: 'Flat Pattern Title',
-        authors: ['Flat Pattern Author'],
+        title: 'Caliban Cove',
+        authors: ['S.D. Perry'],
+        seriesName: 'Resident Evil',
+        seriesIndex: '2',
+        publishedYear: 2012,
       },
       targetLibraryId: destination.libraryId,
       targetFolderId: destination.libraryFolderId,
     });
 
+    const previewResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/files/preview-names',
+      headers: authHeader(context.adminToken),
+      payload: { fileIds: [bookDockRow.id] },
+    });
+
+    expect(previewResponse.statusCode).toBe(201);
+    const preview = previewResponse.json() as Array<{ fileId: number; newName: string }>;
+    expect(preview[0]?.newName).toBe('S.D. Perry/Resident Evil/02. Caliban Cove (2012).fb2');
+
     const response = await context.app.inject({
       method: 'POST',
       url: '/api/v1/book-dock/finalize',
       headers: authHeader(context.adminToken),
-      payload: {
-        fileIds: [bookDockRow.id],
-      },
+      payload: { fileIds: [bookDockRow.id] },
     });
 
     expect(response.statusCode).toBe(201);
     const body = response.json() as BookDockFinalizeResult;
     expect(body).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+    expect(body.results[0]?.newName).toBe(preview[0]?.newName);
 
     const finalizedBookId = body.results[0]!.bookId!;
     const [book] = await context.db
-      .select({
-        folderPath: schema.books.folderPath,
-      })
+      .select({ folderPath: schema.books.folderPath })
       .from(schema.books)
       .where(eq(schema.books.id, finalizedBookId))
       .limit(1);
     const [bookFile] = await context.db
-      .select({
-        absolutePath: schema.bookFiles.absolutePath,
-      })
+      .select({ absolutePath: schema.bookFiles.absolutePath, relPath: schema.bookFiles.relPath })
       .from(schema.bookFiles)
       .where(eq(schema.bookFiles.bookId, finalizedBookId))
       .limit(1);
 
-    expect(book?.folderPath).toBe(destination.folderPath);
-    expect(book?.folderPath).toBe(dirname(bookFile!.absolutePath));
+    const expectedPath = join(destination.folderPath, 'S.D. Perry', 'Resident Evil', '02. Caliban Cove (2012).fb2');
+    expect(bookFile?.absolutePath).toBe(expectedPath);
+    expect(bookFile?.relPath).toBe('S.D. Perry/Resident Evil/02. Caliban Cove (2012).fb2');
+    expect(await fileExists(expectedPath)).toBe(true);
+    expect(await fileExists(join(destination.folderPath, '02. Caliban Cove (2012).fb2'))).toBe(false);
+    expect(book?.folderPath).toBe(expectedPath);
   });
 
   it('finalize treats title duplicates as exact matches instead of wildcard patterns', async () => {
@@ -755,14 +1212,18 @@ describe('Book Dock ingest + finalize (e2e)', () => {
 
   it('enforces Book Dock permission and library access for finalize', async () => {
     const noPermissionUser = await createUserAndLogin(context);
-    const withPermissionUser = await createUserAndLogin(context, {
+    const accessOnlyUser = await createUserAndLogin(context, {
       permissions: [Permission.BookDockAccess],
+    });
+    const withPermissionUser = await createUserAndLogin(context, {
+      permissions: [Permission.BookDockAccess, Permission.LibraryUpload],
     });
     const destination = await createLibraryWithFolder(context);
     const bookDockRow = await createBookDockRow(context, {
       fileName: 'permission-check.fb2',
       selectedMetadata: { title: 'Permission Check' },
       status: 'ready',
+      uploadedBy: withPermissionUser.userId,
     });
 
     const forbiddenSummary = await context.app.inject({
@@ -778,6 +1239,19 @@ describe('Book Dock ingest + finalize (e2e)', () => {
       headers: authHeader(withPermissionUser.accessToken),
     });
     expect(allowedSummary.statusCode).toBe(200);
+
+    const missingUploadPermission = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize',
+      headers: authHeader(accessOnlyUser.accessToken),
+      payload: {
+        fileIds: [bookDockRow.id],
+        defaultLibraryId: destination.libraryId,
+        defaultFolderId: destination.libraryFolderId,
+      },
+    });
+    expect(missingUploadPermission.statusCode).toBe(403);
+    expect(missingUploadPermission.json()).toMatchObject({ message: `Missing permission: ${Permission.LibraryUpload}` });
 
     const noAccessFinalize = await context.app.inject({
       method: 'POST',
@@ -860,6 +1334,21 @@ describe('Book Dock ingest + finalize (e2e)', () => {
     expect(finalizeValidationResponse.statusCode).toBe(400);
     expect(finalizeValidationResponse.json()).toMatchObject({
       message: expect.arrayContaining(['defaultLibraryId and defaultFolderId must either both be provided or both be omitted']),
+    });
+
+    const bypassValidationResponse = await context.app.inject({
+      method: 'POST',
+      url: '/api/v1/book-dock/finalize',
+      headers: authHeader(context.adminToken),
+      payload: {
+        fileIds: [123],
+        overrides: [{ fileId: 123, skipDuplicateCheck: true }],
+      },
+    });
+
+    expect(bypassValidationResponse.statusCode).toBe(400);
+    expect(bypassValidationResponse.json()).toMatchObject({
+      message: expect.arrayContaining(['overrides.0.property skipDuplicateCheck should not exist']),
     });
 
     const retriableErrorRow = await createBookDockRow(context, {

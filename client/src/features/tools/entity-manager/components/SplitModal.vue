@@ -49,7 +49,7 @@ function isValid(): boolean {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="handleCancel">
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-scrim" @click.self="handleCancel">
     <div class="bg-card border border-border rounded-lg shadow-lg w-full max-w-md mx-4 overflow-hidden">
       <div class="flex items-center justify-between px-5 py-4 border-b border-border">
         <h3 class="text-base font-semibold">{{ t('tools.entityManager.splitModal.title') }}</h3>
@@ -80,13 +80,13 @@ function isValid(): boolean {
               <Trash2 class="h-4 w-4" />
             </button>
           </div>
-          <button class="flex items-center gap-1.5 text-sm text-primary hover:text-primary/80 transition-colors" @click="addName">
+          <button class="flex items-center gap-1.5 text-sm text-primary hover:text-primary transition-colors" @click="addName">
             <Plus class="h-4 w-4" />
             {{ t('tools.entityManager.splitModal.addAnother') }}
           </button>
         </div>
         <label class="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
-          <input v-model="writeFiles" type="checkbox" class="rounded accent-primary" />
+          <input v-model="writeFiles" type="checkbox" class="rounded-xs accent-primary" />
           {{ t('tools.entityManager.writeChangesToFiles') }}
         </label>
       </div>

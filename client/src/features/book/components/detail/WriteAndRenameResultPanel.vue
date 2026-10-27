@@ -40,7 +40,7 @@ const renameStatusClass = computed(() => {
 
 const writeLabel = computed(() => {
   const { status, reason, fieldsWritten } = props.result.write
-  if (status === 'success') return t('book.detail.writeRename.written', { count: fieldsWritten.length }, fieldsWritten.length)
+  if (status === 'success') return t('book.detail.writeRename.written', { count: fieldsWritten.length })
   if (status === 'failed') return reason ?? t('book.detail.writeRename.writeFailed')
   return reason ?? t('book.detail.writeRename.skipped')
 })
@@ -86,7 +86,7 @@ function handleDismiss() {
           <span>{{ autoDisabledWarning }}</span>
         </div>
       </div>
-      <button class="shrink-0 rounded p-0.5 hover:bg-muted transition-colors text-muted-foreground" @click="handleDismiss">
+      <button class="shrink-0 rounded-xs p-0.5 hover:bg-muted transition-colors text-muted-foreground" @click="handleDismiss">
         <X class="size-3.5" />
       </button>
     </div>

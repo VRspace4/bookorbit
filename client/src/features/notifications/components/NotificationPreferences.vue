@@ -1,19 +1,25 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
-import { Save } from '@lucide/vue'
-import { NOTIFICATION_CATEGORIES, NOTIFICATION_CATEGORY_LABELS, type NotificationCategory, type NotificationPreferences } from '@bookorbit/types'
+import { Save, Sparkles } from '@lucide/vue'
+import { NOTIFICATION_CATEGORY_IDS, NotificationLevel, resolveNotificationLevel, type NotificationCategory } from '@bookorbit/types'
 import { useAuth } from '@/features/auth/composables/useAuth'
 import { useWhatsNew } from '@/features/whats-new/composables/useWhatsNew'
 import { api } from '@/lib/api'
 import SettingsPageHeader from '@/features/settings/SettingsPageHeader.vue'
+import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
+import NotificationLevelSegmented from './NotificationLevelSegmented.vue'
+import { NOTIFICATION_CATEGORY_GROUPS, NOTIFICATION_CATEGORY_ICONS } from '../lib/notification-category-groups'
+import { useBookRequestVisibility } from '@/features/book-requests/composables/useBookRequestVisibility'
 
 const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
 const { t } = useI18n()
 
 const { user, me } = useAuth()
+const { showBookRequests } = useBookRequestVisibility()
 const { popupEnabled, setPopupEnabled, loadPrefs } = useWhatsNew()
 
 const saving = ref(false)
@@ -30,13 +36,15 @@ async function handleWhatsNewToggle() {
   }
 }
 
-const preferences = ref<NotificationPreferences>({})
+type LevelMap = Record<NotificationCategory, NotificationLevel>
+
+const preferences = ref<LevelMap>({} as LevelMap)
 
 function loadFromUser() {
   const userPrefs = user.value?.settings?.notificationPreferences
-  const result: NotificationPreferences = {}
-  for (const key of Object.keys(NOTIFICATION_CATEGORIES) as NotificationCategory[]) {
-    result[key] = userPrefs?.[key] !== false
+  const result = {} as LevelMap
+  for (const key of NOTIFICATION_CATEGORY_IDS) {
+    result[key] = resolveNotificationLevel(userPrefs?.[key])
   }
   preferences.value = result
 }
@@ -45,19 +53,37 @@ loadFromUser()
 
 const hasChanges = computed(() => {
   const userPrefs = user.value?.settings?.notificationPreferences
-  for (const key of Object.keys(NOTIFICATION_CATEGORIES) as NotificationCategory[]) {
-    const current = preferences.value[key] !== false
-    const saved = userPrefs?.[key] !== false
-    if (current !== saved) return true
-  }
-  return false
+  return NOTIFICATION_CATEGORY_IDS.some((key) => preferences.value[key] !== resolveNotificationLevel(userPrefs?.[key]))
 })
 
-function handleToggle(category: NotificationCategory) {
-  preferences.value = {
-    ...preferences.value,
-    [category]: !preferences.value[category],
-  }
+const visibleGroups = computed(() =>
+  NOTIFICATION_CATEGORY_GROUPS.map((group) => ({
+    ...group,
+    categories: group.categories.filter((category) => category !== 'bookRequests' || showBookRequests.value),
+  })).filter((group) => group.categories.length > 0),
+)
+const visibleCategoryIds = computed(() => visibleGroups.value.flatMap((group) => group.categories))
+const enabledCount = computed(() => visibleCategoryIds.value.filter((key) => preferences.value[key] !== NotificationLevel.Off).length)
+const totalCount = computed(() => visibleCategoryIds.value.length)
+
+function categoryLabel(category: NotificationCategory): string {
+  return t(`notifications.preferences.categories.${category}.label`)
+}
+
+function categoryDescription(category: NotificationCategory): string {
+  return t(`notifications.preferences.categories.${category}.description`)
+}
+
+function levelFor(category: NotificationCategory): NotificationLevel {
+  return preferences.value[category] ?? NotificationLevel.All
+}
+
+function handleLevelChange(category: NotificationCategory, value: NotificationLevel) {
+  preferences.value = { ...preferences.value, [category]: value }
+}
+
+function discardChanges() {
+  loadFromUser()
 }
 
 async function handleSave() {
@@ -102,66 +128,78 @@ async function handleSave() {
   <div v-if="!props.embedded" class="md:hidden px-1">
     <h1 class="text-xl font-semibold tracking-tight text-foreground">{{ t('notifications.preferences.title') }}</h1>
     <p
-      class="mt-1 text-sm text-muted-foreground leading-5 overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
+      class="mt-1 overflow-hidden text-ellipsis text-sm leading-5 text-muted-foreground [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]"
     >
       {{ t('notifications.preferences.subtitle') }}
     </p>
   </div>
 
-  <div class="mt-5 md:mt-0 space-y-4">
-    <section class="rounded-lg border border-border bg-card p-4 md:p-5 space-y-4 shadow-xs">
-      <div
-        v-for="category in Object.keys(NOTIFICATION_CATEGORIES) as NotificationCategory[]"
-        :key="category"
-        class="flex items-center justify-between gap-4 py-1.5"
-      >
-        <span class="text-sm text-foreground">{{ NOTIFICATION_CATEGORY_LABELS[category] }}</span>
-        <button
-          type="button"
-          role="switch"
-          :aria-checked="preferences[category] !== false"
-          class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-          :class="preferences[category] !== false ? 'bg-primary' : 'bg-muted-foreground/30'"
-          @click="handleToggle(category)"
-        >
-          <span
-            class="pointer-events-none block h-4 w-4 rounded-full bg-white shadow-xs ring-0 transition-transform"
-            :class="preferences[category] !== false ? 'translate-x-4' : 'translate-x-0'"
+  <div class="space-y-4" :class="{ 'mt-5 md:mt-0': !props.embedded }">
+    <section v-for="group in visibleGroups" :key="group.id" :aria-labelledby="`notification-group-${group.id}`" class="space-y-2">
+      <div class="flex items-baseline justify-between gap-3">
+        <h2 :id="`notification-group-${group.id}`" class="settings-group-label mb-0">
+          {{ t(`notifications.preferences.groups.${group.id}`) }}
+        </h2>
+        <p v-if="group.id === 'library'" class="settings-hint mt-0">
+          {{ t('notifications.preferences.enabledCount', { enabled: enabledCount, total: totalCount }) }}
+        </p>
+      </div>
+
+      <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card shadow-xs">
+        <div v-for="category in group.categories" :key="category" class="flex items-center justify-between gap-4 px-4 py-4 md:px-5 md:py-5">
+          <div class="flex min-w-0 max-w-2xl items-start gap-2.5">
+            <component :is="NOTIFICATION_CATEGORY_ICONS[category]" :size="16" class="mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <div class="min-w-0">
+              <p class="settings-label">{{ categoryLabel(category) }}</p>
+              <p class="settings-hint">{{ categoryDescription(category) }}</p>
+            </div>
+          </div>
+          <NotificationLevelSegmented
+            :model-value="levelFor(category)"
+            :category="category"
+            :label="categoryLabel(category)"
+            @update:model-value="(value) => handleLevelChange(category, value)"
           />
-        </button>
-      </div>
-
-      <div class="flex items-center gap-2 pt-2 border-t border-border">
-        <button class="settings-btn-primary" :disabled="!hasChanges || saving" @click="handleSave">
-          <Save :size="14" />
-          {{ saving ? t('notifications.preferences.saving') : t('common.save') }}
-        </button>
-        <span v-if="hasChanges" class="text-xs text-muted-foreground">{{ t('notifications.preferences.unsavedChanges') }}</span>
-      </div>
-    </section>
-
-    <section class="rounded-lg border border-border bg-card p-4 md:p-5 shadow-xs">
-      <div class="flex items-center justify-between gap-4 py-1.5">
-        <div class="min-w-0">
-          <p class="text-sm text-foreground">{{ t('notifications.preferences.whatsNewToggle') }}</p>
-          <p class="text-xs text-muted-foreground">
-            {{ t('notifications.preferences.whatsNewToggleHint') }}
-          </p>
         </div>
-        <button
-          type="button"
-          role="switch"
-          :aria-checked="popupEnabled"
-          class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-          :class="popupEnabled ? 'bg-primary' : 'bg-muted-foreground/30'"
-          @click="handleWhatsNewToggle"
-        >
-          <span
-            class="pointer-events-none block h-4 w-4 rounded-full bg-white shadow-xs ring-0 transition-transform"
-            :class="popupEnabled ? 'translate-x-4' : 'translate-x-0'"
-          />
-        </button>
       </div>
     </section>
+
+    <section aria-labelledby="notification-group-app" class="space-y-2">
+      <h2 id="notification-group-app" class="settings-group-label">{{ t('notifications.preferences.groups.app') }}</h2>
+
+      <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card shadow-xs">
+        <div class="flex items-center justify-between gap-4 px-4 py-4 md:px-5 md:py-5">
+          <div class="flex min-w-0 max-w-2xl items-start gap-2.5">
+            <Sparkles :size="16" class="mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <div class="min-w-0">
+              <p class="settings-label">{{ t('notifications.preferences.whatsNewToggle') }}</p>
+              <p class="settings-hint">{{ t('notifications.preferences.whatsNewToggleHint') }}</p>
+            </div>
+          </div>
+          <ToggleSwitch
+            :model-value="popupEnabled"
+            :aria-label="t('notifications.preferences.whatsNewToggle')"
+            class="shrink-0"
+            @update:model-value="handleWhatsNewToggle"
+          />
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div
+    v-if="hasChanges"
+    class="sticky bottom-2 z-20 mt-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-card/95 px-3 py-2 shadow-lg backdrop-blur"
+  >
+    <p role="status" class="settings-hint mt-0">{{ t('notifications.preferences.unsavedChanges') }}</p>
+    <div class="flex shrink-0 items-center gap-2">
+      <Button variant="outline" size="sm" type="button" :disabled="saving" @click="discardChanges">
+        {{ t('settings.account.feedback.discard') }}
+      </Button>
+      <Button size="sm" type="button" :disabled="saving" @click="handleSave">
+        <Save :size="14" aria-hidden="true" />
+        {{ saving ? t('notifications.preferences.saving') : t('common.save') }}
+      </Button>
+    </div>
   </div>
 </template>

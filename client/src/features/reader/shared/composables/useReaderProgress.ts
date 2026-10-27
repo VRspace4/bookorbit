@@ -1,4 +1,4 @@
-import { onUnmounted, ref, unref, type MaybeRef, type Ref } from 'vue'
+import { computed, onUnmounted, ref, unref, type MaybeRef, type Ref } from 'vue'
 import { api, getAccessToken } from '@/lib/api'
 import type { FoliateRenderer, RelocateDetail } from '../../epub/composables/useFoliate'
 import { readCachedReaderProgress, writeCachedReaderProgress } from '../lib/reader-progress-cache'
@@ -7,7 +7,14 @@ export type FooterDisplayMode = 0 | 1 | 2
 
 export interface ReaderProgressOptions {
   trackingEnabled?: MaybeRef<boolean>
+  /** Where a narrated sentence starts in the narration, in seconds, or null when it cannot be placed. */
+  narrationSeconds?: (fragment: string, sectionIndex: number | null) => Promise<number | null>
+  /** Told when a narration save was held back because another device sent the narration well behind it. */
+  onNarrationMovedBack?: (position: NewerPosition) => void
 }
+
+/** How far behind the sentence being saved another device must send narration for the save to wait. */
+const NARRATION_MOVED_BACK_SECONDS = 30
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -35,9 +42,34 @@ function normalizeNullablePercentage(value: unknown): number | null {
   return normalizePercentage(value)
 }
 
+function nonNegativeInteger(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
 function normalizePageNumber(value: unknown): number | null {
   const parsed = finiteNumber(value)
   return parsed === null || parsed < 0 ? null : parsed
+}
+
+/** A position another device saved while this reader was open: the server's row, and when it moved. */
+export interface NewerPosition {
+  percentage: number
+  stamp: number
+  data: Record<string, unknown>
+}
+
+function serverTime(value: unknown): number | null {
+  if (typeof value !== 'string') return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/** When the row's positions last moved, on the server's clock; the row's own stamp before the split. */
+function positionStamp(data: Record<string, unknown>): number {
+  const text = serverTime(data.textUpdatedAt)
+  const narration = serverTime(data.narrationUpdatedAt)
+  if (text === null && narration === null) return serverTime(data.updatedAt) ?? 0
+  return Math.max(text ?? 0, narration ?? 0)
 }
 
 export function formatTimeRemaining(minutes: number): string {
@@ -59,15 +91,20 @@ export function useReaderProgress(
 ) {
   const cfi = ref<string | null>(null)
   const pageNumber = ref<number | null>(null)
-  const positionSeconds = ref<number | null>(null)
   const percentage = ref(0)
-  /** Paginated EPUB: Foliate section page fraction for exact page restore. */
+  /** Paginated EPUB: Foliate section page fraction for exact page restore. Client-only, never sent. */
   const sectionFraction = ref<number | null>(null)
   const koboLocationSource = ref<string | null>(null)
   const koboLocationType = ref<string | null>(null)
   const koboLocationValue = ref<string | null>(null)
   const koboContentSourceProgressPercent = ref<number | null>(null)
   const koreaderProgress = ref<string | null>(null)
+  const positionSeconds = ref<number | null>(null)
+  const mediaOverlayFragment = ref<string | null>(null)
+  const mediaOverlaySectionIndex = ref<number | null>(null)
+  // Which of the file's two positions the pending save moved. They share one record, and the
+  // server needs telling so a narration position cannot drag the text one backwards to meet it.
+  const pendingSource = ref<'text' | 'narration'>('text')
   const chapterTitle = ref('')
   const sectionIndex = ref(0)
   const totalSections = ref(0)
@@ -86,127 +123,18 @@ export function useReaderProgress(
   const trackingEnabled = options.trackingEnabled ?? true
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let saving = false
   let dirty = false
+  let hadSavedPosition = false
   let lastValidPercentage = 0
-
-  function currentSnapshot() {
-    return {
-      cfi: cfi.value,
-      pageNumber: pageNumber.value,
-      percentage: percentage.value,
-      positionSeconds: positionSeconds.value,
-      sectionFraction: sectionFraction.value,
-      ttsSectionIndex: ttsSectionIndex.value,
-      ttsWordIndex: ttsWordIndex.value,
-      koboLocationSource: koboLocationSource.value,
-      koboLocationType: koboLocationType.value,
-      koboLocationValue: koboLocationValue.value,
-      koboContentSourceProgressPercent: koboContentSourceProgressPercent.value,
-      koreaderProgress: koreaderProgress.value,
-    }
-  }
-
-  function applyProgressSnapshot(data: {
-    cfi?: string | null
-    pageNumber?: number | null
-    positionSeconds?: number | null
-    percentage?: number | null
-    sectionFraction?: number | null
-    ttsSectionIndex?: number | null
-    ttsWordIndex?: number | null
-    koboLocationSource?: string | null
-    koboLocationType?: string | null
-    koboLocationValue?: string | null
-    koboContentSourceProgressPercent?: number | null
-    koreaderProgress?: string | null
-  }) {
-    cfi.value = normalizeString(data.cfi)
-    pageNumber.value = normalizePageNumber(data.pageNumber)
-    positionSeconds.value = finiteNumber(data.positionSeconds)
-    const pct = normalizePercentage(data.percentage)
-    percentage.value = pct ?? 0
-    lastValidPercentage = percentage.value
-    if ('sectionFraction' in data) {
-      const sf = data.sectionFraction
-      sectionFraction.value =
-        typeof sf === 'number' && Number.isFinite(sf) ? Math.min(1, Math.max(0, sf)) : null
-    }
-    ttsSectionIndex.value =
-      typeof data.ttsSectionIndex === 'number' && Number.isInteger(data.ttsSectionIndex) && data.ttsSectionIndex >= 0 ? data.ttsSectionIndex : null
-    ttsWordIndex.value =
-      typeof data.ttsWordIndex === 'number' && Number.isInteger(data.ttsWordIndex) && data.ttsWordIndex >= 0 ? data.ttsWordIndex : null
-    koboLocationSource.value = normalizeString(data.koboLocationSource)
-    koboLocationType.value = normalizeString(data.koboLocationType)
-    koboLocationValue.value = normalizeString(data.koboLocationValue)
-    koboContentSourceProgressPercent.value = normalizeNullablePercentage(data.koboContentSourceProgressPercent)
-    koreaderProgress.value = normalizeString(data.koreaderProgress)
-  }
-
-  function getTtsPosition(): { sectionIndex: number; wordIndex: number } | null {
-    if (ttsSectionIndex.value === null || ttsWordIndex.value === null) return null
-    return { sectionIndex: ttsSectionIndex.value, wordIndex: ttsWordIndex.value }
-  }
-
-  function updateTtsPosition(sectionIndexValue: number, wordIndex: number) {
-    if (!Number.isInteger(sectionIndexValue) || sectionIndexValue < 0 || !Number.isInteger(wordIndex) || wordIndex < 0) return
-    ttsSectionIndex.value = sectionIndexValue
-    ttsWordIndex.value = wordIndex
-    cacheCurrentProgress()
-    scheduleSave()
-  }
-
-  function cacheCurrentProgress(updatedAt?: string | null) {
-    writeCachedReaderProgress(fileId, { ...currentSnapshot(), updatedAt })
-  }
-
-  function scheduleSave() {
-    if (!unref(trackingEnabled)) return
-    dirty = true
-    if (saveTimer) clearTimeout(saveTimer)
-    saveTimer = setTimeout(() => {
-      saveTimer = null
-      void flushIfDirty()
-    }, 2000)
-  }
-
-  async function flushIfDirty() {
-    if (!dirty) return
-    dirty = false
-    try {
-      await save()
-    } catch {
-      dirty = true
-      throw new Error('Failed to save reading progress')
-    }
-  }
-
-  function flush() {
-    if (saveTimer) {
-      clearTimeout(saveTimer)
-      saveTimer = null
-    }
-    return flushIfDirty()
-  }
-
-  function flushKeepalive() {
-    if (saveTimer) {
-      clearTimeout(saveTimer)
-      saveTimer = null
-    }
-    if (!dirty || !unref(trackingEnabled)) return
-    dirty = false
-    cacheCurrentProgress()
-    const body = JSON.stringify(currentSnapshot())
-    fetch(`/api/v1/books/files/${fileId}/progress`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}) },
-      body,
-      credentials: 'include',
-      keepalive: true,
-    }).catch(() => {
-      dirty = true
-    })
-  }
+  // The newest write to the row this reader has read or made, on the server's clock. Anything
+  // newer came from another device.
+  let knownServerStamp = 0
+  // The narration marker that write left on the row; null after a page turn, which the server may
+  // have carried narration along with. `Date` counts whole seconds, so a row inside that second
+  // holding another marker was written by another device just after this one.
+  let knownNarrationFragment: string | null = null
+  let adoptingNewerPosition = false
 
   onUnmounted(() => {
     flushKeepalive()
@@ -219,76 +147,122 @@ export function useReaderProgress(
     return normalized
   }
 
+  const hasMediaOverlayProgress = computed(
+    () => (!!mediaOverlayFragment.value && mediaOverlaySectionIndex.value !== null) || (positionSeconds.value != null && positionSeconds.value > 0),
+  )
+
   async function load() {
     if (!unref(trackingEnabled)) return
-    // Local-first: apply the device cache immediately so reloads reopen the last
-    // page even when the server is lagging behind the 2s debounce / keepalive save.
+    // Local-first: reopen at the device's last page even when the server lags behind the 2s
+    // debounce / keepalive save.
     const cached = readCachedReaderProgress(fileId)
-    if (cached) {
-      applyProgressSnapshot(cached)
-    }
-
+    if (cached) applyServerProgress({ ...cached })
     const res = await api(`/api/v1/books/files/${fileId}/progress`)
     if (!res.ok) return
-
     const data = await res.json()
-    const remoteUpdatedAt = typeof data.updatedAt === 'string' ? Date.parse(data.updatedAt) : NaN
-    const cachedUpdatedAt = cached ? Date.parse(cached.updatedAt) : NaN
-
-    // Prefer local cache only when both sides have timestamps and cache is newer.
-    // If the server omits updatedAt, trust the successful fetch (not a stale cache).
-    if (
-      cached &&
-      Number.isFinite(cachedUpdatedAt) &&
-      Number.isFinite(remoteUpdatedAt) &&
-      cachedUpdatedAt > remoteUpdatedAt
-    ) {
-      applyProgressSnapshot(cached)
-      // Push the fresher local position to the server in the background.
+    const cachedAt = cached ? Date.parse(cached.updatedAt) : NaN
+    const serverStamp = positionStamp(data)
+    if (cached && Number.isFinite(cachedAt) && serverStamp > 0 && cachedAt > serverStamp) {
+      // The cache has no Kobo or narration fields: keep the server's and push the fresher page.
+      applyServerProgress({ ...data, ...cached })
+      hadSavedPosition = true
+      knownServerStamp = serverStamp
       dirty = true
       void save().catch(() => {
         dirty = true
       })
       return
     }
-
-    // Server payload has no sectionFraction; keep the cached value for page snap.
-    const cachedSectionFraction = sectionFraction.value
-    applyProgressSnapshot(data)
-    if (
-      sectionFraction.value == null &&
-      typeof cachedSectionFraction === 'number' &&
-      Number.isFinite(cachedSectionFraction)
-    ) {
-      sectionFraction.value = cachedSectionFraction
-    }
-    cacheCurrentProgress(typeof data.updatedAt === 'string' ? data.updatedAt : undefined)
-    dirty = false
+    hadSavedPosition =
+      normalizeString(data.cfi) !== null ||
+      normalizeString(data.koboLocationValue) !== null ||
+      normalizeString(data.koreaderProgress) !== null ||
+      (typeof data.percentage === 'number' && data.percentage > 0)
+    applyServerProgress(data)
+    knownServerStamp = serverStamp
+    knownNarrationFragment = normalizeString(data.mediaOverlayFragment)
+    cacheCurrentProgress(serverStamp > 0 ? new Date(serverStamp).toISOString() : undefined)
   }
 
-  /** Fetch the latest server progress and apply it (used before TTS play). */
+  /** Fetches the latest server progress and applies it (used before read-aloud starts). */
   async function refreshFromServer() {
     if (!unref(trackingEnabled)) return
     const res = await api(`/api/v1/books/files/${fileId}/progress`)
     if (!res.ok) return
     const data = await res.json()
-    applyProgressSnapshot(data)
-    cacheCurrentProgress(typeof data.updatedAt === 'string' ? data.updatedAt : undefined)
+    applyServerProgress(data)
+    const serverStamp = positionStamp(data)
+    knownServerStamp = Math.max(knownServerStamp, serverStamp)
+    knownNarrationFragment = normalizeString(data.mediaOverlayFragment)
+    cacheCurrentProgress(serverStamp > 0 ? new Date(serverStamp).toISOString() : undefined)
     dirty = false
   }
 
-  function onRelocate(detail: RelocateDetail, relocateOptions?: { persist?: boolean }) {
+  function applyServerProgress(data: Record<string, unknown>) {
+    cfi.value = normalizeString(data.cfi)
+    pageNumber.value = normalizePageNumber(data.pageNumber)
+    updatePercentage(data.percentage, 0)
+    koboLocationSource.value = normalizeString(data.koboLocationSource)
+    koboLocationType.value = normalizeString(data.koboLocationType)
+    koboLocationValue.value = normalizeString(data.koboLocationValue)
+    koboContentSourceProgressPercent.value = normalizeNullablePercentage(data.koboContentSourceProgressPercent)
+    koreaderProgress.value = normalizeString(data.koreaderProgress)
+    positionSeconds.value = typeof data.positionSeconds === 'number' ? data.positionSeconds : null
+    mediaOverlayFragment.value = typeof data.mediaOverlayFragment === 'string' ? data.mediaOverlayFragment : null
+    mediaOverlaySectionIndex.value = typeof data.mediaOverlaySectionIndex === 'number' ? data.mediaOverlaySectionIndex : null
+    if ('sectionFraction' in data) sectionFraction.value = normalizeFraction(data.sectionFraction)
+    ttsSectionIndex.value = nonNegativeInteger(data.ttsSectionIndex)
+    ttsWordIndex.value = nonNegativeInteger(data.ttsWordIndex)
+  }
+
+  function currentSnapshot() {
+    return {
+      cfi: cfi.value,
+      pageNumber: pageNumber.value,
+      percentage: percentage.value,
+      positionSeconds: positionSeconds.value,
+      sectionFraction: sectionFraction.value,
+      ttsSectionIndex: ttsSectionIndex.value,
+      ttsWordIndex: ttsWordIndex.value,
+    }
+  }
+
+  function cacheCurrentProgress(updatedAt?: string | null) {
+    writeCachedReaderProgress(fileId, { ...currentSnapshot(), updatedAt })
+  }
+
+  function getTtsPosition(): { sectionIndex: number; wordIndex: number } | null {
+    if (ttsSectionIndex.value === null || ttsWordIndex.value === null) return null
+    return { sectionIndex: ttsSectionIndex.value, wordIndex: ttsWordIndex.value }
+  }
+
+  function updateTtsPosition(sectionIndexValue: number, wordIndex: number) {
+    if (nonNegativeInteger(sectionIndexValue) === null || nonNegativeInteger(wordIndex) === null) return
+    ttsSectionIndex.value = sectionIndexValue
+    ttsWordIndex.value = wordIndex
+    cacheCurrentProgress()
+    scheduleSave()
+  }
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer)
+    if (!unref(trackingEnabled)) return
+    dirty = true
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      void save()
+    }, 2000)
+  }
+
+  function onRelocate(detail: RelocateDetail, source: 'text' | 'narration' = 'text') {
     cfi.value = normalizeString(detail?.cfi)
     const relocatedFraction = normalizeFraction(detail?.fraction)
     if (relocatedFraction !== null) {
       fraction.value = relocatedFraction
       updatePercentage(relocatedFraction * 100)
     }
-    // Prefer paginator section-local page fraction when present (paginated EPUB).
     const sectionLocal = normalizeFraction(detail?.sectionFraction)
-    if (sectionLocal !== null) {
-      sectionFraction.value = sectionLocal
-    }
+    if (sectionLocal !== null) sectionFraction.value = sectionLocal
     koboLocationSource.value = normalizeString(detail?.source)
     koboLocationValue.value = normalizeString(detail?.koboLocationValue)
     koboLocationType.value = koboLocationValue.value ? (normalizeString(detail?.koboLocationType) ?? 'KoboSpan') : null
@@ -296,7 +270,6 @@ export function useReaderProgress(
     koreaderProgress.value = normalizeString(detail?.koreaderProgress)
     const hasSaveableLocation =
       relocatedFraction !== null || cfi.value !== null || koboLocationValue.value !== null || koreaderProgress.value !== null
-
     chapterTitle.value = detail?.tocItem?.label ?? ''
     sectionIndex.value = detail?.section?.current ?? detail?.index ?? 0
     totalSections.value = detail?.section?.total ?? detail?.total ?? 0
@@ -308,26 +281,188 @@ export function useReaderProgress(
     timeSection.value = detail?.time?.section ?? 0
     timeTotal.value = detail?.time?.total ?? 0
 
-    if (relocateOptions?.persist === false) return
-    if (!unref(trackingEnabled) || !hasSaveableLocation) return
+    if (!hasSaveableLocation) {
+      if (saveTimer) clearTimeout(saveTimer)
+      return
+    }
+    // Opening at a position a device saved, or reflowing the page, moves no reader. Saving the
+    // page start the view lands on would pull every other device back to it (#1136). A reflow
+    // under paused narration would also restamp its old sentence as just narrated.
+    const repositionOnly = (detail?.restoring === true && hadSavedPosition) || adoptingNewerPosition || detail?.reason === 'anchor'
+    if (repositionOnly) return
+    pendingSource.value = source
     cacheCurrentProgress()
+    scheduleSave()
+  }
+
+  function setMediaOverlayProgress(fragment: string, section: number, seconds: number | null = null) {
+    mediaOverlayFragment.value = fragment
+    mediaOverlaySectionIndex.value = section
+    positionSeconds.value = seconds
+    pendingSource.value = 'narration'
     scheduleSave()
   }
 
   async function save() {
     if (!unref(trackingEnabled)) return
-    const safePercentage = updatePercentage(percentage.value)
+    saving = true
+    dirty = false
     cacheCurrentProgress()
-    await api(`/api/v1/books/files/${fileId}/progress`, {
+    try {
+      if (pendingSource.value === 'narration') {
+        const movedBack = await narrationMovedBack()
+        if (movedBack) {
+          options.onNarrationMovedBack?.(movedBack)
+          return
+        }
+      }
+      const safePercentage = updatePercentage(percentage.value)
+      const savedFragment = pendingSource.value === 'narration' ? mediaOverlayFragment.value : null
+      noteOwnWrite(await postProgress(safePercentage), savedFragment)
+    } catch (error) {
+      dirty = true
+      throw error
+    } finally {
+      saving = false
+    }
+  }
+
+  /**
+   * The server's position when another device sent narration well behind the sentence about to be
+   * saved, a reset or a return to an earlier passage, since this reader last read or wrote it.
+   * Read-aloud saves every few sentences, so a reset made elsewhere while it played was overwritten
+   * by the next one and nobody was asked. A move ahead is not held: this narration is the newer place.
+   */
+  async function narrationMovedBack(): Promise<NewerPosition | null> {
+    const secondsOf = options.narrationSeconds
+    const fragment = mediaOverlayFragment.value
+    if (!secondsOf || !fragment) return null
+    const res = await api(`/api/v1/books/files/${fileId}/progress`).catch(() => null)
+    if (!res?.ok) return null
+    const data = (await res.json()) as Record<string, unknown>
+    const stamp = positionStamp(data)
+    const serverFragment = normalizeString(data.mediaOverlayFragment)
+    if (!serverFragment || serverFragment === fragment) return null
+    if (stamp <= knownServerStamp && (knownNarrationFragment === null || serverFragment === knownNarrationFragment)) return null
+    const serverSection = typeof data.mediaOverlaySectionIndex === 'number' ? data.mediaOverlaySectionIndex : null
+    const [serverAt, savingAt] = await Promise.all([secondsOf(serverFragment, serverSection), secondsOf(fragment, mediaOverlaySectionIndex.value)])
+    if (serverAt === null || savingAt === null || serverAt >= savingAt - NARRATION_MOVED_BACK_SECONDS) return null
+    return { percentage: normalizePercentage(data.percentage) ?? 0, stamp, data }
+  }
+
+  /**
+   * The write lands with a server stamp no later than the response's `Date`, which counts whole
+   * seconds, so the next second covers it.
+   */
+  function noteOwnWrite(res: Response | undefined, narrationFragment: string | null) {
+    const date = serverTime(res?.headers?.get?.('Date') ?? null)
+    if (date === null) return
+    knownServerStamp = Math.max(knownServerStamp, date + 1000)
+    knownNarrationFragment = narrationFragment
+  }
+
+  function flush() {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    return dirty ? save() : Promise.resolve()
+  }
+
+  /** Unmount can't await a save, so the pending one goes out as a keepalive request. */
+  function flushKeepalive() {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    if (!dirty || !unref(trackingEnabled)) return
+    dirty = false
+    cacheCurrentProgress()
+    const token = getAccessToken()
+    fetch(`/api/v1/books/files/${fileId}/progress`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: progressBody(updatePercentage(percentage.value)),
+      credentials: 'include',
+      keepalive: true,
+    }).catch(() => {
+      dirty = true
+    })
+  }
+
+  function postProgress(safePercentage: number) {
+    return api(`/api/v1/books/files/${fileId}/progress`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...currentSnapshot(),
-        pageNumber: normalizePageNumber(pageNumber.value),
-        percentage: safePercentage,
-        koboContentSourceProgressPercent: normalizeNullablePercentage(koboContentSourceProgressPercent.value),
-      }),
+      body: progressBody(safePercentage),
     })
+  }
+
+  function progressBody(safePercentage: number) {
+    return JSON.stringify({
+      cfi: cfi.value,
+      pageNumber: normalizePageNumber(pageNumber.value),
+      percentage: safePercentage,
+      koboLocationSource: koboLocationSource.value,
+      koboLocationType: koboLocationType.value,
+      koboLocationValue: koboLocationValue.value,
+      koboContentSourceProgressPercent: normalizeNullablePercentage(koboContentSourceProgressPercent.value),
+      koreaderProgress: koreaderProgress.value,
+      // Left out of a page turn, which says nothing about narration: sent along, the marker this
+      // reader read when it opened went back over a newer one another device had saved since.
+      ...(pendingSource.value === 'narration'
+        ? {
+            positionSeconds: positionSeconds.value,
+            mediaOverlayFragment: mediaOverlayFragment.value,
+            mediaOverlaySectionIndex: mediaOverlaySectionIndex.value,
+          }
+        : {}),
+      ...(ttsSectionIndex.value !== null && ttsWordIndex.value !== null
+        ? { ttsSectionIndex: ttsSectionIndex.value, ttsWordIndex: ttsWordIndex.value }
+        : {}),
+      source: pendingSource.value,
+    })
+  }
+
+  /**
+   * The server's position when another device moved it since this reader last read or wrote it,
+   * so a reader left open can offer it instead of saving its old page over it. Nothing is asked
+   * while a save is waiting: this reader is about to speak for the position itself.
+   */
+  async function checkForNewerPosition(): Promise<NewerPosition | null> {
+    if (!unref(trackingEnabled) || saveTimer || saving) return null
+    const res = await api(`/api/v1/books/files/${fileId}/progress`)
+    if (!res.ok || saveTimer || saving) return null
+    const data = (await res.json()) as Record<string, unknown>
+    const stamp = positionStamp(data)
+    if (stamp <= knownServerStamp) return null
+    if (normalizeString(data.cfi) === cfi.value && normalizeString(data.mediaOverlayFragment) === mediaOverlayFragment.value) {
+      knownServerStamp = stamp
+      knownNarrationFragment = mediaOverlayFragment.value
+      return null
+    }
+    return { percentage: normalizePercentage(data.percentage) ?? 0, stamp, data }
+  }
+
+  /** Takes the newer position, both text and narration, and lets `navigate` go there without saving it back. */
+  async function adoptNewerPosition(position: NewerPosition, navigate: () => Promise<void>) {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    applyServerProgress(position.data)
+    knownServerStamp = Math.max(knownServerStamp, position.stamp)
+    knownNarrationFragment = normalizeString(position.data.mediaOverlayFragment)
+    adoptingNewerPosition = true
+    try {
+      await navigate()
+    } finally {
+      adoptingNewerPosition = false
+    }
+  }
+
+  /** Keeps this reader's page over the one it turned down, and saves it so other devices follow. */
+  async function keepCurrentPosition(position: NewerPosition, source: 'text' | 'narration' = 'text') {
+    knownServerStamp = Math.max(knownServerStamp, position.stamp)
+    knownNarrationFragment = normalizeString(position.data.mediaOverlayFragment)
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    pendingSource.value = source
+    await save()
   }
 
   function cycleFooterMode() {
@@ -448,9 +583,14 @@ export function useReaderProgress(
   return {
     cfi,
     pageNumber,
-    positionSeconds,
     percentage,
+    positionSeconds,
+    mediaOverlayFragment,
+    mediaOverlaySectionIndex,
+    hasMediaOverlayProgress,
     sectionFraction,
+    ttsSectionIndex,
+    ttsWordIndex,
     koboLocationSource,
     koboLocationType,
     koboLocationValue,
@@ -467,14 +607,16 @@ export function useReaderProgress(
     timeSection,
     timeTotal,
     footerMode,
-    ttsSectionIndex,
-    ttsWordIndex,
     load,
-    refreshFromServer,
+    checkForNewerPosition,
+    adoptNewerPosition,
+    keepCurrentPosition,
     onRelocate,
+    setMediaOverlayProgress,
     save,
     scheduleSave,
     flush,
+    refreshFromServer,
     getTtsPosition,
     updateTtsPosition,
     cycleFooterMode,

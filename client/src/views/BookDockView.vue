@@ -6,22 +6,48 @@ import type { BookDockFile } from '@bookorbit/types'
 import { api } from '@/lib/api'
 import { formatBytes } from '@/lib/formatting'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
-import { useBookDockFiles } from '@/features/book-dock/composables/useBookDockFiles'
+import { Permission } from '@bookorbit/types'
+import { useBookDockFiles, type SortField } from '@/features/book-dock/composables/useBookDockFiles'
 import { useBookDockSummary } from '@/features/book-dock/composables/useBookDockSummary'
 import { useBookDockStatistics } from '@/features/book-dock/composables/useBookDockStatistics'
-import { useBookDockUpload, SUPPORTED_FORMATS } from '@/features/book-dock/composables/useBookDockUpload'
-import BookDockToolbar from '@/features/book-dock/components/BookDockToolbar.vue'
-import BookDockFileList from '@/features/book-dock/components/BookDockFileList.vue'
+import { useBookDockUpload, SUPPORTED_FORMATS, SUPPORTED_FORMATS_ACCEPT } from '@/features/book-dock/composables/useBookDockUpload'
+import { useBookDockConflicts } from '@/features/book-dock/composables/useBookDockConflicts'
+import { refetchBookDockMetadata } from '@/features/book-dock/api/book-dock.api'
+import BookDockActionCluster from '@/features/book-dock/components/BookDockActionCluster.vue'
+import BookDockUploadFailures from '@/features/book-dock/components/BookDockUploadFailures.vue'
+import BookDockFilterBar from '@/features/book-dock/components/BookDockFilterBar.vue'
+import BookDockFileListView from '@/features/book-dock/components/BookDockFileListView.vue'
+import BookDockListBar from '@/features/book-dock/components/BookDockListBar.vue'
 import BookDockFileSheet from '@/features/book-dock/components/BookDockFileSheet.vue'
 import BookDockFinalizeDialog from '@/features/book-dock/components/BookDockFinalizeDialog.vue'
 import BookDockBulkEditDialog from '@/features/book-dock/components/BookDockBulkEditDialog.vue'
 import BookDockSetDestinationDialog from '@/features/book-dock/components/BookDockSetDestinationDialog.vue'
+import BookDockDiscardDialog from '@/features/book-dock/components/BookDockDiscardDialog.vue'
+import PaginationNav from '@/components/PaginationNav.vue'
+import PageTitleRow from '@/components/page-header/PageTitleRow.vue'
 
 type ApplyFetchedResult = {
   total: number
   applied: number
   skipped: number
   skippedEdited: number
+}
+
+type BookDockSelectionPayload = {
+  fileIds?: number[]
+  selectAll?: boolean
+  excludedIds?: number[]
+  status?: string
+  needsReview?: boolean
+  readyToFile?: boolean
+  search?: string
+}
+
+type PendingDiscard = {
+  selectionPayload: BookDockSelectionPayload
+  selectionCount: number
+  source: 'bulk' | 'row' | 'sheet'
+  fileId?: number
 }
 
 const { t } = useI18n()
@@ -33,28 +59,34 @@ const {
   filters,
   pageCount,
   fetchFiles,
-  setStatus,
+  activeView,
+  setView,
   setSearch,
+  setSort,
   setPage,
   toggleSelect,
   toggleSelectAll,
   clearSelection,
+  removeDeletedSelection,
   isSelected,
   selectAll,
   selectionCount,
   hasSelection,
   getSelectionPayload,
+  total,
 } = useBookDockFiles()
 
 const { summary, fetchSummary, subscribe, onBookDockChange, socketConnected } = useBookDockSummary()
 const { statistics, fetchStatistics } = useBookDockStatistics()
 const { addFiles, isUploading } = useBookDockUpload()
-const { isDemoRestrictedAccount } = usePermissions()
+const { isDemoRestrictedAccount, hasPermission } = usePermissions()
+const { conflicts, scheduleConflicts, cancelConflicts } = useBookDockConflicts()
 
 const selectedFile = ref<BookDockFile | null>(null)
 const showFinalizeDialog = ref(false)
 const showBulkEditDialog = ref(false)
 const showSetDestinationDialog = ref(false)
+const pendingDiscard = ref<PendingDiscard | null>(null)
 const dragOver = ref(false)
 const newFilesDetected = ref(false)
 const namePreviewByFileId = ref<Record<number, string>>({})
@@ -97,11 +129,6 @@ function closeSheet() {
   selectedFile.value = null
 }
 
-function onDiscarded() {
-  selectedFile.value = null
-  refresh()
-}
-
 function refresh() {
   fetchFiles()
   fetchSummary(true)
@@ -132,18 +159,104 @@ const errorCount = computed(() => {
 
 const emptyMessage = computed(() => {
   if (filters.search) return t('views.bookDock.empty.noSearchMatch', { query: filters.search })
+  if (filters.needsReview) return t('bookDock.layout.empty.nothingToReview')
+  if (filters.readyToFile) return t('bookDock.layout.empty.nothingReadyToFile')
   if (filters.status) return t('views.bookDock.empty.noStatusFiles', { status: filters.status })
   return t('views.bookDock.empty.uploadPrompt')
 })
 
-async function handleBulkDiscard() {
-  const payload = getSelectionPayload()
-  await api('/api/v1/book-dock/files/discard', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+const canPreviewConflicts = computed(() => hasPermission(Permission.LibraryUpload))
+
+const keyboardActive = ref(false)
+
+function onKeyboardActive(active: boolean) {
+  keyboardActive.value = active
+}
+
+const emptyUploadInput = ref<HTMLInputElement | null>(null)
+
+function triggerUpload() {
+  emptyUploadInput.value?.click()
+}
+
+function onEmptyUploadSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.files?.length) {
+    addFiles(input.files)
+    input.value = ''
+  }
+}
+
+const allOnPageSelected = computed(() => items.value.length > 0 && items.value.every((file) => isSelected(file.id)))
+
+function handleToggleSelectAll() {
+  if (allOnPageSelected.value) clearSelection()
+  else for (const file of items.value) if (!isSelected(file.id)) toggleSelect(file.id)
+}
+
+function handleSelectAllMatching() {
+  if (!selectAll.value) toggleSelectAll()
+}
+
+function handleSort(field: SortField) {
+  setSort(field)
+}
+
+function handleRowDiscard(file: BookDockFile) {
+  openSingleDiscard(file, 'row')
+}
+
+async function handleRowRetry(file: BookDockFile) {
+  if (await refetchBookDockMetadata(file.id)) refresh()
+}
+
+function openDestinationForFile(file: BookDockFile) {
   clearSelection()
+  toggleSelect(file.id)
+  showSetDestinationDialog.value = true
+}
+
+function openFinalizeForFile(file: BookDockFile) {
+  clearSelection()
+  toggleSelect(file.id)
+  showFinalizeDialog.value = true
+}
+
+function openBulkDiscardDialog() {
+  if (!hasSelection.value) return
+  pendingDiscard.value = {
+    selectionPayload: getSelectionPayload(),
+    selectionCount: selectionCount.value,
+    source: 'bulk',
+  }
+}
+
+function openSingleDiscard(file: BookDockFile, source: 'row' | 'sheet') {
+  pendingDiscard.value = {
+    selectionPayload: { fileIds: [file.id] },
+    selectionCount: 1,
+    source,
+    fileId: file.id,
+  }
+}
+
+function handleSheetDiscard(file: BookDockFile) {
+  openSingleDiscard(file, 'sheet')
+}
+
+function closeDiscardDialog() {
+  pendingDiscard.value = null
+}
+
+function handleDiscarded() {
+  const discarded = pendingDiscard.value
+  if (!discarded) return
+
+  if (discarded.source === 'bulk') clearSelection()
+  else if (discarded.fileId !== undefined) removeDeletedSelection(discarded.fileId)
+  if (discarded.source === 'sheet') selectedFile.value = null
+
+  pendingDiscard.value = null
   refresh()
 }
 
@@ -213,11 +326,11 @@ async function handleInlineApplyFetched(fileId: number) {
 
 function applyFetchedResultMessage(result: ApplyFetchedResult): string {
   const reasons: string[] = []
-  if (result.skippedEdited > 0) reasons.push(t('views.bookDock.applyFetched.skippedEdited', { count: result.skippedEdited }, result.skippedEdited))
-  if (result.skipped > 0) reasons.push(t('views.bookDock.applyFetched.skippedNoMetadata', { count: result.skipped }, result.skipped))
+  if (result.skippedEdited > 0) reasons.push(t('views.bookDock.applyFetched.skippedEdited', { count: result.skippedEdited }))
+  if (result.skipped > 0) reasons.push(t('views.bookDock.applyFetched.skippedNoMetadata', { count: result.skipped }))
 
   if (result.applied > 0) {
-    const base = t('views.bookDock.applyFetched.applied', { count: result.applied }, result.applied)
+    const base = t('views.bookDock.applyFetched.applied', { count: result.applied })
     return reasons.length ? `${base}; ${reasons.join('; ')}` : base
   }
 
@@ -324,16 +437,9 @@ function onDrop(e: DragEvent) {
   e.preventDefault()
   dragCounter = 0
   dragOver.value = false
+  // Unsupported files go through too, so the upload failures panel can say why they were refused.
   const files = e.dataTransfer?.files
-  if (files?.length) {
-    const valid = [...files].filter((f) => {
-      const ext = f.name.split('.').pop()?.toLowerCase() ?? ''
-      return SUPPORTED_FORMATS.includes(ext)
-    })
-    if (valid.length) {
-      addFiles(valid)
-    }
-  }
+  if (files?.length) addFiles(files)
 }
 
 watch(isUploading, (uploading, was) => {
@@ -344,6 +450,9 @@ watch(
   () => items.value.map((f) => `${f.id}:${f.updatedAt}:${f.targetLibraryId ?? ''}:${f.targetFolderId ?? ''}`).join('|'),
   () => {
     scheduleVisibleNamePreview()
+    // finalize/preview is gated on LibraryUpload, so probing it without that
+    // permission would 403 on every page render for an otherwise valid role.
+    if (canPreviewConflicts.value) scheduleConflicts(items.value.map((file) => file.id))
   },
 )
 
@@ -356,6 +465,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   unsubscribeChange()
+  cancelConflicts()
   if (newFilesTimer) clearTimeout(newFilesTimer)
   if (applyFetchedTimer) clearTimeout(applyFetchedTimer)
   if (rescanFailedTimer) clearTimeout(rescanFailedTimer)
@@ -368,118 +478,98 @@ onUnmounted(() => {
 <template>
   <div>
     <main class="flex-1" @dragover="onDragOver" @dragenter="onDragEnter" @dragleave="onDragLeave" @drop="onDrop">
-      <div class="flex flex-col gap-4 py-4 sm:py-6 max-w-8xl w-full">
-        <div class="flex items-center gap-2.5">
-          <div class="flex items-center justify-center size-9 rounded-lg bg-primary/10">
-            <PackageOpen class="size-4.5 text-primary" />
-          </div>
-          <h1 class="text-xl font-semibold text-foreground tracking-tight">{{ t('views.bookDock.title') }}</h1>
-          <span
-            v-if="summary.total > 0"
-            class="ml-1 inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full bg-primary/15 text-primary text-xs font-semibold tabular-nums"
-          >
-            {{ summary.total }}
-          </span>
-          <span
-            v-if="summary.paused"
-            class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-xs font-medium"
-          >
-            <span class="size-1.5 rounded-full bg-current" />
-            Paused
-          </span>
-          <Transition name="fade">
+      <input ref="emptyUploadInput" type="file" :accept="SUPPORTED_FORMATS_ACCEPT" multiple class="hidden" @change="onEmptyUploadSelected" />
+      <div class="flex w-full max-w-420 flex-col gap-4 pt-2 pb-4">
+        <PageTitleRow :title="t('views.bookDock.title')" :icon="PackageOpen" inline-grow>
+          <template #inline>
+            <BookDockFilterBar class="w-full" :active-view="activeView" :summary="summary" @view="setView" @search="setSearch" />
+          </template>
+          <template #facts>
             <span
-              v-if="newFilesDetected"
-              class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-xs font-medium"
-            >
-              <span class="size-1.5 rounded-full bg-current animate-pulse" />
-              {{ t('views.bookDock.newFilesDetected') }}
-            </span>
-          </Transition>
-          <Transition name="fade">
-            <span
-              v-if="applyFetchedResult"
+              v-if="summary.paused"
               class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-xs font-medium"
             >
-              <CheckCircle2 class="size-3.5" />
-              {{ applyFetchedResultMessage(applyFetchedResult) }}
+              <span class="size-1.5 rounded-full bg-current" />
+              Paused
             </span>
-          </Transition>
-          <Transition name="fade">
-            <span
-              v-if="retryQueued !== null"
-              class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-primary/15 text-primary text-xs font-medium"
-            >
-              <CheckCircle2 class="size-3.5" />
-              {{
-                retryQueued === 0
-                  ? t('views.bookDock.retry.noneToRetry')
-                  : t('views.bookDock.retry.retrying', { count: retryQueued }, retryQueued ?? 0)
-              }}
-            </span>
-          </Transition>
-          <Transition name="fade">
-            <span
-              v-if="!socketConnected"
-              class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-muted text-muted-foreground text-xs font-medium"
-            >
-              <span class="size-1.5 rounded-full bg-muted-foreground animate-pulse" />
-              {{ t('views.bookDock.reconnecting') }}
-            </span>
-          </Transition>
-          <Transition name="fade">
-            <span
-              v-if="rescanFailed"
-              class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-red-500/15 text-red-600 dark:text-red-400 text-xs font-medium"
-            >
-              <AlertCircle class="size-3.5" />
-              {{ t('views.bookDock.rescanFailed') }}
-            </span>
-          </Transition>
-          <Transition name="fade">
-            <span
-              v-if="processingStateFailed"
-              class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-red-500/15 text-red-600 dark:text-red-400 text-xs font-medium"
-            >
-              <AlertCircle class="size-3.5" />
-              Pause update failed
-            </span>
-          </Transition>
-        </div>
+            <Transition name="fade">
+              <span
+                v-if="newFilesDetected"
+                class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-xs font-medium"
+              >
+                <span class="size-1.5 rounded-full bg-current animate-pulse" />
+                {{ t('views.bookDock.newFilesDetected') }}
+              </span>
+            </Transition>
+            <Transition name="fade">
+              <span
+                v-if="applyFetchedResult"
+                class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-xs font-medium"
+              >
+                <CheckCircle2 class="size-3.5" />
+                {{ applyFetchedResultMessage(applyFetchedResult) }}
+              </span>
+            </Transition>
+            <Transition name="fade">
+              <span
+                v-if="retryQueued !== null"
+                class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-primary/15 text-primary text-xs font-medium"
+              >
+                <CheckCircle2 class="size-3.5" />
+                {{ retryQueued === 0 ? t('views.bookDock.retry.noneToRetry') : t('views.bookDock.retry.retrying', { count: retryQueued }) }}
+              </span>
+            </Transition>
+            <Transition name="fade">
+              <span
+                v-if="!socketConnected"
+                class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-muted text-muted-foreground text-xs font-medium"
+              >
+                <span class="size-1.5 rounded-full bg-muted-foreground animate-pulse" />
+                {{ t('views.bookDock.reconnecting') }}
+              </span>
+            </Transition>
+            <Transition name="fade">
+              <span
+                v-if="rescanFailed"
+                class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-red-500/15 text-red-600 dark:text-red-400 text-xs font-medium"
+              >
+                <AlertCircle class="size-3.5" />
+                {{ t('views.bookDock.rescanFailed') }}
+              </span>
+            </Transition>
+            <Transition name="fade">
+              <span
+                v-if="processingStateFailed"
+                class="ml-2 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-full bg-red-500/15 text-red-600 dark:text-red-400 text-xs font-medium"
+              >
+                <AlertCircle class="size-3.5" />
+                {{ t('bookDock.layout.pauseUpdateFailed') }}
+              </span>
+            </Transition>
+          </template>
+          <template #actions>
+            <BookDockActionCluster
+              :paused="summary.paused"
+              @pause="handleProcessingStateChanged"
+              @resume="handleProcessingStateChanged"
+              @pause-error="handleProcessingStateError"
+              @resume-error="handleProcessingStateError"
+              @rescan="refresh"
+              @rescan-error="handleRescanError"
+            />
+          </template>
+        </PageTitleRow>
 
-        <BookDockToolbar
-          :active-status="filters.status"
-          :selection-count="selectionCount"
-          :has-selection="hasSelection"
-          :fetched-count="fetchedCount"
-          :error-count="errorCount"
-          :paused="summary.paused"
-          @status-filter="setStatus"
-          @search="setSearch"
-          @pause="handleProcessingStateChanged"
-          @resume="handleProcessingStateChanged"
-          @pause-error="handleProcessingStateError"
-          @resume-error="handleProcessingStateError"
-          @rescan="refresh"
-          @rescan-error="handleRescanError"
-          @retry-fetch="handleRetryFetch"
-          @bulk-discard="handleBulkDiscard"
-          @finalize="openFinalize"
-          @bulk-edit="openBulkEdit"
-          @set-destination="openSetDestination"
-          @refresh="refresh"
-          @apply-fetched="handleApplyFetched"
-        />
+        <BookDockUploadFailures />
 
         <!-- Statistics bar -->
-        <div v-if="statistics && statistics.byFormat.length > 0" class="flex items-center gap-3 flex-wrap text-xs text-muted-foreground">
-          <span class="font-medium text-foreground">{{ t('views.bookDock.totalInDock', { size: formatBytes(statistics.totalSizeBytes) }) }}</span>
+        <div v-if="statistics && statistics.byFormat.length > 1" class="flex items-center gap-3 flex-wrap text-xs text-muted-foreground">
           <span
             v-for="f in statistics.byFormat"
             :key="f.format"
             class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-muted/50 tabular-nums"
           >
-            <span class="uppercase font-medium text-foreground/70">{{ f.format }}</span>
+            <span class="uppercase font-medium text-foreground">{{ f.format }}</span>
             {{ f.count }} &middot; {{ formatBytes(f.sizeBytes) }}
           </span>
         </div>
@@ -503,36 +593,58 @@ onUnmounted(() => {
           </div>
         </Transition>
 
-        <BookDockFileList
-          :items="items"
-          :loading="loading"
-          :initialized="initialized"
-          :is-selected="isSelected"
-          :select-all="selectAll"
-          :name-preview-by-file-id="namePreviewByFileId"
-          :empty-message="emptyMessage"
-          @select="handleSelect"
-          @select-all="toggleSelectAll"
-          @open="openSheet"
-          @apply-fetched="handleInlineApplyFetched"
-        />
-
-        <div v-if="pageCount > 1" class="flex items-center justify-center gap-1">
-          <button
-            v-for="p in pageCount"
-            :key="p"
-            class="size-8 rounded-lg text-xs font-medium transition-all active:scale-95"
-            :class="filters.page === p ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:text-foreground'"
-            @click="setPage(p)"
-          >
-            {{ p }}
-          </button>
+        <!-- One clipped container so the list and its action bar share an edge. -->
+        <div class="overflow-hidden rounded-xl border border-border bg-card">
+          <BookDockListBar
+            v-if="items.length > 0"
+            :page-count="items.length"
+            :total="total"
+            :total-size-bytes="statistics?.totalSizeBytes ?? null"
+            :all-on-page-selected="allOnPageSelected"
+            :select-all-matching="selectAll"
+            :selection-count="selectionCount"
+            :fetched-count="fetchedCount"
+            :error-count="errorCount"
+            :summary="summary"
+            :sort="filters.sort"
+            :keyboard-active="keyboardActive"
+            @toggle-select-all="handleToggleSelectAll"
+            @select-all-matching="handleSelectAllMatching"
+            @sort="handleSort"
+            @finalize="openFinalize"
+            @set-destination="openSetDestination"
+            @bulk-edit="openBulkEdit"
+            @deselect="clearSelection"
+            @bulk-discard="openBulkDiscardDialog"
+            @apply-fetched="handleApplyFetched"
+            @retry-fetch="handleRetryFetch"
+          />
+          <BookDockFileListView
+            :items="items"
+            :loading="loading"
+            :initialized="initialized"
+            :is-selected="isSelected"
+            :conflicts="conflicts"
+            :name-preview-by-file-id="namePreviewByFileId"
+            :empty-message="emptyMessage"
+            @select="handleSelect"
+            @set-destination="openDestinationForFile"
+            @file="openFinalizeForFile"
+            @apply-fetched="handleInlineApplyFetched"
+            @open="openSheet"
+            @discard="handleRowDiscard"
+            @retry="handleRowRetry"
+            @upload="triggerUpload"
+            @keyboard-active="onKeyboardActive"
+          />
         </div>
+
+        <PaginationNav :page="filters.page" :total-pages="pageCount" @update:page="setPage" />
       </div>
     </main>
 
     <Teleport to="body">
-      <BookDockFileSheet v-if="selectedFile" :file="selectedFile" @close="closeSheet" @discarded="onDiscarded" @updated="onFileUpdated" />
+      <BookDockFileSheet v-if="selectedFile" :file="selectedFile" @close="closeSheet" @discard="handleSheetDiscard" @updated="onFileUpdated" />
     </Teleport>
 
     <BookDockFinalizeDialog
@@ -557,6 +669,14 @@ onUnmounted(() => {
       :selection-count="selectionCount"
       @close="showSetDestinationDialog = false"
       @updated="onDestinationSet"
+    />
+
+    <BookDockDiscardDialog
+      v-if="pendingDiscard"
+      :selection-payload="pendingDiscard.selectionPayload"
+      :selection-count="pendingDiscard.selectionCount"
+      @close="closeDiscardDialog"
+      @discarded="handleDiscarded"
     />
   </div>
 </template>

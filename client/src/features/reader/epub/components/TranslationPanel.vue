@@ -34,7 +34,7 @@ function handleLangChange(event: Event) {
     <div>
       <p class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground mb-1">{{ t('reader.translation.original') }}</p>
       <div class="max-h-20 overflow-y-auto">
-        <p class="text-sm text-foreground/70 leading-relaxed break-words">{{ originalText }}</p>
+        <p class="text-sm text-foreground leading-relaxed break-words">{{ originalText }}</p>
       </div>
     </div>
 
@@ -69,7 +69,7 @@ function handleLangChange(event: Event) {
     <!-- Bottom row: language selector | provider chip | copy button -->
     <div class="flex items-center gap-2 pt-1 border-t border-border">
       <select
-        class="flex-1 text-xs bg-muted text-foreground rounded px-2 py-1 border border-border focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer min-w-0 truncate"
+        class="flex-1 text-xs bg-muted text-foreground rounded-xs px-2 py-1 border border-border focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer min-w-0 truncate"
         :value="targetLang"
         :title="selectedLangName"
         @change="handleLangChange"
@@ -83,7 +83,7 @@ function handleLangChange(event: Event) {
 
       <button
         v-if="result"
-        class="shrink-0 flex items-center justify-center w-7 h-7 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+        class="shrink-0 flex items-center justify-center w-7 h-7 rounded-xs hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
         :title="t('reader.translation.copyTranslation')"
         @click="emit('copy')"
       >

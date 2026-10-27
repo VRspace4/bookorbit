@@ -4,16 +4,24 @@ import { Sparkles, Users, X } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { useI18n } from 'vue-i18n'
 import { useBookMetadataFetchStatus } from '../composables/useBookMetadataFetchStatus'
+import { useMetadataCardDismissal } from '../composables/useMetadataCardDismissal'
 import { useAuthorEnrichmentStatus } from '@/features/settings/composables/useAuthorEnrichmentStatus'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useAuth } from '@/features/auth/composables/useAuth'
 import BookMetadataFetchExpanded from './BookMetadataFetchExpanded.vue'
 import BookMetadataFetchReportModal from './BookMetadataFetchReportModal.vue'
 import AuthorEnrichmentExpanded from './AuthorEnrichmentExpanded.vue'
 import AuthorEnrichmentReportModal from './AuthorEnrichmentReportModal.vue'
 
+const props = defineProps<{
+  /** Set where the page already shows the book queue, so the card does not repeat it over the page's own controls. */
+  hideBookCard?: boolean
+}>()
+
 const { status, subscribe } = useBookMetadataFetchStatus()
 const { status: authorStatus, subscribe: subscribeAuthors } = useAuthorEnrichmentStatus()
 const { hasPermission, isSuperuser } = usePermissions()
+const { user } = useAuth()
 const { t } = useI18n()
 
 const canView = computed(() => isSuperuser.value || hasPermission('manage_metadata_config'))
@@ -46,16 +54,13 @@ const hasBookWork = computed(() => status.value.queued + status.value.processing
 const hasAuthorWork = computed(() => authorStatus.value.queued + authorStatus.value.processing + authorStatus.value.rateLimited > 0)
 const hasBookStatus = computed(() => hasBookWork.value || status.value.failed > 0)
 const hasAuthorStatus = computed(() => hasAuthorWork.value || authorStatus.value.failed > 0)
-const bookCardDismissed = ref(false)
-const authorCardDismissed = ref(false)
-const showBookCard = computed(() => hasBookStatus.value && !bookCardDismissed.value)
+const cardUserId = computed(() => user.value?.id ?? null)
+const { dismissed: bookCardDismissed, dismiss: dismissBookCard } = useMetadataCardDismissal('books', status, hasBookWork, cardUserId)
+const { dismissed: authorCardDismissed, dismiss: dismissAuthorCard } = useMetadataCardDismissal('authors', authorStatus, hasAuthorWork, cardUserId)
+const showBookCard = computed(() => hasBookStatus.value && !bookCardDismissed.value && !props.hideBookCard)
 const showAuthorCard = computed(() => hasAuthorStatus.value && !authorCardDismissed.value)
 
-watch(hasBookWork, (active, wasActive) => {
-  if (active && !wasActive) bookCardDismissed.value = false
-})
-watch(hasAuthorWork, (active, wasActive) => {
-  if (active && !wasActive) authorCardDismissed.value = false
+watch(hasAuthorWork, (active) => {
   if (!active) lastAuthorName.value = null
 })
 const isAnyVisible = computed(() => showBookCard.value || showAuthorCard.value)
@@ -177,12 +182,12 @@ function handleOpenAuthorReport() {
 }
 
 function handleDismissBookCard() {
-  bookCardDismissed.value = true
+  dismissBookCard()
   expanded.value = false
 }
 
 function handleDismissAuthorCard() {
-  authorCardDismissed.value = true
+  dismissAuthorCard()
   authorExpanded.value = false
 }
 
@@ -233,7 +238,7 @@ onMounted(() => {
         <div class="flex flex-col items-start gap-0.5 min-w-0">
           <span class="text-xs font-semibold text-foreground leading-none">{{ bookCardTitle }}</span>
           <span class="text-xs text-muted-foreground leading-none">{{ bookRemainingLabel }}</span>
-          <span class="text-xs text-muted-foreground/80 leading-none truncate mt-0.5" :class="lastBookName ? '' : 'invisible'">{{
+          <span class="text-xs text-muted-foreground leading-none truncate mt-0.5" :class="lastBookName ? '' : 'invisible'">{{
             lastBookName ?? '\u00a0'
           }}</span>
         </div>
@@ -242,7 +247,7 @@ onMounted(() => {
         </div>
       </button>
       <button
-        class="absolute end-1.5 top-1.5 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="absolute end-1.5 top-1.5 rounded-xs p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :aria-label="t('bookMetadataFetch.actions.dismissBookStatus')"
         @click="handleDismissBookCard"
       >
@@ -266,7 +271,7 @@ onMounted(() => {
         <div class="flex flex-col items-start gap-0.5 min-w-0">
           <span class="text-xs font-semibold text-foreground leading-none">{{ authorCardTitle }}</span>
           <span class="text-xs text-muted-foreground leading-none">{{ authorRemainingLabel }}</span>
-          <span class="text-xs text-muted-foreground/80 leading-none truncate mt-0.5" :class="lastAuthorName ? '' : 'invisible'">{{
+          <span class="text-xs text-muted-foreground leading-none truncate mt-0.5" :class="lastAuthorName ? '' : 'invisible'">{{
             lastAuthorName ?? '\u00a0'
           }}</span>
         </div>
@@ -275,7 +280,7 @@ onMounted(() => {
         </div>
       </button>
       <button
-        class="absolute end-1.5 top-1.5 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        class="absolute end-1.5 top-1.5 rounded-xs p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :aria-label="t('bookMetadataFetch.actions.dismissAuthorStatus')"
         @click="handleDismissAuthorCard"
       >

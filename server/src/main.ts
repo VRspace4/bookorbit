@@ -12,15 +12,21 @@ import fastifyMultipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import fastifyHelmet from '@fastify/helmet';
 import fastifyCompress from '@fastify/compress';
+import type { FastifyInstance } from 'fastify';
 import { appConfig } from './config/config';
+import { DEV_CLIENT_ORIGIN } from './config/dev-client-origin';
 import { setupSwaggerDocs } from './swagger';
 import {
   parseBooleanEnv,
   parseTrustProxy,
-  buildCspDirectives,
+  buildHelmetOptions,
   buildEmptyJsonBodyStream,
+  registerConditionalHsts,
+  registerDeclaredBodyLimits,
+  registerDeclaredCompressionOptOuts,
   registerEmptyBodyContentTypeParser,
   shouldInjectEmptyJsonBody,
+  shouldServeSpaFallback,
 } from './common/utils/bootstrap.utils';
 
 const MAX_COVER_BYTES = 20 * 1024 * 1024;
@@ -33,6 +39,11 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
 
   const fastify = adapter.getInstance();
+  // Nest adds originalUrl to the raw request, but these helpers only use standard Fastify APIs.
+  const standardFastify = fastify as unknown as FastifyInstance;
+
+  registerDeclaredBodyLimits(fastify);
+  registerDeclaredCompressionOptOuts(fastify);
 
   // Fastify's default JSON parser rejects empty bodies, so we inject '{}' before parsing.
   // Proxies may also attach unsupported Content-Type values to bodyless PATCH/DELETE requests.
@@ -56,7 +67,7 @@ async function bootstrap() {
     done(null, payload);
   });
   // Reverse proxies can forward empty mutating requests with chunked transfer or an unsupported content type.
-  registerEmptyBodyContentTypeParser(fastify);
+  registerEmptyBodyContentTypeParser(standardFastify);
 
   // Echo pino-http's request ID so clients can correlate errors with server logs.
   fastify.addHook('onSend', (_request, reply, _payload, done) => {
@@ -88,12 +99,8 @@ async function bootstrap() {
     await setupSwaggerDocs(app, appConfiguration);
   }
 
-  await app.register(fastifyHelmet as never, {
-    crossOriginOpenerPolicy: false,
-    contentSecurityPolicy: {
-      directives: buildCspDirectives({ allowCloudflareInsights }),
-    },
-  });
+  await app.register(fastifyHelmet as never, buildHelmetOptions({ allowCloudflareInsights }));
+  registerConditionalHsts(standardFastify);
 
   await app.register(fastifyCompress as never, { encodings: ['gzip', 'br'] });
 
@@ -102,7 +109,7 @@ async function bootstrap() {
 
   if (process.env.NODE_ENV !== 'production') {
     app.enableCors({
-      origin: process.env.CLIENT_URL ?? 'http://localhost:5173',
+      origin: process.env.CLIENT_URL ?? DEV_CLIENT_ORIGIN,
       credentials: true,
     });
   }
@@ -116,7 +123,13 @@ async function bootstrap() {
         if (request.url.startsWith('/api')) {
           return nestHandler(request, reply);
         }
-        return reply.sendFile('index.html');
+        if (!shouldServeSpaFallback(request.url)) {
+          return reply.status(404).send({ statusCode: 404, message: 'Not Found', path: request.url });
+        }
+        // Nest's SWC type checker does not retain @fastify/static's reply augmentation
+        // through the adapter callback, even though the plugin decorates this reply at runtime.
+        const staticReply = reply as typeof reply & { sendFile(filename: string): typeof reply };
+        return staticReply.sendFile('index.html');
       });
     };
 
@@ -127,7 +140,7 @@ async function bootstrap() {
   }
 
   app.enableShutdownHooks();
-  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
+  await app.listen(process.env.PORT ?? 3000, appConfiguration.host);
 }
 
 bootstrap().catch((err: unknown) => {

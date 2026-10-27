@@ -1,9 +1,11 @@
-import { Controller, DefaultValuePipe, Get, Param, ParseEnumPipe, ParseIntPipe, Query } from '@nestjs/common';
+import { Body, Controller, DefaultValuePipe, Get, HttpCode, HttpStatus, Param, ParseEnumPipe, ParseIntPipe, Post, Query } from '@nestjs/common';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/types/request-user';
 import { DashboardService } from './dashboard.service';
 import { DashboardWidgetService } from './dashboard-widget.service';
+import { DashboardScrollerBatchDto } from './dto/dashboard-scroller-batch.dto';
+import { DashboardWidgetBatchDto } from './dto/dashboard-widget-batch.dto';
 import { ScrollerType } from './dto/scroller-type.enum';
 
 @Controller('dashboard')
@@ -21,6 +23,24 @@ export class DashboardController {
     @CurrentUser() user: RequestUser,
   ) {
     return this.dashboardService.getScroller(type, user, limit, smartScopeId);
+  }
+
+  @Post('scrollers/batch')
+  @HttpCode(HttpStatus.OK)
+  getScrollers(@CurrentUser() user: RequestUser, @Body() dto: DashboardScrollerBatchDto) {
+    return this.dashboardService.getScrollers(dto, user);
+  }
+
+  @Post('widgets/batch')
+  @HttpCode(HttpStatus.OK)
+  getWidgets(@CurrentUser() user: RequestUser, @Body() dto: DashboardWidgetBatchDto) {
+    return this.widgetService.getWidgets([...new Set(dto.widgets)], user);
+  }
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  refresh(@CurrentUser() user: RequestUser) {
+    this.widgetService.clearCacheForUser(user.id);
   }
 
   @Get('widgets/reading-goal')
@@ -46,6 +66,11 @@ export class DashboardController {
   @Get('widgets/highlight-of-the-day')
   getHighlightOfTheDay(@CurrentUser() user: RequestUser) {
     return this.widgetService.getHighlightOfTheDay(user);
+  }
+
+  @Get('widgets/highlights')
+  getHighlights(@CurrentUser() user: RequestUser) {
+    return this.widgetService.getHighlights(user);
   }
 
   @Get('widgets/monthly-challenge')

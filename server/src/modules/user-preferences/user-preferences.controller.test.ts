@@ -1,5 +1,12 @@
 import type { Mocked } from 'vitest';
-import { EMPTY_CONTENT_FILTER_RULES, type DisplayPreferences, type LocalePreferences, type ThemePreferences } from '@bookorbit/types';
+import {
+  EMPTY_CONTENT_FILTER_RULES,
+  type BookRequestPreferences,
+  type CoverSearchPreferences,
+  type DisplayPreferences,
+  type LocalePreferences,
+  type ThemePreferences,
+} from '@bookorbit/types';
 
 import type { RequestUser } from '../../common/types/request-user';
 import { UserPreferencesController } from './user-preferences.controller';
@@ -41,23 +48,33 @@ const validDisplayPreferences: DisplayPreferences = {
   squareGridGap: 20,
   viewMode: 'grid',
   cardOverlays: ['progress-bar', 'format', 'rating'],
+  showJumpRails: true,
   smartScopeFilterExpanded: true,
   authorCoverSize: 140,
   authorCoverShape: 'circle',
+  authorRowDensity: 'comfortable',
+  authorCoverFallback: false,
   tableZebraStriping: false,
   tableDensity: 'comfortable',
   bookSpineOverlay: 'subtle',
+  showSpineOnComics: false,
   bookShadowStrength: 'strong',
   bookCoverDisplayMode: 'natural-bottom',
+  bookDetailCoverTint: 'duotone',
   seriesCardCoverMode: 'stack',
   gridCardPrimaryLabel: 'hidden',
   gridCardSecondaryLabel: 'hidden',
   cardInfoMode: 'hover-overlay',
   thumbnailClickAction: 'reader',
+  placeholderCoverStyle: 'bauhaus',
 };
 
 const validLocalePreferences: LocalePreferences = {
   locale: 'nl',
+};
+
+const validCoverSearchPreferences: CoverSearchPreferences = {
+  defaultProvider: 'itunes',
 };
 
 describe('UserPreferencesController', () => {
@@ -69,9 +86,15 @@ describe('UserPreferencesController', () => {
       getThemePreferences: vi.fn(),
       getDisplayPreferences: vi.fn(),
       getLocalePreferences: vi.fn(),
+      getCoverSearchPreferences: vi.fn(),
+      getBookRequestPreferences: vi.fn(),
       upsertThemePreferences: vi.fn(),
       upsertDisplayPreferences: vi.fn(),
       upsertLocalePreferences: vi.fn(),
+      upsertCoverSearchPreferences: vi.fn(),
+      upsertBookRequestPreferences: vi.fn(),
+      getAnnotationColorNamePreferences: vi.fn(),
+      upsertAnnotationColorNamePreferences: vi.fn(),
     } as unknown as Mocked<UserPreferencesService>;
 
     controller = new UserPreferencesController(service);
@@ -135,6 +158,35 @@ describe('UserPreferencesController', () => {
     expect(service.upsertDisplayPreferences).toHaveBeenCalledWith(99, validDisplayPreferences);
   });
 
+  it('GET /cover-search returns the current user preference', async () => {
+    service.getCoverSearchPreferences.mockResolvedValueOnce(validCoverSearchPreferences);
+
+    await expect(controller.getCoverSearchPreferences(makeUser({ id: 11 }))).resolves.toEqual({ settings: validCoverSearchPreferences });
+    expect(service.getCoverSearchPreferences).toHaveBeenCalledWith(11);
+  });
+
+  it('PUT /cover-search forwards the current user id and settings', async () => {
+    const dto = { settings: validCoverSearchPreferences as unknown as Record<string, unknown> };
+
+    await expect(controller.upsertCoverSearchPreferences(dto, makeUser({ id: 42 }))).resolves.toBeUndefined();
+    expect(service.upsertCoverSearchPreferences).toHaveBeenCalledWith(42, validCoverSearchPreferences);
+  });
+
+  it('GET /book-requests returns the pinned request destination', async () => {
+    const preferences: BookRequestPreferences = { defaultLibraryId: 4, defaultFolderId: 9 };
+    service.getBookRequestPreferences.mockResolvedValueOnce(preferences);
+
+    await expect(controller.getBookRequestPreferences(makeUser({ id: 11 }))).resolves.toEqual({ settings: preferences });
+    expect(service.getBookRequestPreferences).toHaveBeenCalledWith(11);
+  });
+
+  it('PUT /book-requests forwards the current user id and settings', async () => {
+    const dto = { settings: { defaultLibraryId: 4, defaultFolderId: null } };
+
+    await expect(controller.upsertBookRequestPreferences(dto, makeUser({ id: 42 }))).resolves.toBeUndefined();
+    expect(service.upsertBookRequestPreferences).toHaveBeenCalledWith(42, dto.settings);
+  });
+
   it('GET /locale returns null settings when no saved preferences exist', async () => {
     service.getLocalePreferences.mockResolvedValueOnce(null);
 
@@ -162,5 +214,21 @@ describe('UserPreferencesController', () => {
     await controller.upsertLocalePreferences({ settings: validLocalePreferences as unknown as Record<string, unknown> }, user);
 
     expect(service.upsertLocalePreferences).toHaveBeenCalledWith(99, validLocalePreferences);
+  });
+
+  it('GET /annotation-colors wraps the named colours in settings', async () => {
+    service.getAnnotationColorNamePreferences.mockResolvedValueOnce({ names: { '#FACC15': 'Ideas' } });
+
+    await expect(controller.getAnnotationColorNamePreferences(makeUser({ id: 11 }))).resolves.toEqual({
+      settings: { names: { '#FACC15': 'Ideas' } },
+    });
+    expect(service.getAnnotationColorNamePreferences).toHaveBeenCalledWith(11);
+  });
+
+  it('PUT /annotation-colors forwards the current user id and settings', async () => {
+    const settings = { names: { '#facc15': 'Ideas' } };
+
+    await expect(controller.upsertAnnotationColorNamePreferences({ settings }, makeUser({ id: 42 }))).resolves.toBeUndefined();
+    expect(service.upsertAnnotationColorNamePreferences).toHaveBeenCalledWith(42, settings);
   });
 });

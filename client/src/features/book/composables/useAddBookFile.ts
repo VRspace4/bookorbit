@@ -1,9 +1,9 @@
 import { computed, ref } from 'vue'
-import { getAccessToken } from '@/lib/api'
-import type { AddBookFileResult } from '@bookorbit/types'
+import { getValidToken } from '@/lib/api'
+import { UPLOAD_SUPPORTED_FORMATS, type AddBookFileResult } from '@bookorbit/types'
 import { useAppInfo } from '@/features/settings/composables/useAppInfo'
 
-export const SUPPORTED_FORMATS = ['epub', 'kepub', 'pdf', 'mobi', 'azw3', 'cbz', 'cbr', 'cb7', 'fb2', 'm4b', 'm4a', 'mp3', 'opus', 'ogg', 'flac']
+export const SUPPORTED_FORMATS: readonly string[] = UPLOAD_SUPPORTED_FORMATS
 export const SUPPORTED_FORMATS_ACCEPT = SUPPORTED_FORMATS.map((f) => `.${f}`).join(',')
 export const MAX_FILE_BYTES = 500 * 1024 * 1024
 
@@ -34,7 +34,8 @@ function validateFile(file: File): string | null {
   return null
 }
 
-function uploadSingle(item: BookFileUploadItem, bookId: number): Promise<void> {
+async function uploadSingle(item: BookFileUploadItem, bookId: number): Promise<void> {
+  const token = await getValidToken()
   return new Promise((resolve) => {
     const formData = new FormData()
     formData.append('file', item.file)
@@ -42,7 +43,6 @@ function uploadSingle(item: BookFileUploadItem, bookId: number): Promise<void> {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `/api/v1/books/${bookId}/files`)
 
-    const token = getAccessToken()
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
 
     xhr.upload.onprogress = (e) => {
@@ -84,7 +84,7 @@ function uploadSingle(item: BookFileUploadItem, bookId: number): Promise<void> {
 }
 
 async function triggerRename(bookId: number): Promise<void> {
-  const token = getAccessToken()
+  const token = await getValidToken()
   await fetch(`/api/v1/books/${bookId}/rename-files`, {
     method: 'POST',
     headers: token ? { Authorization: `Bearer ${token}` } : {},

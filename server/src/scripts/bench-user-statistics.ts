@@ -1,6 +1,8 @@
 import { JwtService } from '@nestjs/jwt';
 import { Client } from 'pg';
 
+import { createPostgresClientConfig } from '../db/postgres-connection-config';
+
 type BenchCase = {
   name: string;
   path: string;
@@ -23,7 +25,7 @@ const REQUEST_DELAY_MS = Number.parseInt(process.env.BENCH_REQUEST_DELAY_MS ?? '
 const MAX_429_RETRIES = Number.parseInt(process.env.BENCH_MAX_429_RETRIES ?? '2', 10);
 const OUTPUT_PATH = process.env.BENCH_OUTPUT_PATH ?? '';
 const BENCH_BASE_URL = process.env.BENCH_BASE_URL;
-const CANDIDATE_BASE_URLS = ['http://localhost:3010', 'http://localhost:3000'];
+const CANDIDATE_BASE_URLS = ['http://localhost:6262', 'http://localhost:3010', 'http://localhost:3000'];
 
 const CASES: BenchCase[] = [
   { name: 'summary', path: '/api/v1/user-statistics/summary' },
@@ -77,7 +79,7 @@ async function resolveBaseUrl(): Promise<string> {
     if (await isHealthy(candidate)) return candidate;
   }
 
-  throw new Error('Could not detect a running API base URL. Set BENCH_BASE_URL (for example: http://localhost:3000).');
+  throw new Error('Could not detect a running API base URL. Set BENCH_BASE_URL (for example: http://localhost:6262).');
 }
 
 async function getBenchUser(): Promise<{ id: number; tokenVersion: number }> {
@@ -90,7 +92,7 @@ async function getBenchUser(): Promise<{ id: number; tokenVersion: number }> {
 
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required (or BENCH_USER_ID/BENCH_USER_VER).');
 
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const client = new Client(createPostgresClientConfig(process.env.DATABASE_URL));
   await client.connect();
   try {
     const result = await client.query<{ id: number; token_version: number }>(

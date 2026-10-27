@@ -3,7 +3,14 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Check, Minus } from '@lucide/vue'
 import type { BookDetail, MetadataScoreWeights } from '@bookorbit/types'
-import { METADATA_SCORE_FIELDS, METADATA_SCORE_GROUP_LABELS, type MetadataScoreField, type MetadataScoreGroup } from '@bookorbit/types'
+import {
+  METADATA_SCORE_FIELDS,
+  METADATA_SCORE_GROUPS,
+  isPositiveSeriesIndex,
+  type MetadataScoreField,
+  type MetadataScoreGroup,
+} from '@bookorbit/types'
+import { scoreFieldLabelKey } from '@/features/settings/metadata-score/lib/score-weights'
 
 const props = defineProps<{
   book: BookDetail
@@ -54,7 +61,7 @@ function isFieldFilled(field: MetadataScoreField): boolean {
     case 'seriesName':
       return !!b.seriesName?.trim()
     case 'seriesIndex':
-      return b.seriesIndex != null && b.seriesIndex > 0
+      return b.seriesIndex != null && isPositiveSeriesIndex(b.seriesIndex)
     case 'googleBooksId':
       return !!b.providerIds.google?.trim()
     case 'goodreadsId':
@@ -67,6 +74,8 @@ function isFieldFilled(field: MetadataScoreField): boolean {
       return !!b.providerIds.openLibrary?.trim()
     case 'itunesId':
       return !!b.providerIds.itunes?.trim()
+    case 'koboId':
+      return !!b.providerIds.kobo?.trim()
     case 'aladinId':
       return !!b.providerIds.aladin?.trim()
     default:
@@ -88,25 +97,22 @@ type GroupEntry = {
 }
 
 const groups = computed<GroupEntry[]>(() => {
-  const groupOrder: MetadataScoreGroup[] = ['core', 'publishing', 'classification', 'enrichment', 'providers']
   const map = new Map<MetadataScoreGroup, FieldEntry[]>()
 
   for (const [field, meta] of Object.entries(METADATA_SCORE_FIELDS) as [MetadataScoreField, (typeof METADATA_SCORE_FIELDS)[MetadataScoreField]][]) {
     const weight = props.weights[field]
     if (weight === 0) continue
-    const entry: FieldEntry = { field, label: meta.label, weight, filled: isFieldFilled(field) }
+    const entry: FieldEntry = { field, label: t(scoreFieldLabelKey(field)), weight, filled: isFieldFilled(field) }
     const list = map.get(meta.group) ?? []
     list.push(entry)
     map.set(meta.group, list)
   }
 
-  return groupOrder
-    .filter((g) => map.has(g))
-    .map((g) => ({
-      group: g,
-      label: METADATA_SCORE_GROUP_LABELS[g],
-      fields: map.get(g)!,
-    }))
+  return METADATA_SCORE_GROUPS.filter((g) => map.has(g)).map((g) => ({
+    group: g,
+    label: t(`settings.admin.scoreWeights.groups.${g}`),
+    fields: map.get(g)!,
+  }))
 })
 
 const missingCount = computed(() => groups.value.flatMap((g) => g.fields).filter((f) => !f.filled).length)
@@ -120,7 +126,7 @@ const missingCount = computed(() => groups.value.flatMap((g) => g.fields).filter
         <div v-for="entry in group.fields" :key="entry.field" class="flex items-center justify-between gap-2 text-sm">
           <div class="flex items-center gap-1.5 min-w-0">
             <Check v-if="entry.filled" class="size-3.5 text-green-500 shrink-0" />
-            <Minus v-else class="size-3.5 text-muted-foreground/70 shrink-0" />
+            <Minus v-else class="size-3.5 text-muted-foreground shrink-0" />
             <span :class="entry.filled ? 'text-foreground' : 'text-muted-foreground'">{{ entry.label }}</span>
           </div>
           <span class="text-xs text-muted-foreground shrink-0">{{ entry.weight }}</span>
@@ -129,7 +135,7 @@ const missingCount = computed(() => groups.value.flatMap((g) => g.fields).filter
     </div>
     <div v-if="missingCount > 0" class="pt-1 border-t border-border/50">
       <button type="button" class="text-xs text-primary hover:underline" @click="handleEditMetadata">
-        {{ t('metadataScore.missingFields', { count: missingCount }, missingCount) }}
+        {{ t('metadataScore.missingFields', { count: missingCount }) }}
       </button>
     </div>
   </div>

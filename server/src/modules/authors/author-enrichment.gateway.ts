@@ -1,8 +1,8 @@
-import { Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { ForbiddenException, Inject, Logger, UnauthorizedException } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
-import { Permission, type AuthorEnrichmentStatusEvent } from '@bookorbit/types';
+import { Permission, type AuthenticationMethod, type AuthorEnrichmentStatusEvent } from '@bookorbit/types';
 import { Server, Socket } from 'socket.io';
 
 import type { RequestUser } from '../../common/types/request-user';
@@ -11,6 +11,8 @@ import { AuthService } from '../auth/auth.service';
 import { AuthorEnrichmentRepository } from './author-enrichment.repository';
 import { AuthorEnrichmentSessionService } from './author-enrichment-session.service';
 import { AuthorEnrichmentConfigService } from './author-enrichment-config.service';
+import { rejectSocketConnection } from '../../common/utils/ws-auth.utils';
+import { appConfig } from '../../config/config';
 
 export const AUTHOR_ENRICHMENT_STATUS_EVENT = 'author-enrichment:status';
 
@@ -26,9 +28,9 @@ export class AuthorEnrichmentGateway implements OnGatewayInit, OnGatewayConnecti
     private readonly queueRepo: AuthorEnrichmentRepository,
     private readonly enrichmentConfig: AuthorEnrichmentConfigService,
     private readonly session: AuthorEnrichmentSessionService,
-    config: ConfigService,
+    @Inject(appConfig.KEY) app: ConfigType<typeof appConfig>,
   ) {
-    this.clientOrigin = config.get<string>('app.appUrl') ?? 'http://localhost:5173';
+    this.clientOrigin = app.appUrl;
   }
 
   afterInit(server: Server): void {
@@ -44,11 +46,13 @@ export class AuthorEnrichmentGateway implements OnGatewayInit, OnGatewayConnecti
     const event = 'author.enrichment.socket';
     try {
       const token = client.handshake.auth?.token as string | undefined;
-      if (!token) throw new Error('No token provided');
+      if (!token) throw new UnauthorizedException('No token provided');
 
-      const payload = this.jwtService.verify<{ sub: number; ver: number }>(token, { algorithms: ['HS256'] });
-      const user = await this.authService.validateUser(payload.sub, payload.ver);
-      if (!user) throw new Error('User not found or token revoked');
+      const payload = this.jwtService.verify<{ sub: number; ver: number; sid?: number; amr?: AuthenticationMethod }>(token, {
+        algorithms: ['HS256'],
+      });
+      const user = await this.authService.validateSessionUser(payload.sub, payload.ver, payload.amr ?? 'legacy', payload.sid);
+      if (!user) throw new UnauthorizedException('User not found or token revoked');
 
       this.assertCanViewStatus(user);
       this.logger.debug(`[${event}] [start] userId=${user.id} socketId=${client.id} - websocket connected`);
@@ -58,7 +62,7 @@ export class AuthorEnrichmentGateway implements OnGatewayInit, OnGatewayConnecti
       const errorClass = err instanceof Error ? err.name : 'Error';
       const message = sanitizeLogValue(err instanceof Error ? err.message : String(err));
       this.logger.warn(`[${event}] [fail] socketId=${client.id} errorClass=${errorClass} error="${message}" - websocket rejected`);
-      client.disconnect();
+      rejectSocketConnection(client, err);
     }
   }
 
@@ -74,6 +78,6 @@ export class AuthorEnrichmentGateway implements OnGatewayInit, OnGatewayConnecti
     if (user.isSuperuser) return;
     if (user.permissions.includes(Permission.ManageAppSettings)) return;
     if (user.permissions.includes(Permission.ManageMetadataConfig)) return;
-    throw new Error('Missing permission: manage_app_settings or manage_metadata_config');
+    throw new ForbiddenException('Missing permission: manage_app_settings or manage_metadata_config');
   }
 }

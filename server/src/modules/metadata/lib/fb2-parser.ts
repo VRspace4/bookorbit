@@ -1,6 +1,9 @@
 import { readFile } from 'fs/promises';
 import { XMLParser } from 'fast-xml-parser';
+import { parseSeriesIndex } from '@bookorbit/types';
 
+import { BOOKORBIT_NS_PREFIX } from '../../../common/bookorbit-ns';
+import { decodeFb2Document } from '../../../common/utils/fb2-encoding.utils';
 import { parsePublishedDateKey } from '../../../common/utils/published-date.utils';
 
 const parser = new XMLParser({
@@ -86,6 +89,27 @@ function parseFb2DateNode(val: unknown): string | null {
   return null;
 }
 
+/** Fields BookOrbit writes into <custom-info info-type="bookorbit:*">. */
+const CUSTOM_INFO_FIELDS = [
+  'subtitle',
+  'pageCount',
+  'rating',
+  'isbn10',
+  'googleBooksId',
+  'goodreadsId',
+  'amazonId',
+  'hardcoverId',
+  'hardcoverEditionId',
+  'openLibraryId',
+  'ranobedbId',
+  'koboId',
+  'lubimyczytacId',
+  'aladinId',
+  'itunesId',
+] as const;
+
+export type Fb2CustomInfoField = (typeof CUSTOM_INFO_FIELDS)[number];
+
 export interface Fb2Metadata {
   title: string | null;
   description: string | null;
@@ -93,14 +117,39 @@ export interface Fb2Metadata {
   publishedDate: string | null;
   publishedYear: number | null;
   seriesName: string | null;
-  seriesIndex: number | null;
+  seriesIndex: string | null;
   authors: { name: string; sortName: string | null }[];
   genres: string[];
+  tags: string[];
+  publisher: string | null;
+  isbn13: string | null;
+  custom: Partial<Record<Fb2CustomInfoField, string>>;
+}
+
+function parseCustomInfo(description: Record<string, unknown> | undefined): Partial<Record<Fb2CustomInfoField, string>> {
+  const custom: Partial<Record<Fb2CustomInfoField, string>> = {};
+  if (!description) return custom;
+
+  for (const entry of toArray(description['custom-info'])) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const infoType = text((entry as Record<string, unknown>)['@_info-type']);
+    if (!infoType?.startsWith(`${BOOKORBIT_NS_PREFIX}:`)) continue;
+
+    const field = infoType.slice(BOOKORBIT_NS_PREFIX.length + 1) as Fb2CustomInfoField;
+    if (!CUSTOM_INFO_FIELDS.includes(field)) continue;
+
+    const value = text(entry);
+    if (value) custom[field] = value;
+  }
+
+  return custom;
 }
 
 export async function parseFb2File(absolutePath: string): Promise<Fb2Metadata | null> {
   try {
-    const xml = await readFile(absolutePath, 'utf-8');
+    // FB2 is commonly published in windows-1251 or koi8-r, so honour the
+    // encoding declared in the file instead of assuming UTF-8.
+    const { text: xml } = decodeFb2Document(await readFile(absolutePath));
     const doc = parser.parse(xml) as Record<string, unknown>;
 
     const fb = (doc['FictionBook'] ?? doc['fictionbook']) as Record<string, unknown> | undefined;
@@ -139,24 +188,24 @@ export async function parseFb2File(absolutePath: string): Promise<Fb2Metadata | 
 
     // Series: <sequence name="..." number="..."/>
     let seriesName: string | null = null;
-    let seriesIndex: number | null = null;
+    let seriesIndex: string | null = null;
     const seqRaw = titleInfo['sequence'];
     if (seqRaw != null) {
       const seq = (Array.isArray(seqRaw) ? seqRaw[0] : seqRaw) as Record<string, unknown>;
       seriesName = text(seq['@_name']);
       const num = seq['@_number'];
       if (typeof num === 'string' || typeof num === 'number') {
-        const parsed = parseFloat(String(num));
-        if (!isNaN(parsed)) seriesIndex = parsed;
+        seriesIndex = parseSeriesIndex(String(num));
       }
     }
 
-    // Year from <publish-info> or <title-info>
-    let publishedYear: number | null = null;
+    // <publish-info> usually carries only a year, so a full date in
+    // <title-info> wins when it is available.
     const publishInfo = description?.['publish-info'] as Record<string, unknown> | undefined;
-    const yearRaw = publishInfo?.['year'] ?? titleInfo['date'];
-    const publishedDate = parseFb2DateNode(yearRaw);
-    publishedYear = parseFb2YearNode(yearRaw);
+    const titleInfoDate = titleInfo['date'];
+    const publishInfoYear = publishInfo?.['year'];
+    const publishedDate = parseFb2DateNode(titleInfoDate) ?? parseFb2DateNode(publishInfoYear);
+    const publishedYear = parseFb2YearNode(publishInfoYear) ?? parseFb2YearNode(titleInfoDate);
 
     // Annotation (description)
     let annotationDescription: string | null = null;
@@ -166,7 +215,29 @@ export async function parseFb2File(absolutePath: string): Promise<Fb2Metadata | 
       if (annotStr) annotationDescription = stripHtml(annotStr) || null;
     }
 
-    return { title, description: annotationDescription, language, publishedDate, publishedYear, seriesName, seriesIndex, authors, genres };
+    const keywords = text(titleInfo['keywords']);
+    const tags = keywords
+      ? keywords
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean)
+      : [];
+
+    return {
+      title,
+      description: annotationDescription,
+      language,
+      publishedDate,
+      publishedYear,
+      seriesName,
+      seriesIndex,
+      authors,
+      genres,
+      tags,
+      publisher: text(publishInfo?.['publisher']),
+      isbn13: text(publishInfo?.['isbn']),
+      custom: parseCustomInfo(description),
+    };
   } catch {
     return null;
   }

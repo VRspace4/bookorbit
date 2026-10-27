@@ -77,7 +77,7 @@ function handleChipAction(chip: string) {
         <div
           data-cell-activator="true"
           class="flex min-h-[28px] flex-wrap items-center gap-1 px-1 py-0.5"
-          :class="isReadOnly ? '' : 'cursor-pointer rounded hover:bg-primary/5'"
+          :class="isReadOnly ? '' : 'cursor-pointer rounded-xs hover:bg-primary/5'"
           :role="isReadOnly ? undefined : 'button'"
           :tabindex="isReadOnly ? -1 : 0"
         >
@@ -105,7 +105,7 @@ function handleChipAction(chip: string) {
             </template>
             <span v-if="value.length > 2" class="text-xs text-muted-foreground"> +{{ value.length - 2 }} </span>
           </template>
-          <span v-else class="text-xs text-muted-foreground/40">-</span>
+          <span v-else class="text-xs text-muted-foreground">-</span>
         </div>
       </PopoverTrigger>
       <PopoverContent

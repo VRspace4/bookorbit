@@ -1,8 +1,8 @@
-import { createWriteStream } from 'fs';
-import type { Readable } from 'stream';
+import { randomUUID } from 'crypto';
+import { dirname, join } from 'path';
 import * as unzipper from 'unzipper';
-import { ZipArchive, type Archiver } from 'archiver';
 import { replaceFileAtomically } from '../shared/atomic-file-replace';
+import { rewriteEpubZip } from './epub-zip-rewrite';
 
 export async function readEntry(filePath: string, entryPath: string): Promise<string> {
   const zip = await unzipper.Open.file(filePath);
@@ -11,44 +11,15 @@ export async function readEntry(filePath: string, entryPath: string): Promise<st
   return (await entry.buffer()).toString('utf-8');
 }
 
-export async function patch(filePath: string, patches: Map<string, Buffer>): Promise<void> {
-  const tmpPath = filePath + '.tmp';
+export async function listEntryPaths(filePath: string): Promise<string[]> {
   const zip = await unzipper.Open.file(filePath);
-  const archive = new ZipArchive({ zlib: { level: 6 } });
-  const output = createWriteStream(tmpPath);
-
-  await new Promise<void>((resolve, reject) => {
-    output.on('close', resolve);
-    output.on('error', reject);
-    archive.on('error', reject);
-    archive.pipe(output);
-
-    archive.append(Buffer.from('application/epub+zip'), { name: 'mimetype', store: true });
-
-    for (const entry of zip.files) {
-      if (entry.path === 'mimetype') continue;
-      const patched = patches.get(entry.path);
-      if (patched) {
-        archive.append(patched, { name: entry.path });
-      } else {
-        appendEntryStream(archive, entry, reject);
-      }
-    }
-
-    for (const [path, content] of patches) {
-      if (!zip.files.some((e) => e.path === path)) {
-        archive.append(content, { name: path });
-      }
-    }
-
-    void archive.finalize();
-  });
-
-  await replaceFileAtomically(tmpPath, filePath);
+  return zip.files.map((entry) => entry.path);
 }
 
-function appendEntryStream(archive: Archiver, entry: { path: string; stream: () => Readable }, reject: (error: Error) => void): void {
-  const source = entry.stream();
-  source.once('error', reject);
-  archive.append(source, { name: entry.path });
+export async function patch(filePath: string, patches: Map<string, Buffer>): Promise<void> {
+  // A hidden, random name like every other writer: appending ".tmp" overflowed long file names and
+  // would have overwritten a user's own file of that name.
+  const tmpPath = join(dirname(filePath), `.epub-write-${randomUUID()}`);
+  await rewriteEpubZip(filePath, tmpPath, patches);
+  await replaceFileAtomically(tmpPath, filePath);
 }

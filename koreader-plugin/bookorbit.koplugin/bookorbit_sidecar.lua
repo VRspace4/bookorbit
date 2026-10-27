@@ -7,6 +7,7 @@ the live in-memory annotation list and summary table instead of sidecar data
 matter which path uploaded them.
 ]]
 
+local BookOrbitCapabilities = require("bookorbit_capabilities")
 local DocSettings = require("docsettings")
 local BookList = require("ui/widget/booklist")
 local lfs = require("libs/libkoreader-lfs")
@@ -25,6 +26,63 @@ local ALLOWED_STATUSES = {
 }
 
 local BookOrbitSidecar = {}
+
+-- Written into a sidecar once it has been through a complete exchange. A sidecar
+-- without it is new to the server (a re-download, a deleted .sdr), and its empty
+-- key list must not read as "the reader deleted everything".
+BookOrbitSidecar.EXCHANGE_MARKER = "bookorbit_exchanged_at"
+
+function BookOrbitSidecar.isMarked(doc_settings)
+    if not doc_settings then return nil end
+    return doc_settings:readSetting(BookOrbitSidecar.EXCHANGE_MARKER) ~= nil
+end
+
+function BookOrbitSidecar.readMarked(file)
+    if not file or not DocSettings:hasSidecarFile(file) then return false end
+    return BookOrbitSidecar.isMarked(DocSettings:open(file))
+end
+
+-- The open book's settings are flushed by KOReader itself.
+function BookOrbitSidecar.markLive(doc_settings, now)
+    if not doc_settings or BookOrbitSidecar.isMarked(doc_settings) then return false end
+    doc_settings:saveSetting(BookOrbitSidecar.EXCHANGE_MARKER, now or os.time())
+    return true
+end
+
+function BookOrbitSidecar.markFile(file, now)
+    if not file or lfs.attributes(file, "mode") ~= "file" then return false end
+    local doc_settings = DocSettings:open(file)
+    if BookOrbitSidecar.isMarked(doc_settings) then return false end
+    doc_settings:saveSetting(BookOrbitSidecar.EXCHANGE_MARKER, now or os.time())
+    doc_settings:flush()
+    return true
+end
+
+-- What the exchange tells the server about this sidecar: "known" once marked,
+-- "new" when unmarked and holding no highlight or dogear at all, nil (let the
+-- server judge from its key set) when unmarked but holding entries, as every
+-- sidecar written before the marker existed does.
+function BookOrbitSidecar.sidecarState(marked, local_count)
+    if marked == nil then return nil end
+    if marked then return "known" end
+    if (local_count or 0) == 0 then return "new" end
+    return nil
+end
+
+BookOrbitSidecar.SIDECAR_CAPABILITY = "sidecarState"
+
+-- Only a server that advertises sidecarState accepts the field. An older one
+-- would read a new sidecar's empty key list as "everything was deleted", so
+-- there the list goes out as incomplete instead and nothing is deleted.
+function BookOrbitSidecar.resolveExchangeState(client, sidecar_state, keys_complete)
+    if sidecar_state == nil then return nil, keys_complete end
+    if client and client.getPluginVersion
+            and BookOrbitCapabilities.supports(client, BookOrbitSidecar.SIDECAR_CAPABILITY) == true then
+        return sidecar_state, keys_complete
+    end
+    if sidecar_state == "new" then return nil, false end
+    return nil, keys_complete
+end
 
 function BookOrbitSidecar.sidecarMtime(file)
     local sidecar_file = DocSettings:findSidecarFile(file)
@@ -59,15 +117,35 @@ local function serializePos(pos)
     end
     return nil
 end
+BookOrbitSidecar.serializePos = serializePos
 
--- Returns normalized annotations plus the max effective datetime; accepts the
--- raw sidecar list or the live ui.annotation.annotations array.
+-- Order-independent change signal for one normalized entry. Count plus max
+-- datetime cannot see a delete-plus-add that leaves both unchanged, so every
+-- entry contributes a hash of its identity fields. Positions can be kilobytes
+-- long, so only their length and both ends are sampled: this signal decides
+-- whether an unchanged book may skip an exchange, never what gets uploaded.
+-- The note is hashed whole because rewriting it leaves every timestamp alone.
+local function entryHash(entry)
+    local pos0 = entry.pos0 or ""
+    local key = entry.datetime .. "|" .. #pos0 .. "|" .. pos0:sub(1, 24) .. "|" .. pos0:sub(-24)
+        .. "|" .. (entry.datetimeUpdated or "") .. "|" .. (entry.note or "")
+    local hash = 5381
+    for index = 1, #key do
+        hash = (hash * 33 + key:byte(index)) % 4294967296
+    end
+    return hash
+end
+
+-- Returns normalized annotations, the max effective datetime and a signature
+-- that changes whenever the local set changes; accepts the raw sidecar list or
+-- the live ui.annotation.annotations array.
 function BookOrbitSidecar.normalizeAnnotations(raw)
     local annotations = {}
     local max_datetime = ""
+    local sum, mix = 0, 0
     for _, a in ipairs(raw or {}) do
         -- drawer == nil marks a position-only bookmark; those are skipped in v1.
-        if ALLOWED_DRAWERS[a.drawer] and isDeviceDatetime(a.datetime) then
+        if not a.bookorbit_pending_verification and ALLOWED_DRAWERS[a.drawer] and isDeviceDatetime(a.datetime) then
             local pos0, pos_format = serializePos(a.pos0)
             if pos0 then
                 local pos1 = serializePos(a.pos1)
@@ -89,10 +167,61 @@ function BookOrbitSidecar.normalizeAnnotations(raw)
                 if effective > max_datetime then
                     max_datetime = effective
                 end
+                local hash = entryHash(entry)
+                sum = (sum + hash) % 4294967296
+                mix = (mix + hash * (hash % 8191 + 1)) % 4294967296
             end
         end
     end
-    return annotations, max_datetime
+    return annotations, max_datetime,
+        string.format("%d:%s:%d:%d", #annotations, max_datetime, sum, mix)
+end
+
+-- Position-only bookmarks carry no text, so a rename is only visible in the
+-- fields themselves. KOReader also leaves datetime_updated untouched when the
+-- user edits a dogear note, which is why the note and chapter are hashed here
+-- and why the exchange uploads the whole set rather than a datetime delta.
+local function bookmarkHash(entry)
+    local pos = entry.pos or ""
+    local key = entry.datetime .. "|" .. #pos .. "|" .. pos:sub(1, 24) .. "|" .. pos:sub(-24)
+        .. "|" .. (entry.datetimeUpdated or "") .. "|" .. (entry.note or "") .. "|" .. (entry.chapter or "")
+    local hash = 5381
+    for index = 1, #key do
+        hash = (hash * 33 + key:byte(index)) % 4294967296
+    end
+    return hash
+end
+
+-- Returns normalized position-only bookmarks (dogears), the max effective
+-- datetime and a signature that changes whenever the local set changes.
+-- Paging documents store a page number instead of an xpointer; those are out of
+-- scope, so only string positions are kept.
+function BookOrbitSidecar.normalizeBookmarks(raw)
+    local bookmarks = {}
+    local max_datetime = ""
+    local sum, mix = 0, 0
+    for _, a in ipairs(raw or {}) do
+        if a.drawer == nil and isDeviceDatetime(a.datetime) and type(a.page) == "string" and a.page ~= "" then
+            local entry = {
+                datetime = a.datetime,
+                datetimeUpdated = isDeviceDatetime(a.datetime_updated) and a.datetime_updated or nil,
+                pos = truncate(a.page, 4000),
+                pageno = type(a.pageno) == "number" and math.floor(a.pageno) or nil,
+                chapter = truncate(a.chapter, 500),
+                note = truncate(a.note, 500),
+            }
+            table.insert(bookmarks, entry)
+            local effective = entry.datetimeUpdated or entry.datetime
+            if effective > max_datetime then
+                max_datetime = effective
+            end
+            local hash = bookmarkHash(entry)
+            sum = (sum + hash) % 4294967296
+            mix = (mix + hash * (hash % 8191 + 1)) % 4294967296
+        end
+    end
+    return bookmarks, max_datetime,
+        string.format("%d:%s:%d:%d", #bookmarks, max_datetime, sum, mix)
 end
 
 -- Validates a summary table (sidecar or live doc_settings reference) into a
@@ -126,11 +255,15 @@ end
 
 function BookOrbitSidecar.stateFromServerResult(result)
     if type(result) ~= "table" then return nil end
+    local has_status = result.statusSet == true and ALLOWED_STATUSES[result.status] == true
     local has_rating = type(result.ratingSet) == "boolean"
     local has_review = type(result.reviewNoteSet) == "boolean"
-    if not has_rating and not has_review then return nil end
+    if not has_status and not has_rating and not has_review then return nil end
 
     local state = {
+        status_known = has_status,
+        status = has_status and result.status or nil,
+        status_modified = has_status and dateKey(result.statusUpdatedAt) or nil,
         rating_known = has_rating,
         rating = has_rating and result.ratingSet and type(result.rating) == "number" and math.floor(result.rating) or nil,
         review_known = has_review,
@@ -142,6 +275,11 @@ end
 
 function BookOrbitSidecar.rememberServerState(book, state)
     if not book or not state then return end
+    if state.status_known then
+        book.statusSyncedKnown = true
+        book.statusSynced = state.status
+        book.statusSyncedModified = state.status_modified
+    end
     if state.rating_known then
         book.ratingSyncedKnown = true
         book.ratingSynced = state.rating
@@ -154,6 +292,11 @@ end
 
 function BookOrbitSidecar.rememberUploadedState(book, summary, payload)
     if not book or not payload then return end
+    if payload.status then
+        book.statusSyncedKnown = true
+        book.statusSynced = payload.status
+        book.statusSyncedModified = payload.statusModified
+    end
     if payload.rating ~= nil or payload.ratingCleared then
         book.ratingSyncedKnown = true
         book.ratingSynced = summary.rating
@@ -166,7 +309,8 @@ end
 
 function BookOrbitSidecar.buildStatePayload(hash, book, summary, force_pull)
     local status_changed = summary.status ~= nil
-        and (summary.status_modified or "") ~= (book.statusSyncedModified or "")
+        and (book.statusSyncedKnown ~= true
+            or summary.status ~= book.statusSynced)
 
     local rating_known = book.ratingSyncedKnown == true or book.ratingSynced ~= nil
     local rating_changed = false
@@ -212,10 +356,33 @@ function BookOrbitSidecar.buildStatePayload(hash, book, summary, force_pull)
     return payload, status_changed, rating_changed, review_changed
 end
 
+-- A forced pull is the only way the device learns a rating or review written
+-- on the web, but paying for it on every drained lifecycle entry is what made
+-- an unchanged book still cost a request. Bound it by age instead: manual sync
+-- and the sweep pull unconditionally, everything else once per interval.
+BookOrbitSidecar.STATE_PULL_MAX_AGE = 24 * 3600
+
+function BookOrbitSidecar.needsStatePull(book, now)
+    local pulled_at = book and book.statePulledAt
+    if type(pulled_at) ~= "number" then return true end
+    now = now or os.time()
+    if pulled_at > now then return true end
+    return (now - pulled_at) > BookOrbitSidecar.STATE_PULL_MAX_AGE
+end
+
+function BookOrbitSidecar.markStatePulled(book, now)
+    if not book then return end
+    book.statePulledAt = now or os.time()
+end
+
 local function applySummary(doc_settings, state)
     if not doc_settings or not state then return false end
     local summary = doc_settings:readSetting("summary") or {}
     local touched = false
+    if state.status_known and summary.status ~= state.status then
+        summary.status = state.status
+        touched = true
+    end
     if state.rating_known and summary.rating ~= state.rating then
         summary.rating = state.rating
         touched = true
@@ -225,7 +392,7 @@ local function applySummary(doc_settings, state)
         touched = true
     end
     if touched then
-        summary.modified = state.modified or os.date("%Y-%m-%d", os.time())
+        summary.modified = maxDateKey(state.status_modified, state.modified) or os.date("%Y-%m-%d", os.time())
         doc_settings:saveSetting("summary", summary)
     end
     return touched
@@ -234,8 +401,9 @@ end
 function BookOrbitSidecar.applyServerStateLive(ui, state)
     if not ui or not ui.doc_settings then return false end
     local touched = applySummary(ui.doc_settings, state)
-    if touched and ui.document and ui.document.file and state.rating_known then
-        BookList.setBookInfoCacheProperty(ui.document.file, "rating", state.rating)
+    if touched and ui.document and ui.document.file then
+        if state.status_known then BookList.setBookInfoCacheProperty(ui.document.file, "status", state.status) end
+        if state.rating_known then BookList.setBookInfoCacheProperty(ui.document.file, "rating", state.rating) end
     end
     return touched
 end
@@ -246,9 +414,8 @@ function BookOrbitSidecar.applyServerStateSidecar(file, state)
     local touched = applySummary(doc_settings, state)
     if touched then
         doc_settings:flush()
-        if state.rating_known then
-            BookList.setBookInfoCacheProperty(file, "rating", state.rating)
-        end
+        if state.status_known then BookList.setBookInfoCacheProperty(file, "status", state.status) end
+        if state.rating_known then BookList.setBookInfoCacheProperty(file, "rating", state.rating) end
     end
     return touched
 end
@@ -258,7 +425,9 @@ function BookOrbitSidecar.extract(file)
 
     local doc_settings = DocSettings:open(file)
     local summary = BookOrbitSidecar.normalizeSummary(doc_settings:readSetting("summary"))
-    local annotations, max_datetime = BookOrbitSidecar.normalizeAnnotations(doc_settings:readSetting("annotations"))
+    local raw_annotations = doc_settings:readSetting("annotations")
+    local annotations, max_datetime, signature = BookOrbitSidecar.normalizeAnnotations(raw_annotations)
+    local bookmarks, bm_max_datetime, bm_signature = BookOrbitSidecar.normalizeBookmarks(raw_annotations)
 
     local last_position = doc_settings:readSetting("last_xpointer")
     if not last_position then
@@ -279,6 +448,12 @@ function BookOrbitSidecar.extract(file)
         annotations = annotations,
         annotations_count = #annotations,
         annotations_max_datetime = max_datetime,
+        annotations_signature = signature,
+        bookmarks = bookmarks,
+        bookmarks_count = #bookmarks,
+        bookmarks_max_datetime = bm_max_datetime,
+        bookmarks_signature = bm_signature,
+        marked = BookOrbitSidecar.isMarked(doc_settings),
     }
 end
 

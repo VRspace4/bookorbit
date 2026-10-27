@@ -1,7 +1,7 @@
 import { MetadataProviderKey } from '@bookorbit/types';
 
 import { mapIssueToCandidate } from './comicvine.mapper';
-import type { ComicVineIssue } from './comicvine.types';
+import type { ComicVineIssue, ComicVineVolume } from './comicvine.types';
 
 function makeIssue(overrides: Partial<ComicVineIssue> = {}): ComicVineIssue {
   return {
@@ -20,6 +20,21 @@ function makeIssue(overrides: Partial<ComicVineIssue> = {}): ComicVineIssue {
     team_credits: [],
     story_arc_credits: [],
     location_credits: [],
+    ...overrides,
+  };
+}
+
+function makeVolume(overrides: Partial<ComicVineVolume> = {}): ComicVineVolume {
+  return {
+    id: 10,
+    name: 'Series Name',
+    start_year: '2024',
+    count_of_issues: 50,
+    description: null,
+    deck: null,
+    image: null,
+    publisher: { id: 20, name: 'Example Comics' },
+    site_detail_url: null,
     ...overrides,
   };
 }
@@ -51,13 +66,13 @@ describe('mapIssueToCandidate', () => {
       expect.objectContaining({
         provider: MetadataProviderKey.COMICVINE,
         providerId: '777',
-        title: 'Series Name #12.5 - The Origin',
-        subtitle: 'The Origin',
+        title: 'The Origin',
+        displayTitle: 'Series Name #12.5 - The Origin',
         authors: ['Writer A'],
         description: 'Fallback synopsis',
         publishedYear: 2024,
         seriesName: 'Series Name',
-        seriesIndex: 12.5,
+        seriesIndex: '12.5',
         coverUrl: 'https://example.com/cover.jpg',
         sourceUrl: 'https://comicvine.gamespot.com/issue',
       }),
@@ -79,6 +94,102 @@ describe('mapIssueToCandidate', () => {
     );
   });
 
+  it('never sets subtitle - comics have no ComicInfo.xml subtitle concept distinct from title', () => {
+    const withName = mapIssueToCandidate(makeIssue({ name: 'The Origin' }));
+    expect(withName.subtitle).toBeUndefined();
+
+    const withoutName = mapIssueToCandidate(makeIssue({ name: null }));
+    expect(withoutName.subtitle).toBeUndefined();
+  });
+
+  describe('series total books', () => {
+    it('takes the issue count from the volume the caller searched', () => {
+      const candidate = mapIssueToCandidate(makeIssue(), { volume: makeVolume({ count_of_issues: 50 }) });
+      expect(candidate.seriesTotalBooks).toBe(50);
+    });
+
+    it('stays undefined when no volume record was available, as on a general issue search', () => {
+      expect(mapIssueToCandidate(makeIssue()).seriesTotalBooks).toBeUndefined();
+      expect(mapIssueToCandidate(makeIssue(), {}).seriesTotalBooks).toBeUndefined();
+    });
+
+    it('rejects an out-of-range issue count', () => {
+      expect(mapIssueToCandidate(makeIssue(), { volume: makeVolume({ count_of_issues: 0 }) }).seriesTotalBooks).toBeUndefined();
+      expect(mapIssueToCandidate(makeIssue(), { volume: makeVolume({ count_of_issues: 10_001 }) }).seriesTotalBooks).toBeUndefined();
+    });
+  });
+
+  describe('publisher', () => {
+    it('maps and trims the publisher from the linked volume', () => {
+      const candidate = mapIssueToCandidate(makeIssue(), { volume: makeVolume({ publisher: { id: 20, name: '  DC Comics  ' } }) });
+
+      expect(candidate.publisher).toBe('DC Comics');
+    });
+
+    it('stays undefined when the linked volume has no usable publisher', () => {
+      expect(mapIssueToCandidate(makeIssue(), { volume: makeVolume({ publisher: null }) }).publisher).toBeUndefined();
+      expect(mapIssueToCandidate(makeIssue(), { volume: makeVolume({ publisher: { id: 20, name: '   ' } }) }).publisher).toBeUndefined();
+      expect(
+        mapIssueToCandidate(makeIssue(), {
+          volume: makeVolume({ publisher: { id: 20, name: null as unknown as string } }),
+        }).publisher,
+      ).toBeUndefined();
+    });
+
+    it('rejects publisher and issue count from a volume belonging to another run', () => {
+      const candidate = mapIssueToCandidate(makeIssue(), {
+        volume: makeVolume({ id: 999, publisher: { id: 20, name: 'Wrong Publisher' }, count_of_issues: 99 }),
+      });
+
+      expect(candidate.publisher).toBeUndefined();
+      expect(candidate.seriesTotalBooks).toBeUndefined();
+    });
+  });
+
+  describe('title', () => {
+    it('uses the issue name verbatim, not a series/issue-number concatenation', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: 'The Origin', volume: { id: 10, name: 'Series Name' }, issue_number: '12.5' }));
+      expect(candidate.title).toBe('The Origin');
+    });
+
+    it('stays unset when the issue has no name, leaving any existing title alone', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: null, volume: { id: 10, name: 'Series Name' }, issue_number: '7' }));
+      expect(candidate.title).toBeUndefined();
+    });
+
+    it('stays unset when the issue name is an empty string', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: '', volume: { id: 10, name: 'Series Name' }, issue_number: '7' }));
+      expect(candidate.title).toBeUndefined();
+    });
+
+    it('stays unset when the issue name is only whitespace', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: '   ', volume: { id: 10, name: 'Series Name' }, issue_number: '7' }));
+      expect(candidate.title).toBeUndefined();
+    });
+
+    it('trims surrounding whitespace from the issue name', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: '  The Origin  ' }));
+      expect(candidate.title).toBe('The Origin');
+    });
+  });
+
+  describe('displayTitle', () => {
+    it('concatenates series, issue number, and name when a name is present', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: 'The Origin', volume: { id: 10, name: 'Series Name' }, issue_number: '12.5' }));
+      expect(candidate.displayTitle).toBe('Series Name #12.5 - The Origin');
+    });
+
+    it('omits the name suffix when the issue has no name', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: null, volume: { id: 10, name: 'Series Name' }, issue_number: '7' }));
+      expect(candidate.displayTitle).toBe('Series Name #7');
+    });
+
+    it('omits the name suffix when the issue name is an empty string', () => {
+      const candidate = mapIssueToCandidate(makeIssue({ name: '', volume: { id: 10, name: 'Series Name' }, issue_number: '7' }));
+      expect(candidate.displayTitle).toBe('Series Name #7');
+    });
+  });
+
   it('uses store_date fallback and treats malformed years as unknown', () => {
     const fromStoreDate = mapIssueToCandidate(
       makeIssue({
@@ -96,7 +207,7 @@ describe('mapIssueToCandidate', () => {
         store_date: null,
       }),
     );
-    expect(malformedYear.title).toBe('Series Name #7');
+    expect(malformedYear.displayTitle).toBe('Series Name #7');
     expect(malformedYear.publishedYear).toBeUndefined();
   });
 

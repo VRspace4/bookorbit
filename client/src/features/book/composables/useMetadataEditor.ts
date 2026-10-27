@@ -1,5 +1,6 @@
 import { computed, reactive, ref } from 'vue'
 import { api } from '@/lib/api'
+import { readApiErrorDetail } from '@/lib/api-error'
 import {
   FORMAT_TO_GROUP,
   type BookCommunityRating,
@@ -12,7 +13,9 @@ import {
 
 export type EditableSeriesMembership = {
   seriesName: string
-  seriesIndex: number | null
+  seriesIndex: string | null
+  /** Series-level: saving it changes the total for every book in the series and every user. */
+  expectedBookCount: number | null
 }
 
 const ROOT_FIELDS = [
@@ -79,7 +82,7 @@ export function normalizeSeriesMemberships(values: readonly EditableSeriesMember
     const key = seriesName.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
-    out.push({ seriesName, seriesIndex: value.seriesIndex ?? null })
+    out.push({ seriesName, seriesIndex: value.seriesIndex ?? null, expectedBookCount: value.expectedBookCount ?? null })
   }
   return out
 }
@@ -87,9 +90,15 @@ export function normalizeSeriesMemberships(values: readonly EditableSeriesMember
 function seriesMembershipsFromBook(book: BookDetail): EditableSeriesMembership[] {
   const memberships = book.seriesMemberships ?? []
   if (memberships.length > 0) {
-    return normalizeSeriesMemberships(memberships.map((membership) => ({ seriesName: membership.seriesName, seriesIndex: membership.seriesIndex })))
+    return normalizeSeriesMemberships(
+      memberships.map((membership) => ({
+        seriesName: membership.seriesName,
+        seriesIndex: membership.seriesIndex,
+        expectedBookCount: membership.expectedBookCount ?? null,
+      })),
+    )
   }
-  return book.seriesName ? [{ seriesName: book.seriesName, seriesIndex: book.seriesIndex }] : []
+  return book.seriesName ? [{ seriesName: book.seriesName, seriesIndex: book.seriesIndex, expectedBookCount: null }] : []
 }
 
 function changedCustomMetadataPayload(
@@ -102,9 +111,21 @@ function changedCustomMetadataPayload(
     .map((field) => ({ fieldId: field.fieldId, value: field.value }))
 }
 
+/**
+ * A failed save, kept structured rather than pre-rendered: `detail` is the server's own English
+ * description of what it rejected, which no catalog can translate, while everything else has to
+ * resolve to a translated message in the component.
+ */
+export type MetadataSaveFailure = {
+  /** Server-supplied description, or null when the response carried none. */
+  detail: string | null
+  /** HTTP status, or null when the request failed before producing a response. */
+  status: number | null
+}
+
 export function useMetadataEditor() {
   const saving = ref(false)
-  const error = ref<string | null>(null)
+  const error = ref<MetadataSaveFailure | null>(null)
 
   const form = reactive({
     title: null as string | null,
@@ -117,7 +138,7 @@ export function useMetadataEditor() {
     pageCount: null as number | null,
     communityRatings: [] as BookCommunityRating[],
     seriesName: null as string | null,
-    seriesIndex: null as number | null,
+    seriesIndex: null as string | null,
     seriesMemberships: [] as EditableSeriesMembership[],
     isbn10: null as string | null,
     isbn13: null as string | null,
@@ -158,6 +179,7 @@ export function useMetadataEditor() {
 
   const snapshot = ref(JSON.stringify(form))
   const includeAudioMetadata = ref(false)
+  let loadedBookId: number | null = null
 
   const isDirty = computed(() => JSON.stringify(form) !== snapshot.value)
 
@@ -212,7 +234,14 @@ export function useMetadataEditor() {
     form.customMetadata = (book.customMetadata ?? []).map((field) => ({ ...field }))
     includeAudioMetadata.value = book.audioMetadata != null || book.files.some((f) => f.format != null && FORMAT_TO_GROUP[f.format] === 'audio')
     snapshot.value = JSON.stringify(form)
+    loadedBookId = book.id
     error.value = null
+  }
+
+  function syncFromBook(book: BookDetail): boolean {
+    if (loadedBookId === book.id && (saving.value || isDirty.value)) return false
+    load(book)
+    return true
   }
 
   function reset() {
@@ -285,23 +314,27 @@ export function useMetadataEditor() {
     error.value = null
     try {
       const metadata = buildPayload()
+      const submittedSnapshot = JSON.stringify(form)
       const shouldSyncFileWrite = Object.keys(metadata).length > 0
       const res = await api(`/api/v1/books/${bookId}/metadata-and-locks${shouldSyncFileWrite ? '?syncFileWrite=true' : ''}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ metadata, lockedFields }),
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        error.value = { detail: await readApiErrorDetail(res), status: res.status }
+        return null
+      }
       const updated = normalizeSaveResult((await res.json()) as BookDetail | BookMetadataSaveResult)
-      snapshot.value = JSON.stringify(form)
+      snapshot.value = submittedSnapshot
       return updated
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to save'
+    } catch {
+      error.value = { detail: null, status: null }
       return null
     } finally {
       saving.value = false
     }
   }
 
-  return { form, saving, error, isDirty, load, reset, save }
+  return { form, saving, error, isDirty, load, syncFromBook, reset, save }
 }

@@ -10,8 +10,7 @@ import router from './router'
 import { enableAuthFailureHandler } from './lib/api'
 import { i18n } from './i18n'
 import { useLocaleStore } from './stores/locale'
-import { useAuth } from './features/auth/composables/useAuth'
-import { useSetupStatus } from './features/auth/composables/useSetupStatus'
+import { bootstrapSession } from './features/auth/composables/useSessionBootstrap'
 import { initTtsMediaSession } from './features/reader/epub/tts/media-session'
 import { registerNativeBackButton } from './features/pwa/lib/native-back-button'
 
@@ -53,17 +52,7 @@ await localeStore.setLocale(localeStore.locale)
 
 // Resolve setup status/auth before installing router.
 // app.use(router) triggers initial navigation and guard execution.
-const { fetchSetupStatus, needsSetup } = useSetupStatus()
-try {
-  await fetchSetupStatus()
-} catch {
-  // If setup-status check fails, continue with normal auth bootstrap.
-}
-
-const { init } = useAuth()
-if (needsSetup.value !== true) {
-  await init()
-}
+await bootstrapSession()
 
 app.use(router)
 registerNativeBackButton(router)

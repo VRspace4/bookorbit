@@ -1,107 +1,155 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute, useRouter } from 'vue-router'
-import { UserPlus, Plus, Pencil, KeyRound, Trash2, ShieldCheck, MoreVertical, ShieldAlert, Save } from '@lucide/vue'
+import { Search, TriangleAlert, UserPlus, X } from '@lucide/vue'
+import { Permission, type DefaultLibraryAccessConfig, type UserListSortField, type UserListState } from '@bookorbit/types'
+
+import { Button } from '@/components/ui/button'
+import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import { api } from '@/lib/api'
-import { Permission, type AuthUser, type DefaultLibraryAccessConfig } from '@bookorbit/types'
+import { formatNumber } from '@/i18n/formatters'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
+import { useAuth } from '@/features/auth/composables/useAuth'
+import { useLoginOptions } from '@/features/auth/composables/useLoginOptions'
+import { useUsers, type UserRow } from './composables/useUsers'
+import { useSelfRegistration } from './composables/useSelfRegistration'
 import UserFormDrawer from './UserFormDrawer.vue'
 import ResetLinkModal from './ResetLinkModal.vue'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import SettingsPageHeader from '@/features/settings/SettingsPageHeader.vue'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
-import MagicLinksSettings from '@/features/settings/MagicLinksSettings.vue'
+import NewAccountDefaults from './components/NewAccountDefaults.vue'
+import UserAttentionBand from './components/UserAttentionBand.vue'
+import UserRosterCards from './components/UserRosterCards.vue'
+import UserRosterTable from './components/UserRosterTable.vue'
 
-const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
-
-type Tab = 'users' | 'magic-links'
-
-interface Library {
-  id: number
-  name: string
-}
-
-interface UserRow extends AuthUser {
-  id: number
-  hasContentFilters?: boolean
-}
+const HEADER_ACTIONS_TARGET = '#settings-header-actions'
 
 const { t } = useI18n()
-const route = useRoute()
-const router = useRouter()
 const { isSuperuser, hasPermission } = usePermissions()
+const { user: currentUser } = useAuth()
+const { loginOptions, fetchLoginOptions } = useLoginOptions()
+const passwordLoginEnabled = computed(() => loginOptions.value?.passwordLoginEnabled === true)
 
-const users = ref<UserRow[]>([])
-const libraries = ref<Library[]>([])
-const defaultLibraryIds = ref<Set<number>>(new Set())
-const savedDefaultLibraryIds = ref<Set<number>>(new Set())
-const total = ref(0)
-const page = ref(0)
-const loading = ref(false)
-const error = ref<string | null>(null)
-const defaultLibraryAccessError = ref<string | null>(null)
-const defaultLibraryAccessSaved = ref(false)
-const savingDefaultLibraryAccess = ref(false)
+const {
+  users,
+  libraries,
+  summary,
+  attention,
+  page,
+  totalPages,
+  total,
+  search,
+  state,
+  sortBy,
+  sortDir,
+  loading,
+  initialLoad,
+  error,
+  hasActiveFilters,
+  defaultLibraryIds,
+  defaultLibraryIdsArray,
+  hasDefaultLibraryChanges,
+  load,
+  loadStatic,
+  reload,
+  toggleSort,
+  setState,
+  resetFilters,
+  toggleDefaultLibrary,
+  markDefaultLibrariesSaved,
+} = useUsers()
 
 const drawerOpen = ref(false)
-const editingUser = ref<Partial<AuthUser> | null>(null)
+const editingUser = ref<UserRow | null>(null)
 const resetUrl = ref<string | null>(null)
 const deleteConfirmUser = ref<UserRow | null>(null)
+const superuserConfirm = ref<{ user: UserRow; isSuperuser: boolean } | null>(null)
 const deleting = ref(false)
+const changingSuperuser = ref(false)
+const superuserError = ref<string | null>(null)
+const actionError = ref<string | null>(null)
+const busyUserId = ref<number | null>(null)
+/**
+ * The header slot only exists when this page is mounted inside the settings shell. Falling
+ * back to rendering in place keeps the primary action reachable anywhere else, including tests.
+ */
+const headerSlotAvailable = ref(false)
 
-const magicLinksRef = ref<InstanceType<typeof MagicLinksSettings> | null>(null)
+const savingDefaultLibraryAccess = ref(false)
+const defaultLibraryAccessError = ref<string | null>(null)
+
 const canManageUserDefaults = computed(() => hasPermission(Permission.ManageUsers))
-const defaultLibraryIdsArray = computed(() => [...defaultLibraryIds.value])
-const hasDefaultLibraryChanges = computed(() => !setsEqual(defaultLibraryIds.value, savedDefaultLibraryIds.value))
+const canManageAppSettings = computed(() => hasPermission(Permission.ManageAppSettings))
+const showDefaults = computed(() => !initialLoad.value && !error.value && (canManageAppSettings.value || canManageUserDefaults.value))
 
-function normalizeTab(v: unknown): Tab {
-  if (v === 'magic-links' && isSuperuser.value) return 'magic-links'
-  return 'users'
-}
+const {
+  allowRegistration,
+  saving: savingSelfRegistration,
+  error: selfRegistrationError,
+  load: loadSelfRegistration,
+  setAllowRegistration,
+} = useSelfRegistration()
 
-const activeTab = ref<Tab>(normalizeTab(route.query.tab))
+const stateFilters = computed<{ value: UserListState | ''; label: string; count: number }[]>(() => [
+  { value: '', label: t('adminFeature.usersPage.filters.allUsers'), count: summary.value.total },
+  { value: 'admins', label: t('adminFeature.usersPage.filters.admins'), count: summary.value.admins },
+  { value: 'active', label: t('adminFeature.usersPage.filters.active'), count: summary.value.active },
+  { value: 'inactive', label: t('adminFeature.usersPage.filters.inactive'), count: summary.value.inactive },
+])
 
-watch(
-  () => route.query.tab,
-  (v) => {
-    activeTab.value = normalizeTab(v)
-  },
+const pageSubtitle = computed(() =>
+  t('adminFeature.usersPage.headerSummary', {
+    accounts: formatNumber(summary.value.total),
+    admins: formatNumber(summary.value.admins),
+    count: summary.value.total,
+  }),
 )
 
-function selectTab(tab: Tab) {
-  activeTab.value = tab
-  router.replace({ name: 'settings-admin-users', query: { tab } })
+const superuserDialogTitle = computed(() =>
+  superuserConfirm.value?.isSuperuser
+    ? t('adminFeature.userForm.superuserAccess.promoteDialogTitle')
+    : t('adminFeature.userForm.superuserAccess.demoteDialogTitle'),
+)
+const superuserDialogDescription = computed(() => {
+  const pending = superuserConfirm.value
+  if (!pending) return ''
+  return pending.isSuperuser
+    ? t('adminFeature.userForm.superuserAccess.promoteDialogBody', { name: pending.user.name })
+    : t('adminFeature.userForm.superuserAccess.demoteDialogBody', { name: pending.user.name })
+})
+const superuserConfirmLabel = computed(() => {
+  if (changingSuperuser.value) return t('adminFeature.userForm.superuserAccess.changing')
+  return superuserConfirm.value?.isSuperuser ? t('adminFeature.userForm.superuserAccess.promote') : t('adminFeature.userForm.superuserAccess.demote')
+})
+
+onMounted(async () => {
+  headerSlotAvailable.value = document.getElementById(HEADER_ACTIONS_TARGET.slice(1)) !== null
+  await Promise.all([reload(), loadStatic(), fetchLoginOptions().catch(() => undefined)])
+  if (canManageAppSettings.value) await loadSelfRegistration()
+})
+
+function clearSearch() {
+  search.value = ''
 }
 
-async function loadData() {
-  loading.value = true
-  error.value = null
-  defaultLibraryAccessError.value = null
-  try {
-    const [usersRes, libsRes, defaultAccessRes] = await Promise.all([
-      api(`/api/v1/users?page=${page.value}&pageSize=50`),
-      api('/api/v1/libraries'),
-      api('/api/v1/app-settings/default-library-access'),
-    ])
-    if (!usersRes.ok || !libsRes.ok || !defaultAccessRes.ok) throw new Error(t('adminFeature.usersPage.errors.loadData'))
-    const ud = await usersRes.json()
-    users.value = ud.users ?? ud.items ?? ud
-    total.value = ud.total ?? users.value.length
-    const libData = await libsRes.json()
-    libraries.value = libData.libraries ?? libData.items ?? libData
-    const defaultAccess = (await defaultAccessRes.json()) as DefaultLibraryAccessConfig
-    setDefaultLibrarySelection(defaultAccess.libraryIds ?? [])
-    savedDefaultLibraryIds.value = new Set(defaultAccess.libraryIds ?? [])
-    defaultLibraryAccessSaved.value = false
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : t('adminFeature.usersPage.errors.load')
-  } finally {
-    loading.value = false
-  }
+function clearFilters() {
+  resetFilters()
+  void load()
 }
 
-onMounted(loadData)
+function showAttentionOnly() {
+  setState(state.value === 'attention' ? '' : 'attention')
+}
+
+function previousPage() {
+  if (page.value <= 1) return
+  page.value--
+  void load()
+}
+
+function nextPage() {
+  if (page.value >= totalPages.value) return
+  page.value++
+  void load()
+}
 
 function openCreate() {
   editingUser.value = null
@@ -113,15 +161,139 @@ function openEdit(user: UserRow) {
   drawerOpen.value = true
 }
 
+function openById(userId: number) {
+  const match = users.value.find((user) => user.id === userId)
+  if (match) openEdit(match)
+}
+
+const canDeleteEditingUser = computed(() => !!editingUser.value && canManage(editingUser.value))
+
+/** Deleting from inside the editor closes it first: the confirm is the page's, and so is the list. */
+function handleDrawerDelete() {
+  const user = editingUser.value
+  if (!user) return
+  drawerOpen.value = false
+  requestDeleteUser(user)
+}
+
+function closeDrawer() {
+  drawerOpen.value = false
+}
+
+function clearResetUrl() {
+  resetUrl.value = null
+}
+
+function canManage(user: UserRow): boolean {
+  return isSuperuser.value || !user.isSuperuser
+}
+
+function isPasswordResettable(user: UserRow): boolean {
+  return passwordLoginEnabled.value && user.provisioningMethod !== 'oidc' && user.provisioningMethod !== 'shared'
+}
+
+function isLocked(user: UserRow): boolean {
+  return Boolean(user.lockedUntil && new Date(user.lockedUntil).getTime() > Date.now())
+}
+
+/** Mirrors the server's attention predicate so the row marker agrees with the band. */
+function needsAttention(user: UserRow): boolean {
+  if (!user.active) return false
+  return isLocked(user) || user.lastAuthenticatedAt === null || user.isDefaultPassword
+}
+
+async function handleUnlock(userId: number) {
+  actionError.value = null
+  busyUserId.value = userId
+  try {
+    const res = await api(`/api/v1/users/${userId}/unlock`, { method: 'POST' })
+    if (!res.ok) {
+      actionError.value = t('adminFeature.usersPage.errors.unlock')
+      return
+    }
+    await reload()
+  } finally {
+    busyUserId.value = null
+  }
+}
+
 async function handleResetPassword(userId: number) {
-  const res = await api(`/api/v1/users/${userId}/reset-password`, { method: 'POST' })
-  if (!res.ok) return
-  const data = await res.json()
-  resetUrl.value = data.resetUrl
+  actionError.value = null
+  busyUserId.value = userId
+  try {
+    const res = await api(`/api/v1/users/${userId}/reset-password`, { method: 'POST' })
+    if (!res.ok) {
+      actionError.value = t('adminFeature.usersPage.errors.resetPassword')
+      return
+    }
+    const data = await res.json()
+    resetUrl.value = data.resetUrl
+    await reload()
+  } finally {
+    busyUserId.value = null
+  }
+}
+
+function unlockUser(user: UserRow) {
+  void handleUnlock(user.id)
+}
+
+function resetUserPassword(user: UserRow) {
+  void handleResetPassword(user.id)
 }
 
 function requestDeleteUser(user: UserRow) {
+  actionError.value = null
   deleteConfirmUser.value = user
+}
+
+function cancelDeleteUser() {
+  deleteConfirmUser.value = null
+}
+
+function requestSuperuserChange(nextIsSuperuser: boolean) {
+  if (
+    !isSuperuser.value ||
+    currentUser.value?.id === undefined ||
+    !editingUser.value?.id ||
+    editingUser.value.id === currentUser.value?.id ||
+    editingUser.value.provisioningMethod === 'shared'
+  ) {
+    return
+  }
+  superuserError.value = null
+  superuserConfirm.value = { user: editingUser.value as UserRow, isSuperuser: nextIsSuperuser }
+}
+
+function cancelSuperuserChange() {
+  if (changingSuperuser.value) return
+  superuserConfirm.value = null
+  superuserError.value = null
+}
+
+async function confirmSuperuserChange() {
+  const pending = superuserConfirm.value
+  if (!pending || changingSuperuser.value) return
+  changingSuperuser.value = true
+  superuserError.value = null
+  try {
+    const res = await api(`/api/v1/users/${pending.user.id}/superuser`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isSuperuser: pending.isSuperuser }),
+    })
+    if (!res.ok) {
+      superuserError.value = t('adminFeature.userForm.superuserAccess.changeError')
+      return
+    }
+    superuserConfirm.value = null
+    drawerOpen.value = false
+    await reload()
+  } catch {
+    superuserError.value = t('adminFeature.userForm.superuserAccess.changeError')
+  } finally {
+    changingSuperuser.value = false
+  }
 }
 
 async function confirmDeleteUser() {
@@ -132,48 +304,41 @@ async function confirmDeleteUser() {
     const res = await api(`/api/v1/users/${user.id}`, { method: 'DELETE' })
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
-      error.value = data.message ?? t('adminFeature.usersPage.errors.deleteUser')
+      actionError.value = data.message ?? t('adminFeature.usersPage.errors.deleteUser')
       return
     }
     deleteConfirmUser.value = null
-    loadData()
+    await reload()
   } catch {
-    error.value = t('adminFeature.usersPage.errors.deleteUser')
+    actionError.value = t('adminFeature.usersPage.errors.deleteUser')
   } finally {
     deleting.value = false
   }
 }
 
-function onSaved(newResetUrl?: string) {
+async function onSaved(newResetUrl?: string) {
   drawerOpen.value = false
   if (newResetUrl) resetUrl.value = newResetUrl
-  loadData()
+  await reload()
 }
 
-function openMagicLinkCreate() {
-  magicLinksRef.value?.openCreateForm()
+async function toggleSelfRegistration() {
+  if (savingSelfRegistration.value) return
+  await setAllowRegistration(!allowRegistration.value)
 }
 
-function setDefaultLibrarySelection(libraryIds: number[]) {
-  defaultLibraryIds.value = new Set(libraryIds)
+function handleSort(field: UserListSortField) {
+  toggleSort(field)
 }
 
-function toggleDefaultLibrary(libraryId: number) {
-  const next = new Set(defaultLibraryIds.value)
-  if (next.has(libraryId)) {
-    next.delete(libraryId)
-  } else {
-    next.add(libraryId)
-  }
-  defaultLibraryIds.value = next
-  defaultLibraryAccessSaved.value = false
+function selectState(value: UserListState | '') {
+  setState(value)
 }
 
 async function saveDefaultLibraryAccess() {
   if (savingDefaultLibraryAccess.value) return
   savingDefaultLibraryAccess.value = true
   defaultLibraryAccessError.value = null
-  defaultLibraryAccessSaved.value = false
   try {
     const res = await api('/api/v1/app-settings/default-library-access', {
       method: 'PUT',
@@ -186,360 +351,212 @@ async function saveDefaultLibraryAccess() {
       return
     }
     const saved = (await res.json()) as DefaultLibraryAccessConfig
-    setDefaultLibrarySelection(saved.libraryIds ?? [])
-    savedDefaultLibraryIds.value = new Set(saved.libraryIds ?? [])
-    defaultLibraryAccessSaved.value = true
-  } catch (e) {
-    defaultLibraryAccessError.value = e instanceof Error ? e.message : t('adminFeature.usersPage.defaultLibraryAccess.saveError')
+    markDefaultLibrariesSaved(saved.libraryIds ?? [])
+  } catch {
+    defaultLibraryAccessError.value = t('adminFeature.usersPage.defaultLibraryAccess.saveError')
   } finally {
     savingDefaultLibraryAccess.value = false
   }
 }
-
-function setsEqual(a: Set<number>, b: Set<number>) {
-  if (a.size !== b.size) return false
-  for (const value of a) {
-    if (!b.has(value)) return false
-  }
-  return true
-}
 </script>
 
 <template>
-  <!-- Desktop header -->
-  <SettingsPageHeader
-    v-if="!props.embedded"
-    class="hidden md:flex"
-    :title="activeTab === 'users' ? t('adminFeature.usersPage.usersTitle') : t('adminFeature.usersPage.magicLinksTitle')"
-    :subtitle="activeTab === 'users' ? t('adminFeature.usersPage.usersSubtitle') : t('adminFeature.usersPage.magicLinksSubtitle')"
-  >
-    <button v-if="activeTab === 'users'" class="settings-btn-primary" @click="openCreate">
-      <UserPlus :size="14" />
-      {{ t('adminFeature.usersPage.createUser') }}
-    </button>
-    <button v-else class="settings-btn-primary" @click="openMagicLinkCreate">
-      <Plus :size="14" />
-      {{ t('adminFeature.usersPage.createLink') }}
-    </button>
-  </SettingsPageHeader>
+  <div class="space-y-4">
+    <Teleport :to="HEADER_ACTIONS_TARGET" defer :disabled="!headerSlotAvailable">
+      <p class="hidden text-sm text-muted-foreground lg:block">{{ pageSubtitle }}</p>
+      <Button size="sm" type="button" @click="openCreate">
+        <UserPlus :size="14" aria-hidden="true" />
+        {{ passwordLoginEnabled ? t('adminFeature.usersPage.createUser') : t('adminFeature.userForm.createSharedAccount') }}
+      </Button>
+    </Teleport>
 
-  <!-- Mobile title -->
-  <div v-if="!props.embedded" class="md:hidden px-1">
-    <h1 class="text-xl font-semibold tracking-tight text-foreground">
-      {{ activeTab === 'users' ? t('adminFeature.usersPage.usersTitle') : t('adminFeature.usersPage.magicLinksTitle') }}
-    </h1>
-    <p
-      class="mt-1 text-sm text-muted-foreground leading-5 overflow-hidden text-ellipsis [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]"
-    >
-      {{ activeTab === 'users' ? t('adminFeature.usersPage.usersSubtitle') : t('adminFeature.usersPage.magicLinksSubtitle') }}
-    </p>
-  </div>
+    <p v-if="error" role="alert" class="settings-error-state">{{ t('adminFeature.usersPage.errors.load') }}</p>
 
-  <!-- Tab bar (superusers only) -->
-  <div
-    v-if="isSuperuser && !props.embedded"
-    class="flex gap-1 mt-1 mb-5 md:mb-6 border-b border-border overflow-x-auto md:overflow-visible md:static sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 snap-x"
-  >
-    <button
-      class="px-3 py-3 md:py-2 text-sm font-medium shrink-0 border-b-2 -mb-px transition-colors snap-start"
-      :class="
-        activeTab === 'users'
-          ? 'border-primary text-foreground'
-          : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-      "
-      @click="selectTab('users')"
-    >
-      {{ t('adminFeature.usersPage.usersTab') }}
-    </button>
-    <button
-      class="px-3 py-3 md:py-2 text-sm font-medium shrink-0 border-b-2 -mb-px transition-colors snap-start"
-      :class="
-        activeTab === 'magic-links'
-          ? 'border-primary text-foreground'
-          : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-      "
-      @click="selectTab('magic-links')"
-    >
-      {{ t('adminFeature.usersPage.magicLinksTab') }}
-    </button>
-  </div>
+    <template v-else>
+      <UserAttentionBand
+        v-if="attention.length > 0"
+        :items="attention"
+        :total="summary.attention"
+        :busy-user-id="busyUserId"
+        :password-login-enabled="passwordLoginEnabled"
+        @unlock="handleUnlock"
+        @send-reset-link="handleResetPassword"
+        @open="openById"
+      />
 
-  <!-- Mobile CTA (when no tab bar is shown, keep the sticky button) -->
-  <div
-    v-if="!isSuperuser && !props.embedded"
-    class="md:hidden sticky top-0 z-20 border border-border/60 bg-card/95 backdrop-blur rounded-lg px-3 py-2 mt-4 mb-3"
-  >
-    <button class="settings-btn-primary w-full min-h-10 justify-center" @click="openCreate">
-      <UserPlus :size="14" />
-      {{ t('adminFeature.usersPage.createUser') }}
-    </button>
-  </div>
+      <p v-if="actionError" role="alert" class="settings-error-state">{{ actionError }}</p>
 
-  <!-- Users tab content -->
-  <template v-if="activeTab === 'users'">
-    <div v-if="error" class="mb-4 text-sm text-destructive">{{ error }}</div>
-    <div v-if="loading" class="text-sm text-muted-foreground">{{ t('common.loading') }}</div>
-
-    <section v-else class="space-y-3">
-      <div class="flex items-center justify-between mb-3">
-        <p class="settings-group-label mb-0">{{ t('adminFeature.usersPage.currentUsers') }}</p>
-        <button v-if="props.embedded" class="settings-btn-primary" @click="openCreate">
-          <UserPlus :size="14" />
-          {{ t('adminFeature.usersPage.createUser') }}
-        </button>
-      </div>
-
-      <div class="space-y-3">
-        <div class="hidden md:block rounded-lg border border-border overflow-hidden shadow-xs">
-          <table class="w-full text-sm">
-            <thead class="bg-muted/50">
-              <tr>
-                <th class="px-4 py-3 text-left font-medium text-muted-foreground">{{ t('adminFeature.usersPage.columns.name') }}</th>
-                <th class="px-4 py-3 text-left font-medium text-muted-foreground">{{ t('adminFeature.usersPage.columns.username') }}</th>
-                <th class="px-4 py-3 text-left font-medium text-muted-foreground hidden sm:table-cell">
-                  {{ t('adminFeature.usersPage.columns.email') }}
-                </th>
-                <th class="px-4 py-3 text-left font-medium text-muted-foreground">{{ t('adminFeature.usersPage.columns.access') }}</th>
-                <th class="px-4 py-3 text-left font-medium text-muted-foreground">{{ t('adminFeature.usersPage.columns.status') }}</th>
-                <th class="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-border">
-              <tr v-for="user in users" :key="user.id" class="hover:bg-muted/30 transition-colors">
-                <td class="px-4 py-3 text-foreground font-medium">{{ user.name }}</td>
-                <td class="px-4 py-3 text-muted-foreground font-mono text-xs">{{ user.username }}</td>
-                <td class="px-4 py-3 text-muted-foreground hidden sm:table-cell">{{ user.email ?? '-' }}</td>
-                <td class="px-4 py-3">
-                  <div class="flex items-center gap-1.5 flex-wrap">
-                    <span
-                      v-if="user.isSuperuser"
-                      class="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary"
-                    >
-                      <ShieldCheck :size="11" />
-                      {{ t('adminFeature.usersPage.adminBadge') }}
-                    </span>
-                    <span v-else class="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                      {{ t('adminFeature.usersPage.permissionCount', { count: user.permissions?.length ?? 0 }, user.permissions?.length ?? 0) }}
-                    </span>
-                    <Tooltip v-if="user.hasContentFilters">
-                      <TooltipTrigger as-child>
-                        <span
-                          class="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
-                        >
-                          <ShieldAlert :size="11" />
-                          {{ t('adminFeature.usersPage.filteredBadge') }}
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>{{ t('adminFeature.usersPage.contentRestrictionsActive') }}</TooltipContent>
-                    </Tooltip>
-                  </div>
-                </td>
-                <td class="px-4 py-3">
-                  <span
-                    class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
-                    :class="user.active ? 'bg-green-500/15 text-green-600 dark:text-green-400' : 'bg-destructive/15 text-destructive'"
-                  >
-                    {{ user.active ? t('adminFeature.usersPage.statusActive') : t('adminFeature.usersPage.statusInactive') }}
-                  </span>
-                </td>
-                <td class="px-4 py-3">
-                  <div class="flex items-center gap-2 justify-end">
-                    <template v-if="isSuperuser || !user.isSuperuser">
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <button
-                            class="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                            @click="openEdit(user)"
-                          >
-                            <Pencil :size="14" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>{{ t('common.edit') }}</TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <button
-                            :disabled="user.provisioningMethod === 'oidc' || user.provisioningMethod === 'shared'"
-                            class="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                            :class="
-                              user.provisioningMethod === 'oidc' || user.provisioningMethod === 'shared'
-                                ? 'cursor-not-allowed opacity-50 hover:text-muted-foreground hover:bg-transparent'
-                                : ''
-                            "
-                            @click="handleResetPassword(user.id)"
-                          >
-                            <KeyRound :size="14" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {{
-                            user.provisioningMethod === 'oidc'
-                              ? t('adminFeature.usersPage.resetPasswordOidcHint')
-                              : user.provisioningMethod === 'shared'
-                                ? t('adminFeature.usersPage.resetPasswordSharedHint')
-                                : t('adminFeature.usersPage.resetPassword')
-                          }}
-                        </TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger as-child>
-                          <button
-                            class="p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                            @click="requestDeleteUser(user)"
-                          >
-                            <Trash2 :size="14" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>{{ t('common.delete') }}</TooltipContent>
-                      </Tooltip>
-                    </template>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <div class="md:hidden space-y-3">
-          <div v-for="user in users" :key="user.id" class="rounded-lg border border-border bg-card px-4 py-3.5 shadow-xs">
-            <div class="flex items-start justify-between gap-3">
-              <p class="text-sm font-medium text-foreground leading-5">{{ user.name }}</p>
-              <span
-                class="shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
-                :class="user.active ? 'bg-green-500/15 text-green-600 dark:text-green-400' : 'bg-destructive/15 text-destructive'"
-              >
-                {{ user.active ? t('adminFeature.usersPage.statusActive') : t('adminFeature.usersPage.statusInactive') }}
-              </span>
-            </div>
-            <div class="mt-2 flex items-center justify-between gap-3">
-              <p class="text-xs font-mono text-muted-foreground truncate">@{{ user.username }}</p>
-              <span
-                v-if="user.isSuperuser"
-                class="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-xs font-medium text-primary"
-              >
-                <ShieldCheck :size="11" />
-                {{ t('adminFeature.usersPage.adminBadge') }}
-              </span>
-              <span v-else class="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                {{ t('adminFeature.usersPage.permissionCount', { count: user.permissions?.length ?? 0 }, user.permissions?.length ?? 0) }}
-              </span>
-            </div>
-            <div v-if="isSuperuser || !user.isSuperuser" class="mt-3 flex items-center gap-2">
-              <button
-                class="rounded-md border border-border px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors"
-                @click="openEdit(user)"
-              >
-                {{ t('common.edit') }}
-              </button>
-              <DropdownMenu>
-                <DropdownMenuTrigger as-child>
-                  <button class="rounded-md border border-border p-2 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
-                    <MoreVertical :size="16" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" class="w-56">
-                  <DropdownMenuItem
-                    :disabled="user.provisioningMethod === 'oidc' || user.provisioningMethod === 'shared'"
-                    @click="handleResetPassword(user.id)"
-                    >{{ t('adminFeature.usersPage.resetPassword') }}</DropdownMenuItem
-                  >
-                  <DropdownMenuItem class="text-destructive focus:text-destructive" @click="requestDeleteUser(user)">{{
-                    t('adminFeature.usersPage.deleteUserAction')
-                  }}</DropdownMenuItem>
-                  <DropdownMenuSeparator v-if="user.provisioningMethod === 'oidc' || user.provisioningMethod === 'shared'" />
-                  <p v-if="user.provisioningMethod === 'oidc'" class="px-2 py-1.5 text-[11px] leading-4 text-muted-foreground">
-                    {{ t('adminFeature.usersPage.resetPasswordOidcHintFull') }}
-                  </p>
-                  <p v-else-if="user.provisioningMethod === 'shared'" class="px-2 py-1.5 text-[11px] leading-4 text-muted-foreground">
-                    {{ t('adminFeature.usersPage.resetPasswordSharedHintFull') }}
-                  </p>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section v-if="!loading && !error && canManageUserDefaults" class="mt-10 space-y-3">
-      <div>
-        <p class="settings-group-label mb-1">{{ t('adminFeature.usersPage.defaultLibraryAccess.title') }}</p>
-        <p class="text-sm text-muted-foreground">{{ t('adminFeature.usersPage.defaultLibraryAccess.subtitle') }}</p>
-      </div>
-      <div class="rounded-lg border border-border bg-card p-4 shadow-xs">
-        <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <p class="text-sm text-muted-foreground">{{ t('adminFeature.usersPage.defaultLibraryAccess.description') }}</p>
+      <div class="flex flex-col gap-2 lg:flex-row lg:items-center">
+        <label class="relative block min-w-0 flex-1 lg:order-1">
+          <span class="sr-only">{{ t('adminFeature.usersPage.filters.search') }}</span>
+          <Search :size="15" class="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <input
+            v-model="search"
+            type="search"
+            class="input-field h-9 w-full ps-9 pe-9"
+            :placeholder="t('adminFeature.usersPage.filters.searchPlaceholder')"
+          />
           <button
+            v-if="search"
             type="button"
-            class="settings-btn-outline justify-center md:justify-start"
-            :disabled="savingDefaultLibraryAccess || !hasDefaultLibraryChanges"
-            @click="saveDefaultLibraryAccess"
+            class="absolute end-2 top-1/2 -translate-y-1/2 rounded-sm p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :aria-label="t('adminFeature.usersPage.filters.clear')"
+            @click="clearSearch"
           >
-            <Save :size="14" />
-            {{
-              savingDefaultLibraryAccess
-                ? t('adminFeature.usersPage.defaultLibraryAccess.saving')
-                : t('adminFeature.usersPage.defaultLibraryAccess.save')
-            }}
+            <X :size="14" aria-hidden="true" />
           </button>
+        </label>
+
+        <div class="flex min-w-0 items-center gap-2 lg:order-2 lg:shrink-0">
+          <div
+            role="group"
+            :aria-label="t('adminFeature.usersPage.filters.state')"
+            class="flex min-w-0 gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted p-0.5"
+          >
+            <button
+              v-for="filter in stateFilters"
+              :key="filter.value || 'all'"
+              type="button"
+              class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :class="state === filter.value ? 'bg-card text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+              :aria-pressed="state === filter.value"
+              @click="selectState(filter.value)"
+            >
+              {{ filter.label }}
+              <span
+                class="rounded-xs px-1 text-xs tabular-nums"
+                :class="state === filter.value ? 'bg-primary/15 text-primary' : 'bg-foreground/8 text-muted-foreground'"
+              >
+                {{ formatNumber(filter.count) }}
+              </span>
+            </button>
+          </div>
+
+          <Button
+            v-if="summary.attention > 0"
+            variant="outline"
+            size="sm"
+            type="button"
+            class="h-9 shrink-0 border-[var(--pill-warning)]/40 text-[var(--pill-warning)] hover:text-[var(--pill-warning)]"
+            :aria-pressed="state === 'attention'"
+            :aria-label="t('adminFeature.usersPage.attention.filter', { count: summary.attention })"
+            @click="showAttentionOnly"
+          >
+            <TriangleAlert :size="14" aria-hidden="true" />
+            <span class="sm:hidden">{{ formatNumber(summary.attention) }}</span>
+            <span class="hidden sm:inline">{{ t('adminFeature.usersPage.attention.filter', { count: summary.attention }) }}</span>
+          </Button>
         </div>
-        <div v-if="libraries.length > 0" class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          <label v-for="lib in libraries" :key="lib.id" class="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2">
-            <input
-              type="checkbox"
-              :checked="defaultLibraryIds.has(lib.id)"
-              class="h-4 w-4 rounded border-input"
-              @change="toggleDefaultLibrary(lib.id)"
-            />
-            <span class="min-w-0 truncate text-sm text-foreground">{{ lib.name }}</span>
-          </label>
-        </div>
-        <p v-else class="mt-3 text-sm text-muted-foreground">{{ t('adminFeature.usersPage.defaultLibraryAccess.noLibraries') }}</p>
-        <p v-if="defaultLibraryAccessError" class="mt-3 text-sm text-destructive">{{ defaultLibraryAccessError }}</p>
-        <p v-else-if="defaultLibraryAccessSaved" class="mt-3 text-sm text-muted-foreground">
-          {{ t('adminFeature.usersPage.defaultLibraryAccess.saved') }}
-        </p>
       </div>
-    </section>
+
+      <p v-if="initialLoad" role="status" class="settings-loading-state">{{ t('common.loading') }}</p>
+
+      <div v-else-if="users.length === 0" class="settings-empty-state">
+        <p class="text-sm font-medium text-foreground">{{ t('adminFeature.usersPage.empty.title') }}</p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ hasActiveFilters ? t('adminFeature.usersPage.empty.filtered') : t('adminFeature.usersPage.empty.description') }}
+        </p>
+        <Button v-if="hasActiveFilters" variant="outline" size="sm" type="button" class="mt-3" @click="clearFilters">
+          {{ t('adminFeature.usersPage.filters.clear') }}
+        </Button>
+      </div>
+
+      <template v-else>
+        <div :class="loading ? 'opacity-60 transition-opacity' : 'transition-opacity'" :aria-busy="loading">
+          <UserRosterTable
+            :users="users"
+            :library-total="libraries.length"
+            :sort-by="sortBy"
+            :sort-dir="sortDir"
+            :can-manage="canManage"
+            :is-locked="isLocked"
+            :is-resettable="isPasswordResettable"
+            :needs-attention="needsAttention"
+            :password-login-enabled="passwordLoginEnabled"
+            @sort="handleSort"
+            @edit="openEdit"
+            @unlock="unlockUser"
+            @reset-password="resetUserPassword"
+            @remove="requestDeleteUser"
+          />
+          <UserRosterCards
+            :users="users"
+            :library-total="libraries.length"
+            :can-manage="canManage"
+            :needs-attention="needsAttention"
+            @open="openEdit"
+          />
+        </div>
+
+        <nav :aria-label="t('adminFeature.usersPage.pagination.label')" class="flex items-center justify-between gap-3">
+          <p class="text-sm text-muted-foreground">
+            {{ t('adminFeature.usersPage.pagination.showing', { shown: formatNumber(users.length), total: formatNumber(total) }) }}
+          </p>
+          <div v-if="totalPages > 1" class="flex items-center gap-2">
+            <Button variant="outline" size="sm" type="button" :disabled="page <= 1" @click="previousPage">{{ t('common.previous') }}</Button>
+            <span class="text-sm tabular-nums text-muted-foreground">
+              {{ t('adminFeature.usersPage.pagination.page', { page: formatNumber(page), totalPages: formatNumber(totalPages) }) }}
+            </span>
+            <Button variant="outline" size="sm" type="button" :disabled="page >= totalPages" @click="nextPage">{{ t('common.next') }}</Button>
+          </div>
+        </nav>
+      </template>
+    </template>
+
+    <NewAccountDefaults
+      v-if="showDefaults"
+      :show-self-registration="canManageAppSettings && passwordLoginEnabled"
+      :show-library-defaults="canManageUserDefaults"
+      :allow-registration="allowRegistration"
+      :saving-self-registration="savingSelfRegistration"
+      :self-registration-error="selfRegistrationError"
+      :libraries="libraries"
+      :selected-library-ids="defaultLibraryIds"
+      :saving-library-defaults="savingDefaultLibraryAccess"
+      :library-defaults-error="defaultLibraryAccessError"
+      :has-library-changes="hasDefaultLibraryChanges"
+      @toggle-self-registration="toggleSelfRegistration"
+      @toggle-library="toggleDefaultLibrary"
+      @save-library-defaults="saveDefaultLibraryAccess"
+    />
 
     <UserFormDrawer
       v-if="drawerOpen"
       :user="editingUser"
       :libraries="libraries"
       :default-library-ids="defaultLibraryIdsArray"
-      @close="drawerOpen = false"
+      :can-manage-superuser="isSuperuser"
+      :current-user-id="currentUser?.id"
+      :can-delete="canDeleteEditingUser"
+      :password-login-enabled="passwordLoginEnabled"
+      @close="closeDrawer"
       @saved="onSaved"
+      @request-superuser-change="requestSuperuserChange"
+      @delete="handleDrawerDelete"
     />
-    <ResetLinkModal v-if="resetUrl" :reset-url="resetUrl" @close="resetUrl = null" />
+    <ResetLinkModal v-if="resetUrl" :reset-url="resetUrl" @close="clearResetUrl" />
 
-    <div
-      v-if="deleteConfirmUser"
-      class="fixed inset-0 z-[70] flex items-end justify-center md:items-center md:px-4"
-      @click.self="deleteConfirmUser = null"
+    <ConfirmDialog
+      :open="deleteConfirmUser !== null"
+      :title="t('adminFeature.usersPage.deleteDialogTitle')"
+      :description="t('adminFeature.usersPage.deleteDialogBody', { username: deleteConfirmUser?.username ?? '' })"
+      :confirm-label="deleting ? t('adminFeature.usersPage.deleting') : t('common.delete')"
+      :busy="deleting"
+      @confirm="confirmDeleteUser"
+      @cancel="cancelDeleteUser"
+    />
+
+    <ConfirmDialog
+      :open="superuserConfirm !== null"
+      :destructive="superuserConfirm?.isSuperuser === false"
+      :title="superuserDialogTitle"
+      :description="superuserDialogDescription"
+      :confirm-label="superuserConfirmLabel"
+      :busy="changingSuperuser"
+      @confirm="confirmSuperuserChange"
+      @cancel="cancelSuperuserChange"
     >
-      <button class="absolute inset-0 bg-black/45" @click="deleteConfirmUser = null" />
-      <div class="relative w-full rounded-t-lg border border-border bg-card p-4 shadow-xl md:max-w-md md:rounded-lg md:p-5">
-        <p class="text-base font-semibold text-foreground">{{ t('adminFeature.usersPage.deleteDialogTitle') }}</p>
-        <p class="mt-1 text-sm text-muted-foreground">{{ t('adminFeature.usersPage.deleteDialogBody', { username: deleteConfirmUser.username }) }}</p>
-        <div class="mt-4 flex items-center justify-end gap-2">
-          <button
-            class="rounded-md border border-border px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors"
-            @click="deleteConfirmUser = null"
-          >
-            {{ t('common.cancel') }}
-          </button>
-          <button
-            class="rounded-md bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50 transition-colors"
-            :disabled="deleting"
-            @click="confirmDeleteUser"
-          >
-            {{ deleting ? t('adminFeature.usersPage.deleting') : t('common.delete') }}
-          </button>
-        </div>
-      </div>
-    </div>
-  </template>
-
-  <!-- Magic Links tab content -->
-  <MagicLinksSettings v-else ref="magicLinksRef" :with-header="false" />
+      <p v-if="superuserError" role="alert" class="mt-3 text-sm text-destructive">{{ superuserError }}</p>
+    </ConfirmDialog>
+  </div>
 </template>

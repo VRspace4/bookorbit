@@ -5,11 +5,15 @@ import { CBX_READER_DEFAULTS, READER_GROUP_DEFAULTS, type PdfReaderSettings } fr
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>())
 vi.mock('@/lib/api', () => ({ api: apiMock }))
 
-const toastMock = vi.hoisted(() => ({ success: vi.fn<(...args: unknown[]) => unknown>() }))
+const toastMock = vi.hoisted(() => ({
+  success: vi.fn<(...args: unknown[]) => unknown>(),
+}))
 vi.mock('vue-sonner', () => ({ toast: toastMock }))
 
 const useAuthMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => unknown>(() => ({ user: ref(null) })))
-vi.mock('@/features/auth/composables/useAuth', () => ({ useAuth: useAuthMock }))
+vi.mock('@/features/auth/composables/useAuth', () => ({
+  useAuth: useAuthMock,
+}))
 
 import { useReaderSettings, useReaderDefaultSettings } from './useReaderSettings'
 
@@ -51,15 +55,16 @@ describe('useReaderSettings - load() with no localStorage', () => {
 })
 
 describe('useReaderSettings - load() with valid localStorage epub delta', () => {
-  it('sets bookDelta from localStorage and marks isCustomized', async () => {
+  it('moves reader panel settings from a per-book delta into the defaults', async () => {
     const delta = { fontSize: 20, isDark: true }
     localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify(delta))
 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
     await s.load()
 
-    expect(s.bookDelta.value).toEqual(delta)
-    expect(s.isCustomized.value).toBe(true)
+    expect(s.bookDelta.value).toBeNull()
+    expect(s.isCustomized.value).toBe(false)
+    expect(s.effective.value).toMatchObject(delta)
   })
 
   it('effective reflects merged settings', async () => {
@@ -69,7 +74,60 @@ describe('useReaderSettings - load() with valid localStorage epub delta', () => 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
     await s.load()
 
-    expect(s.effective.value).toMatchObject({ ...READER_GROUP_DEFAULTS.epub, fontSize: 24 })
+    expect(s.effective.value).toMatchObject({
+      ...READER_GROUP_DEFAULTS.epub,
+      fontSize: 24,
+    })
+  })
+
+  it('preserves the minimum EPUB font size', async () => {
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ fontSize: 6 }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.effective.value).toMatchObject({ fontSize: 6 })
+  })
+
+  it('preserves variable-font weights across the full CSS range', async () => {
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ fontWeight: 350, fontStyle: 'italic' }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.effective.value).toMatchObject({ fontWeight: 350, fontStyle: 'italic' })
+  })
+
+  it('preserves publisher paragraph spacing as an explicit override', async () => {
+    localStorage.setItem('reader:default:epub', JSON.stringify({ ...READER_GROUP_DEFAULTS.epub, paragraphSpacing: 1.2 }))
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ paragraphSpacing: 0 }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.effective.value).toMatchObject({ paragraphSpacing: 0 })
+  })
+
+  it('preserves nullable typography and explicit zero over the defaults', async () => {
+    localStorage.setItem(
+      'reader:default:epub',
+      JSON.stringify({
+        ...READER_GROUP_DEFAULTS.epub,
+        letterSpacing: 0.12,
+        wordSpacing: 0.25,
+        textIndent: 1.5,
+      }),
+    )
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ letterSpacing: null, wordSpacing: 0, textIndent: 0 }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.effective.value).toMatchObject({
+      letterSpacing: null,
+      wordSpacing: 0,
+      textIndent: 0,
+    })
   })
 
   it('filters invalid EPUB spread settings from localStorage deltas', async () => {
@@ -79,12 +137,57 @@ describe('useReaderSettings - load() with valid localStorage epub delta', () => 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
     await s.load()
 
-    expect(s.bookDelta.value).toEqual({ fontSize: 20 })
-    expect(localStorage.getItem(`reader:book:${BOOK_FILE_ID}`)).toBe(JSON.stringify({ fontSize: 20 }))
+    expect(s.effective.value).toMatchObject({ fontSize: 20, fixedLayoutSpread: READER_GROUP_DEFAULTS.epub.fixedLayoutSpread })
   })
 })
 
 describe('useReaderSettings - load() with invalid localStorage value', () => {
+  it('removes a font weight outside the CSS range', async () => {
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ fontWeight: 1001 }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.bookDelta.value).toBeNull()
+  })
+
+  it('removes an EPUB font size below the supported minimum', async () => {
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ fontSize: 5 }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.bookDelta.value).toBeNull()
+    expect(localStorage.getItem(`reader:book:${BOOK_FILE_ID}`)).toBeNull()
+  })
+
+  it('removes paragraph spacing outside the supported range', async () => {
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ paragraphSpacing: 2.1 }))
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.bookDelta.value).toBeNull()
+    expect(localStorage.getItem(`reader:book:${BOOK_FILE_ID}`)).toBeNull()
+  })
+
+  it('removes typography values outside their supported ranges', async () => {
+    localStorage.setItem(
+      `reader:book:${BOOK_FILE_ID}`,
+      JSON.stringify({
+        letterSpacing: 0.21,
+        wordSpacing: 0.51,
+        textIndent: 4.01,
+      }),
+    )
+
+    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
+    await s.load()
+
+    expect(s.bookDelta.value).toBeNull()
+    expect(localStorage.getItem(`reader:book:${BOOK_FILE_ID}`)).toBeNull()
+  })
+
   it('removes localStorage key and leaves bookDelta null when value is not an object', async () => {
     localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify('not-an-object'))
 
@@ -135,12 +238,23 @@ describe('useReaderSettings - PDF validation', () => {
   })
 
   it('migrates wrapped mode and retains new read-only layout choices', async () => {
-    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ scrollMode: 'wrapped', spread: 'auto', zoomMode: 'automatic' }))
+    localStorage.setItem(
+      `reader:book:${BOOK_FILE_ID}`,
+      JSON.stringify({
+        scrollMode: 'wrapped',
+        spread: 'auto',
+        zoomMode: 'automatic',
+      }),
+    )
 
     const settings = useReaderSettings(BOOK_FILE_ID, 'pdf')
     await settings.load()
 
-    expect(settings.bookDelta.value).toEqual({ scrollMode: 'vertical', spread: 'auto', zoomMode: 'automatic' })
+    expect(settings.bookDelta.value).toEqual({
+      scrollMode: 'vertical',
+      spread: 'auto',
+      zoomMode: 'automatic',
+    })
     expect(JSON.parse(localStorage.getItem(`reader:book:${BOOK_FILE_ID}`) ?? '{}')).toEqual({
       scrollMode: 'vertical',
       spread: 'auto',
@@ -168,8 +282,31 @@ describe('useReaderSettings - load() with valid cbx localStorage delta', () => {
     const s = useReaderSettings(BOOK_FILE_ID, 'cbz')
     await s.load()
 
-    expect(s.bookDelta.value).toMatchObject({ fitMode: 'fit-page', viewMode: 'two-page' })
+    expect(s.bookDelta.value).toMatchObject({
+      fitMode: 'fit-page',
+      viewMode: 'two-page',
+    })
     expect(s.isCustomized.value).toBe(true)
+  })
+
+  it('keeps bounded integer spread gaps and removes invalid values', async () => {
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ spreadGap: 0, viewMode: 'two-page' }))
+
+    const valid = useReaderSettings(BOOK_FILE_ID, 'cbz')
+    await valid.load()
+
+    expect(valid.bookDelta.value).toMatchObject({
+      spreadGap: 0,
+      viewMode: 'two-page',
+    })
+
+    localStorage.setItem(`reader:book:${BOOK_FILE_ID}`, JSON.stringify({ spreadGap: 65, viewMode: 'two-page' }))
+
+    const invalid = useReaderSettings(BOOK_FILE_ID, 'cbz')
+    await invalid.load()
+
+    expect(invalid.bookDelta.value).toEqual({ viewMode: 'two-page' })
+    expect(JSON.parse(localStorage.getItem(`reader:book:${BOOK_FILE_ID}`) ?? '{}')).toEqual({ viewMode: 'two-page' })
   })
 })
 
@@ -198,14 +335,16 @@ describe('useReaderSettings - updateBookSettings', () => {
     expect(apiMock).not.toHaveBeenCalled()
   })
 
-  it('calls api() with PUT when sync is enabled', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+  it('sends nothing when the patch is empty, because the server rejects an empty body', () => {
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
     apiMock.mockResolvedValue({ ok: true })
 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
-    s.updateBookSettings({ fontSize: 22 } as never)
+    s.updateBookSettings({} as never)
 
-    expect(apiMock).toHaveBeenCalledWith(`/api/v1/reader/preferences/${BOOK_FILE_ID}`, expect.objectContaining({ method: 'PUT' }))
+    expect(apiMock).not.toHaveBeenCalled()
   })
 })
 
@@ -230,7 +369,9 @@ describe('useReaderSettings - resetBookSettings', () => {
   })
 
   it('calls api() with DELETE when sync is enabled', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
     apiMock.mockResolvedValue({ ok: true })
 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
@@ -245,8 +386,10 @@ describe('useReaderSettings - updateDefaultSettings', () => {
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
     s.updateDefaultSettings({ fontSize: 18 } as never)
 
-    const stored = JSON.parse(localStorage.getItem('reader:default:epub') ?? 'null')
-    expect(stored).toMatchObject({ ...READER_GROUP_DEFAULTS.epub, fontSize: 18 })
+    expect(s.effective.value).toMatchObject({
+      ...READER_GROUP_DEFAULTS.epub,
+      fontSize: 18,
+    })
   })
 
   it('merges patch into existing defaultSettings', () => {
@@ -254,18 +397,7 @@ describe('useReaderSettings - updateDefaultSettings', () => {
     s.updateDefaultSettings({ fontSize: 18 } as never)
     s.updateDefaultSettings({ isDark: true } as never)
 
-    const stored = JSON.parse(localStorage.getItem('reader:default:epub') ?? 'null')
-    expect(stored).toMatchObject({ fontSize: 18, isDark: true })
-  })
-
-  it('calls api() with PUT when sync is enabled', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
-    apiMock.mockResolvedValue({ ok: true })
-
-    const s = useReaderSettings(BOOK_FILE_ID, 'epub')
-    s.updateDefaultSettings({ fontSize: 18 } as never)
-
-    expect(apiMock).toHaveBeenCalledWith('/api/v1/reader/defaults/epub', expect.objectContaining({ method: 'PUT' }))
+    expect(s.effective.value).toMatchObject({ fontSize: 18, isDark: true })
   })
 
   it('does not call api() when sync is disabled', () => {
@@ -287,7 +419,9 @@ describe('useReaderSettings - resetDefaultSettings', () => {
   })
 
   it('calls api() with DELETE when sync is enabled', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
     apiMock.mockResolvedValue({ ok: true })
 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
@@ -315,17 +449,24 @@ describe('useReaderSettings - syncEnabled behavior', () => {
   })
 
   it('calls api() when user has syncReaderPreferences: true', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
     apiMock.mockResolvedValue({ ok: true })
 
+    vi.useFakeTimers()
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
     s.updateBookSettings({ fontSize: 22 } as never)
+    vi.runOnlyPendingTimers()
+    vi.useRealTimers()
 
     expect(apiMock).toHaveBeenCalledTimes(1)
   })
 
   it('does not call api() when syncReaderPreferences is false', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: false } }) })
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: false } }),
+    })
 
     const s = useReaderSettings(BOOK_FILE_ID, 'epub')
     s.updateBookSettings({ fontSize: 22 } as never)
@@ -336,7 +477,9 @@ describe('useReaderSettings - syncEnabled behavior', () => {
 
 describe('useReaderSettings - syncFromDb (via load() when syncEnabled)', () => {
   beforeEach(() => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
   })
 
   it('updates bookDelta when api returns valid settings', async () => {
@@ -350,9 +493,11 @@ describe('useReaderSettings - syncFromDb (via load() when syncEnabled)', () => {
   })
 
   it('updates defaultSettings when api returns group key', async () => {
-    apiMock
-      .mockResolvedValueOnce(makeFakeResponse(false, {}))
-      .mockResolvedValueOnce(makeFakeResponse(true, { cbx: { fitMode: 'fit-width', viewMode: 'single' } }))
+    apiMock.mockResolvedValueOnce(makeFakeResponse(false, {})).mockResolvedValueOnce(
+      makeFakeResponse(true, {
+        cbx: { fitMode: 'fit-width', viewMode: 'single' },
+      }),
+    )
 
     const s = useReaderSettings(BOOK_FILE_ID, 'cbz')
     await s.load()
@@ -389,8 +534,54 @@ describe('useReaderDefaultSettings - load() with localStorage', () => {
     const s = useReaderDefaultSettings('epub')
     await s.load()
 
-    expect(s.effective.value).toMatchObject({ fontSize: 20, fixedLayoutSpread: 'auto' })
-    expect(JSON.parse(localStorage.getItem('reader:default:epub') ?? '{}')).toMatchObject({ fixedLayoutSpread: 'auto' })
+    expect(s.effective.value).toMatchObject({
+      fontSize: 20,
+      fixedLayoutSpread: 'auto',
+    })
+    const reloaded = useReaderDefaultSettings('epub')
+    await reloaded.load()
+    expect(reloaded.effective.value).toMatchObject({ fixedLayoutSpread: 'auto' })
+  })
+
+  it('fills publisher paragraph spacing for older epub defaults in localStorage', async () => {
+    const stored = { ...READER_GROUP_DEFAULTS.epub, fontSize: 20 }
+    delete (stored as Record<string, unknown>).paragraphSpacing
+    localStorage.setItem('reader:default:epub', JSON.stringify(stored))
+
+    const s = useReaderDefaultSettings('epub')
+    await s.load()
+
+    expect(s.effective.value).toMatchObject({
+      fontSize: 20,
+      paragraphSpacing: 0,
+    })
+    const reloaded = useReaderDefaultSettings('epub')
+    await reloaded.load()
+    expect(reloaded.effective.value).toMatchObject({ paragraphSpacing: 0 })
+  })
+
+  it('fills nullable publisher typography for older epub defaults in localStorage', async () => {
+    const stored = { ...READER_GROUP_DEFAULTS.epub, fontSize: 20 }
+    delete (stored as Record<string, unknown>).letterSpacing
+    delete (stored as Record<string, unknown>).wordSpacing
+    delete (stored as Record<string, unknown>).textIndent
+    localStorage.setItem('reader:default:epub', JSON.stringify(stored))
+
+    const s = useReaderDefaultSettings('epub')
+    await s.load()
+
+    expect(s.effective.value).toMatchObject({
+      letterSpacing: null,
+      wordSpacing: null,
+      textIndent: null,
+    })
+    const reloaded = useReaderDefaultSettings('epub')
+    await reloaded.load()
+    expect(reloaded.effective.value).toMatchObject({
+      letterSpacing: null,
+      wordSpacing: null,
+      textIndent: null,
+    })
   })
 
   it('merges cbx localStorage settings with CBX_READER_DEFAULTS', async () => {
@@ -400,7 +591,10 @@ describe('useReaderDefaultSettings - load() with localStorage', () => {
     const s = useReaderDefaultSettings<typeof CBX_READER_DEFAULTS>('cbz')
     await s.load()
 
-    expect(s.effective.value).toMatchObject({ ...CBX_READER_DEFAULTS, fitMode: 'fit-width' })
+    expect(s.effective.value).toMatchObject({
+      ...CBX_READER_DEFAULTS,
+      fitMode: 'fit-width',
+    })
   })
 
   it('falls back to group defaults when localStorage is empty', async () => {
@@ -419,22 +613,25 @@ describe('useReaderDefaultSettings - update', () => {
     expect(s.effective.value).toMatchObject({ fontSize: 22 })
   })
 
-  it('writes merged settings to localStorage', () => {
+  it('persists merged settings across a reload', async () => {
     const s = useReaderDefaultSettings('epub')
     s.update({ fontSize: 22 } as never)
 
-    const stored = JSON.parse(localStorage.getItem('reader:default:epub') ?? 'null')
-    expect(stored).toMatchObject({ fontSize: 22 })
+    const reloaded = useReaderDefaultSettings('epub')
+    await reloaded.load()
+    expect(reloaded.effective.value).toMatchObject({ fontSize: 22 })
   })
 
-  it('calls api() with PUT when sync is enabled', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+  it('sends nothing when the patch is empty', () => {
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
     apiMock.mockResolvedValue({ ok: true })
 
     const s = useReaderDefaultSettings('epub')
-    s.update({ fontSize: 22 } as never)
+    s.update({} as never)
 
-    expect(apiMock).toHaveBeenCalledWith('/api/v1/reader/defaults/epub', expect.objectContaining({ method: 'PUT' }))
+    expect(apiMock).not.toHaveBeenCalled()
   })
 })
 
@@ -457,7 +654,9 @@ describe('useReaderDefaultSettings - reset', () => {
   })
 
   it('calls api() with DELETE when sync is enabled', () => {
-    useAuthMock.mockReturnValue({ user: ref({ settings: { syncReaderPreferences: true } }) })
+    useAuthMock.mockReturnValue({
+      user: ref({ settings: { syncReaderPreferences: true } }),
+    })
     apiMock.mockResolvedValue({ ok: true })
 
     const s = useReaderDefaultSettings('epub')

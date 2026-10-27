@@ -1,20 +1,20 @@
 import { ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
-import type { TtsProviderConfigurations, TtsProviderStatus } from '@bookorbit/types'
+import type { TtsProviderConfigurations, EpubTtsProviderStatus } from '@bookorbit/types'
 
 export function useTtsProviderConfig() {
   const config = ref<TtsProviderConfigurations | null>(null)
-  const statuses = ref<TtsProviderStatus[]>([])
+  const statuses = ref<EpubTtsProviderStatus[]>([])
   const loading = ref(false)
   const saving = ref(false)
 
   async function fetchConfig() {
     loading.value = true
     try {
-      const res = await api('/api/v1/tts/providers')
+      const res = await api('/api/v1/tts/epub-providers')
       if (!res.ok) return
-      const data: { config: TtsProviderConfigurations; statuses: TtsProviderStatus[] } = await res.json()
+      const data: { config: TtsProviderConfigurations; statuses: EpubTtsProviderStatus[] } = await res.json()
       config.value = data.config
       statuses.value = data.statuses
     } finally {
@@ -25,7 +25,7 @@ export function useTtsProviderConfig() {
   async function saveConfig(patch: Partial<TtsProviderConfigurations>) {
     saving.value = true
     try {
-      const res = await api('/api/v1/tts/providers', {
+      const res = await api('/api/v1/tts/epub-providers', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),

@@ -3,16 +3,26 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { Plus, Trash2, X } from '@lucide/vue'
 import {
   COMMUNITY_RATING_PROVIDER_KEYS,
+  CUSTOM_FIELD_OPERATORS,
+  CUSTOM_FIELD_TYPE_OPERATORS,
   FIELD_OPERATORS,
   RULE_FIELDS,
+  customRuleField,
+  isCustomRuleField,
+  parseCustomRuleFieldId,
   type CommunityRatingProvider,
+  type CommunityRatingRuleField,
+  type CustomMetadataFieldType,
+  type CustomRuleField,
   type GroupRule,
   type Rule,
   type RuleField,
   type RuleOperator,
+  type StaticRuleField,
 } from '@bookorbit/types'
 import { READ_STATUSES } from '@bookorbit/types'
-import { FIELD_LABELS, OPERATOR_LABELS } from '@/features/book/lib/filter-labels'
+import { useActiveCustomFields } from '@/features/book/composables/useActiveCustomFields'
+import { fieldLabel, operatorLabel } from '@/features/book/lib/filter-labels'
 import { providerIconPathSafe } from '@/features/book/lib/provider-icons'
 import { PROVIDER_SHORT_LABELS } from '@/lib/provider-colors'
 import { useLibraries } from '@/features/library/composables/useLibraries'
@@ -26,6 +36,8 @@ const { t } = useI18n()
 const props = defineProps<{
   modelValue: GroupRule | undefined
   depth?: number
+  /** Deepest nesting allowed. A smart scope's page wraps this filter in the scope's own rules, so it allows one level less. */
+  maxDepth?: number
   preserveIncompleteRoot?: boolean
 }>()
 
@@ -34,7 +46,17 @@ const emit = defineEmits<{
 }>()
 
 const MAX_DEPTH = 5
-const NUMERIC_FIELDS: RuleField[] = ['seriesIndex', 'publishedYear', 'pageCount', 'rating', 'communityRating', 'metadataScore']
+const BYTES_PER_MIB = 1024 ** 2
+const NUMERIC_FIELDS: RuleField[] = [
+  'seriesIndex',
+  'publishedYear',
+  'pageCount',
+  'fileSize',
+  'rating',
+  'communityRating',
+  'communityRatingCount',
+  'metadataScore',
+]
 const DATE_FIELDS: RuleField[] = ['publishedDate', 'addedAt', 'startedAt', 'finishedAt']
 const NO_VALUE_OPERATORS: RuleOperator[] = [
   'isEmpty',
@@ -47,9 +69,12 @@ const NO_VALUE_OPERATORS: RuleOperator[] = [
   'isLocked',
   'isUnlocked',
   'isUpNext',
+  'isTrue',
+  'isFalse',
 ]
 const BETWEEN_OPERATORS: RuleOperator[] = ['between']
 const COLLECTION_OPERATORS: RuleOperator[] = ['includesAny', 'includesAll', 'excludesAll']
+const RELATIVE_DAY_OPERATORS: RuleOperator[] = ['withinLast', 'moreThanAgo']
 
 const SCORE_PRESETS = [
   { label: 'outstanding', gte: 90 },
@@ -97,6 +122,45 @@ onMounted(() => {
   void fetchLibraries()
 })
 
+const { fields: customFields } = useActiveCustomFields()
+
+const activeCustomFields = computed(() =>
+  customFields.value.filter((f) => !f.archivedAt).sort((a, b) => a.displayOrder - b.displayOrder || a.label.localeCompare(b.label)),
+)
+
+const customFieldTypes = computed(() => new Map(activeCustomFields.value.map((f) => [f.id, f.type])))
+
+function customFieldType(field: RuleField): CustomMetadataFieldType | null {
+  const fieldId = parseCustomRuleFieldId(field)
+  return fieldId === null ? null : (customFieldTypes.value.get(fieldId) ?? null)
+}
+
+// A custom field's type decides which operators make sense for it. A rule pointing at a field
+// that is no longer active keeps every custom operator selectable so the saved one still shows.
+function operatorsForField(field: RuleField): RuleOperator[] {
+  const type = customFieldType(field)
+  if (type) return CUSTOM_FIELD_TYPE_OPERATORS[type]
+  if (isCustomRuleField(field)) return CUSTOM_FIELD_OPERATORS
+  return FIELD_OPERATORS[field as StaticRuleField]
+}
+
+function isNumericField(field: RuleField): boolean {
+  return NUMERIC_FIELDS.includes(field) || customFieldType(field) === 'number'
+}
+
+function isCommunityRatingField(field: RuleField): field is CommunityRatingRuleField {
+  return field === 'communityRating' || field === 'communityRatingCount'
+}
+
+function providerForRule(rule: Rule): CommunityRatingProvider {
+  if (rule.field === 'communityRating' || rule.field === 'communityRatingCount') return rule.provider ?? 'any'
+  return 'any'
+}
+
+function isDateField(field: RuleField): boolean {
+  return DATE_FIELDS.includes(field) || customFieldType(field) === 'date'
+}
+
 type WithinLastUnit = 'days' | 'weeks' | 'months'
 
 interface EditableRule {
@@ -126,13 +190,15 @@ function makeEmptyRule(): LocalNode {
 
 function toEditableRule(r: Rule): EditableRule {
   const usesChips = Array.isArray(r.value)
+  const value = r.field === 'fileSize' && typeof r.value === 'number' ? String(r.value / BYTES_PER_MIB) : String(r.value ?? '')
+  const valueTo = r.field === 'fileSize' && typeof r.valueTo === 'number' ? String(r.valueTo / BYTES_PER_MIB) : String(r.valueTo ?? '')
   return {
     field: r.field,
     operator: r.operator,
-    provider: r.field === 'communityRating' ? (r.provider ?? 'any') : 'any',
-    value: usesChips ? '' : String(r.value ?? ''),
+    provider: providerForRule(r),
+    value: usesChips ? '' : value,
     valueChips: usesChips ? (r.value as string[]) : [],
-    valueTo: String(r.valueTo ?? ''),
+    valueTo,
     valueUnit: 'days',
   }
 }
@@ -149,10 +215,11 @@ function toLocalNodes(group: GroupRule | undefined): LocalNode[] {
 function parseValue(field: RuleField, operator: RuleOperator, raw: string, chips: string[], unit: WithinLastUnit): Rule['value'] {
   if (NO_VALUE_OPERATORS.includes(operator)) return undefined
   if (COLLECTION_OPERATORS.includes(operator)) return chips
-  if (NUMERIC_FIELDS.includes(field)) return raw === '' ? undefined : Number(raw)
-  if (DATE_FIELDS.includes(field) && operator === 'withinLast') {
+  if (isNumericField(field)) return raw === '' ? undefined : field === 'fileSize' ? Math.round(Number(raw) * BYTES_PER_MIB) : Number(raw)
+  if (isDateField(field) && RELATIVE_DAY_OPERATORS.includes(operator)) {
     if (raw === '') return undefined
     const n = Number(raw)
+    if (operator === 'moreThanAgo') return n
     const multiplier = unit === 'weeks' ? 7 : unit === 'months' ? 30 : 1
     return n * multiplier
   }
@@ -161,6 +228,13 @@ function parseValue(field: RuleField, operator: RuleOperator, raw: string, chips
 
 const nodes = ref<LocalNode[]>(toLocalNodes(props.modelValue))
 const join = ref<'AND' | 'OR'>(props.modelValue?.join ?? 'AND')
+
+// Active fields, plus any custom field an existing rule already points at so a scope built on a
+// since-archived field still shows its own selection instead of an empty dropdown.
+const customFieldOptions = computed<CustomRuleField[]>(() => {
+  const selected = nodes.value.flatMap((node) => (node.kind === 'rule' && isCustomRuleField(node.rule.field) ? [node.rule.field] : []))
+  return [...new Set([...activeCustomFields.value.map((f) => customRuleField(f.id)), ...selected])]
+})
 let selfEmitting = false
 
 watch(
@@ -199,12 +273,14 @@ function emitUpdate() {
         value: parseValue(n.rule.field, n.rule.operator, n.rule.value, n.rule.valueChips, n.rule.valueUnit),
         valueTo:
           BETWEEN_OPERATORS.includes(n.rule.operator) && n.rule.valueTo !== ''
-            ? NUMERIC_FIELDS.includes(n.rule.field)
-              ? Number(n.rule.valueTo)
+            ? isNumericField(n.rule.field)
+              ? n.rule.field === 'fileSize'
+                ? Math.round(Number(n.rule.valueTo) * BYTES_PER_MIB)
+                : Number(n.rule.valueTo)
               : n.rule.valueTo
             : undefined,
       }
-      return n.rule.field === 'communityRating' ? ({ ...rule, provider: n.rule.provider } as Rule) : (rule as Rule)
+      return isCommunityRatingField(n.rule.field) ? ({ ...rule, provider: n.rule.provider } as Rule) : (rule as Rule)
     })
   const isSubGroup = (props.depth ?? 0) > 0
   if (!isSubGroup && rules.length === 0 && !props.preserveIncompleteRoot) {
@@ -242,7 +318,7 @@ function removeNode(index: number) {
 function onFieldChange(index: number) {
   const node = nodes.value[index]
   if (node?.kind !== 'rule') return
-  const validOps = FIELD_OPERATORS[node.rule.field]
+  const validOps = operatorsForField(node.rule.field)
   if (!validOps.includes(node.rule.operator)) {
     node.rule.operator = validOps[0]!
   }
@@ -332,13 +408,15 @@ function removeStatusChip(index: number, status: string) {
 
 function valueInputType(field: RuleField, operator: RuleOperator): string {
   if (NO_VALUE_OPERATORS.includes(operator)) return 'none'
-  if (DATE_FIELDS.includes(field)) return operator === 'withinLast' ? 'number' : 'date'
-  if (NUMERIC_FIELDS.includes(field)) return 'number'
+  if (isDateField(field)) return RELATIVE_DAY_OPERATORS.includes(operator) ? 'number' : 'date'
+  if (field === 'seriesIndex') return 'text'
+  if (isNumericField(field)) return 'number'
   return 'text'
 }
 
 function numericInputMin(field: RuleField): string | undefined {
-  if (field === 'communityRating') return '0'
+  if (field === 'fileSize') return '0'
+  if (isCommunityRatingField(field)) return '0'
   return undefined
 }
 
@@ -349,7 +427,9 @@ function numericInputMax(field: RuleField): string | undefined {
 }
 
 function numericInputStep(field: RuleField): string | undefined {
+  if (field === 'fileSize') return '0.1'
   if (field === 'communityRating') return '0.1'
+  if (field === 'communityRatingCount') return '1'
   return undefined
 }
 
@@ -394,7 +474,10 @@ function showValueToInput(operator: RuleOperator): boolean {
           @change="onFieldChange(index)"
           class="h-9 rounded-md border border-input bg-background text-foreground text-sm px-2 focus:outline-none focus:ring-2 focus:ring-primary shrink-0"
         >
-          <option v-for="field in RULE_FIELDS" :key="field" :value="field">{{ FIELD_LABELS[field] }}</option>
+          <option v-for="field in RULE_FIELDS" :key="field" :value="field">{{ fieldLabel(field) }}</option>
+          <optgroup v-if="customFieldOptions.length > 0" :label="t('book.filter.customFieldsGroup')">
+            <option v-for="field in customFieldOptions" :key="field" :value="field">{{ fieldLabel(field) }}</option>
+          </optgroup>
         </select>
 
         <select
@@ -402,11 +485,11 @@ function showValueToInput(operator: RuleOperator): boolean {
           @change="onOperatorChange(index)"
           class="h-9 rounded-md border border-input bg-background text-foreground text-sm px-2 focus:outline-none focus:ring-2 focus:ring-primary shrink-0"
         >
-          <option v-for="op in FIELD_OPERATORS[node.rule.field]" :key="op" :value="op">{{ OPERATOR_LABELS[op] }}</option>
+          <option v-for="op in operatorsForField(node.rule.field)" :key="op" :value="op">{{ operatorLabel(op) }}</option>
         </select>
 
         <div
-          v-if="node.rule.field === 'communityRating'"
+          v-if="isCommunityRatingField(node.rule.field)"
           class="h-9 flex items-center gap-2 rounded-md border border-input bg-background px-2 shrink-0"
         >
           <img
@@ -417,7 +500,7 @@ function showValueToInput(operator: RuleOperator): boolean {
           />
           <select
             v-model="node.rule.provider"
-            class="h-7 bg-transparent text-foreground text-sm outline-none"
+            class="h-7 bg-background text-foreground text-sm outline-none"
             :aria-label="t('book.filter.communityRatingProvider')"
             @change="emitUpdate"
           >
@@ -445,16 +528,16 @@ function showValueToInput(operator: RuleOperator): boolean {
             <span
               v-for="libraryName in node.rule.valueChips"
               :key="libraryName"
-              class="flex items-center gap-1 h-5 px-1.5 rounded bg-primary/15 text-primary text-xs font-medium shrink-0"
+              class="flex items-center gap-1 h-5 px-1.5 rounded-xs bg-primary/15 text-primary text-xs font-medium shrink-0"
             >
               {{ libraryName }}
-              <button type="button" class="text-primary/60 hover:text-primary leading-none" @click="removeLibraryChip(index, libraryName)">
+              <button type="button" class="text-primary hover:text-primary leading-none" @click="removeLibraryChip(index, libraryName)">
                 <X :size="10" />
               </button>
             </span>
             <select
               :value="''"
-              class="h-7 flex-1 min-w-32 bg-transparent text-foreground text-sm outline-none"
+              class="h-7 flex-1 min-w-32 bg-background text-foreground text-sm outline-none"
               @change="addLibraryChip(index, $event)"
             >
               <option value="" disabled>
@@ -483,18 +566,14 @@ function showValueToInput(operator: RuleOperator): boolean {
             <span
               v-for="status in node.rule.valueChips"
               :key="status"
-              class="flex items-center gap-1 h-5 px-1.5 rounded bg-primary/15 text-primary text-xs font-medium shrink-0"
+              class="flex items-center gap-1 h-5 px-1.5 rounded-xs bg-primary/15 text-primary text-xs font-medium shrink-0"
             >
               {{ READ_STATUS_LABELS[status] ?? status }}
-              <button type="button" class="text-primary/60 hover:text-primary leading-none" @click="removeStatusChip(index, status)">
+              <button type="button" class="text-primary hover:text-primary leading-none" @click="removeStatusChip(index, status)">
                 <X :size="10" />
               </button>
             </span>
-            <select
-              :value="''"
-              class="h-7 flex-1 min-w-32 bg-transparent text-foreground text-sm outline-none"
-              @change="addStatusChip(index, $event)"
-            >
+            <select :value="''" class="h-7 flex-1 min-w-32 bg-background text-foreground text-sm outline-none" @change="addStatusChip(index, $event)">
               <option value="" disabled>{{ t('book.filter.selectStatus') }}</option>
               <option v-for="status in READ_STATUSES" :key="status" :value="status" :disabled="node.rule.valueChips.includes(status)">
                 {{ READ_STATUS_LABELS[status] ?? status }}
@@ -502,8 +581,8 @@ function showValueToInput(operator: RuleOperator): boolean {
             </select>
           </div>
         </template>
-        <!-- withinLast: number + unit selector -->
-        <template v-else-if="node.rule.operator === 'withinLast'">
+        <!-- Relative date: numeric day count, with convenience units for withinLast. -->
+        <template v-else-if="RELATIVE_DAY_OPERATORS.includes(node.rule.operator)">
           <input
             v-model="node.rule.value"
             type="number"
@@ -513,6 +592,7 @@ function showValueToInput(operator: RuleOperator): boolean {
             @input="emitUpdate"
           />
           <select
+            v-if="node.rule.operator === 'withinLast'"
             v-model="node.rule.valueUnit"
             class="h-9 rounded-md border border-input bg-background text-foreground text-sm px-2 focus:outline-none focus:ring-2 focus:ring-primary"
             @change="emitUpdate"
@@ -521,6 +601,7 @@ function showValueToInput(operator: RuleOperator): boolean {
             <option value="weeks">{{ t('book.filter.unit.weeks') }}</option>
             <option value="months">{{ t('book.filter.unit.months') }}</option>
           </select>
+          <span v-else class="text-sm text-muted-foreground">{{ t('book.filter.unit.daysAgo') }}</span>
         </template>
         <!-- Text typeahead: publisher, series, language -->
         <FilterTextTypeahead
@@ -529,6 +610,38 @@ function showValueToInput(operator: RuleOperator): boolean {
           :endpoint="ENDPOINT_BY_FIELD[node.rule.field]!"
           @update:model-value="emitUpdate"
         />
+        <!-- Primary file size: MB input serialized as bytes -->
+        <template v-else-if="node.rule.field === 'fileSize' && !NO_VALUE_OPERATORS.includes(node.rule.operator)">
+          <div class="flex items-center gap-1.5">
+            <input
+              v-model="node.rule.value"
+              @input="emitUpdate"
+              type="number"
+              min="0"
+              step="0.1"
+              :aria-label="t('book.filter.fileSizeValueAria')"
+              :placeholder="t('book.filter.fileSizePlaceholder')"
+              class="h-9 w-28 rounded-md border border-input bg-background px-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+            />
+            <span class="text-xs text-muted-foreground">{{ t('book.filter.unit.megabytes') }}</span>
+          </div>
+          <template v-if="showValueToInput(node.rule.operator)">
+            <span class="text-xs text-muted-foreground">{{ t('book.filter.to') }}</span>
+            <div class="flex items-center gap-1.5">
+              <input
+                v-model="node.rule.valueTo"
+                @input="emitUpdate"
+                type="number"
+                min="0"
+                step="0.1"
+                :aria-label="t('book.filter.fileSizeMaximumAria')"
+                :placeholder="t('book.filter.maxPlaceholder')"
+                class="h-9 w-24 rounded-md border border-input bg-background px-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary"
+              />
+              <span class="text-xs text-muted-foreground">{{ t('book.filter.unit.megabytes') }}</span>
+            </div>
+          </template>
+        </template>
         <!-- Metadata score: preset range chips + numeric input -->
         <template v-else-if="node.rule.field === 'metadataScore' && !NO_VALUE_OPERATORS.includes(node.rule.operator)">
           <div class="flex flex-wrap items-center gap-1.5">
@@ -601,7 +714,7 @@ function showValueToInput(operator: RuleOperator): boolean {
 
         <button
           @click="removeNode(index)"
-          class="ml-auto h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground/70 hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+          class="ml-auto h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
         >
           <Trash2 :size="13" />
         </button>
@@ -611,13 +724,18 @@ function showValueToInput(operator: RuleOperator): boolean {
       <div v-else-if="node.kind === 'group'" class="flex items-start gap-2">
         <div class="flex-1 rounded-lg border border-primary/20 bg-primary/3 p-3">
           <div class="flex items-center justify-between mb-3">
-            <span class="text-[10px] font-semibold uppercase tracking-widest text-primary/50">{{ t('book.filter.group') }}</span>
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-primary">{{ t('book.filter.group') }}</span>
           </div>
-          <BookFilterBuilder :model-value="node.group" :depth="(depth ?? 0) + 1" @update:model-value="onSubGroupUpdate(index, $event)" />
+          <BookFilterBuilder
+            :model-value="node.group"
+            :depth="(depth ?? 0) + 1"
+            :max-depth="maxDepth"
+            @update:model-value="onSubGroupUpdate(index, $event)"
+          />
         </div>
         <button
           @click="removeNode(index)"
-          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground/70 hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0 mt-1"
+          class="h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0 mt-1"
         >
           <Trash2 :size="13" />
         </button>
@@ -634,9 +752,9 @@ function showValueToInput(operator: RuleOperator): boolean {
         {{ t('book.filter.addRule') }}
       </button>
       <button
-        v-if="(depth ?? 0) < MAX_DEPTH"
+        v-if="(depth ?? 0) < (maxDepth ?? MAX_DEPTH)"
         @click="addGroup"
-        class="flex items-center gap-1.5 h-9 px-4 rounded-lg border border-dashed border-primary/30 text-sm text-primary/50 hover:text-primary hover:border-primary hover:bg-primary/5 transition-colors"
+        class="flex items-center gap-1.5 h-9 px-4 rounded-lg border border-dashed border-primary/30 text-sm text-primary hover:text-primary hover:border-primary hover:bg-primary/5 transition-colors"
       >
         <Plus :size="13" />
         {{ t('book.filter.addGroup') }}

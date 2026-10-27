@@ -2,17 +2,24 @@ import { Module } from '@nestjs/common';
 
 import { CommonModule } from '../../common/common.module';
 import { AchievementModule } from '../achievement/achievement.module';
+import { AppSettingsModule } from '../app-settings/app-settings.module';
 import { AnnotationModule } from '../annotation/annotation.module';
+import { AuthorsModule } from '../authors/authors.module';
+import { BookmarkModule } from '../bookmark/bookmark.module';
 import { BookModule } from '../book/book.module';
+import { BrowseCountsModule } from '../browse-counts/browse-counts.module';
 import { DashboardModule } from '../dashboard/dashboard.module';
 import { OpdsModule } from '../opds/opds.module';
 import { PositionConverterModule } from '../position-converter/position-converter.module';
+import { ReadingSessionModule } from '../reading-session/reading-session.module';
 import { RecommendationModule } from '../recommendation/recommendation.module';
 import { UserModule } from '../user/user.module';
 import { UserBookNoteModule } from '../user-book-note/user-book-note.module';
 import { UserBookStatusModule } from '../user-book-status/user-book-status.module';
 import { KoreaderAnnotationExchangeService } from './koreader-annotation-exchange.service';
 import { KoreaderAuthGuard } from './koreader-auth.guard';
+import { KoreaderBookmarkExchangeService } from './koreader-bookmark-exchange.service';
+import { KoreaderBookmarkRepository } from './koreader-bookmark.repository';
 import { KoreaderCatalogController } from './koreader-catalog.controller';
 import { KoreaderCatalogService } from './koreader-catalog.service';
 import { KoreaderPackageService } from './koreader-package.service';
@@ -25,8 +32,11 @@ import { KoreaderPluginController } from './koreader-plugin.controller';
 import { KoreaderPluginRepository } from './koreader-plugin.repository';
 import { KoreaderPluginService } from './koreader-plugin.service';
 import { KoreaderRepository } from './koreader.repository';
+import { KoreaderDeliveryService } from './koreader-delivery.service';
+import { KoreaderDeliveryController } from './koreader-delivery.controller';
 import { KoreaderService } from './koreader.service';
 import { KoreaderStatsService } from './koreader-stats.service';
+import { KoreaderSyncEstimateCleanupService } from './koreader-sync-estimate-cleanup.service';
 
 @Module({
   imports: [
@@ -35,15 +45,21 @@ import { KoreaderStatsService } from './koreader-stats.service';
     UserBookNoteModule,
     UserBookStatusModule,
     AchievementModule,
+    AppSettingsModule,
     AnnotationModule,
+    AuthorsModule,
     BookModule,
+    BookmarkModule,
+    BrowseCountsModule,
     DashboardModule,
     OpdsModule,
     PositionConverterModule,
+    ReadingSessionModule,
     RecommendationModule,
   ],
-  controllers: [KoreaderController, KoreaderPluginController, KoreaderCatalogController],
+  controllers: [KoreaderDeliveryController, KoreaderController, KoreaderPluginController, KoreaderCatalogController],
   providers: [
+    KoreaderDeliveryService,
     KoreaderService,
     KoreaderHashLinkService,
     KoreaderRepository,
@@ -56,7 +72,10 @@ import { KoreaderStatsService } from './koreader-stats.service';
     KoreaderPluginRepository,
     KoreaderPluginAnnotationService,
     KoreaderAnnotationExchangeService,
+    KoreaderBookmarkExchangeService,
+    KoreaderBookmarkRepository,
     KoreaderStatsService,
+    KoreaderSyncEstimateCleanupService,
   ],
   exports: [KoreaderService, KoreaderRepository],
 })

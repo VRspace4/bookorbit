@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { formatNumber } from '@/i18n/formatters'
 import { X, Zap } from '@lucide/vue'
 import { api } from '@/lib/api'
 import type { GroupRule, SmartScope, Rule, SortSpec } from '@bookorbit/types'
@@ -53,6 +52,7 @@ const draftName = ref('')
 const draftIcon = ref('')
 const draftFilter = ref<GroupRule | undefined>(undefined)
 const draftSort = ref<SortSpec[]>([])
+const draftIsPublic = ref(false)
 const draftSyncToKobo = ref(false)
 const saving = ref(false)
 const saveError = ref<string | null>(null)
@@ -69,8 +69,10 @@ watch(
     if (isOpen && props.smartScope) {
       draftName.value = props.smartScope.name
       draftIcon.value = props.smartScope.icon ?? ''
-      draftFilter.value = props.smartScope.filter ?? undefined
+      // This panel edits book scopes; podcast scopes carry episode rules and use their own editor.
+      draftFilter.value = (props.smartScope.filter as GroupRule | null) ?? undefined
       draftSort.value = props.smartScope.defaultSort ? [...props.smartScope.defaultSort] : []
+      draftIsPublic.value = props.smartScope.isPublic
       draftSyncToKobo.value = props.smartScope.syncToKobo
       schedulePreview()
     }
@@ -117,6 +119,14 @@ function hasCompleteRules(group: GroupRule | undefined): boolean {
   return !!group?.rules.some((rule) => rule.type === 'rule' || hasCompleteRules(rule as GroupRule))
 }
 
+function toggleIsPublic() {
+  draftIsPublic.value = !draftIsPublic.value
+}
+
+function toggleSyncToKobo() {
+  draftSyncToKobo.value = !draftSyncToKobo.value
+}
+
 async function save() {
   if (!props.smartScope) return
   if (!trimmedDraftName.value) {
@@ -135,6 +145,7 @@ async function save() {
       icon: trimmedDraftIcon.value,
       filter: hasCompleteRules(draftFilter.value) ? draftFilter.value : undefined,
       defaultSort: draftSort.value,
+      isPublic: draftIsPublic.value,
       syncToKobo: draftSyncToKobo.value,
     })
     emit('saved')
@@ -150,7 +161,7 @@ async function save() {
 <template>
   <Teleport to="body">
     <Transition name="smartScope-fade">
-      <div v-if="open" class="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" @click="emit('close')" />
+      <div v-if="open" class="fixed inset-0 z-40 bg-scrim" @click="emit('close')" />
     </Transition>
 
     <Transition name="smartScope-slide">
@@ -170,7 +181,7 @@ async function save() {
               :class="previewLoading ? 'border-border text-muted-foreground' : 'border-primary/30 bg-primary/8 text-primary'"
             >
               <span v-if="previewLoading" class="animate-pulse">{{ t('smartScope.editorPanel.counting') }}</span>
-              <template v-else>{{ t('smartScope.editorPanel.bookCount', { count: formatNumber(previewCount ?? 0) }, previewCount ?? 0) }}</template>
+              <template v-else>{{ t('smartScope.editorPanel.bookCount', { count: previewCount ?? 0 }) }}</template>
             </span>
             <button
               @click="emit('close')"
@@ -188,18 +199,39 @@ async function save() {
             <h3 class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">{{ t('smartScope.editorPanel.identity') }}</h3>
             <div class="flex gap-3">
               <div class="flex-1 flex flex-col gap-1.5">
-                <label class="text-xs font-medium text-foreground/70">{{ t('smartScope.dialog.name') }}</label>
+                <label class="text-xs font-medium text-foreground">{{ t('smartScope.dialog.name') }}</label>
                 <input
                   v-model="draftName"
                   type="text"
                   :placeholder="t('smartScope.dialog.namePlaceholder')"
-                  class="h-10 rounded-lg border border-input bg-card text-foreground text-sm px-3 focus:outline-none focus:ring-2 focus:ring-primary placeholder:text-muted-foreground/60"
+                  class="h-10 rounded-lg border border-input bg-card text-foreground text-sm px-3 focus:outline-none focus:ring-2 focus:ring-primary placeholder:text-muted-foreground"
                 />
               </div>
               <div class="flex-1 flex flex-col gap-1.5">
-                <label class="text-xs font-medium text-foreground/70">{{ t('smartScope.dialog.icon') }}</label>
+                <label class="text-xs font-medium text-foreground">{{ t('smartScope.dialog.icon') }}</label>
                 <IconPicker v-model="draftIcon" :placeholder="t('smartScope.dialog.iconPlaceholder')" />
               </div>
+            </div>
+
+            <div class="flex items-center justify-between py-1">
+              <div>
+                <p class="text-sm font-medium text-foreground">{{ t('smartScope.visibleToAll') }}</p>
+                <p class="text-xs text-muted-foreground mt-0.5">{{ t('smartScope.visibleToAllHint') }}</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-label="t('smartScope.visibleToAll')"
+                :aria-checked="draftIsPublic"
+                class="w-11 h-6 rounded-full transition-colors relative shrink-0"
+                :class="draftIsPublic ? 'bg-primary' : 'bg-muted'"
+                @click="toggleIsPublic"
+              >
+                <div
+                  class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform shadow-sm"
+                  :class="draftIsPublic ? 'translate-x-6' : 'translate-x-1'"
+                />
+              </button>
             </div>
 
             <div class="flex items-center justify-between py-1">
@@ -210,10 +242,11 @@ async function save() {
               <button
                 type="button"
                 role="switch"
+                :aria-label="t('smartScope.syncToKobo')"
                 :aria-checked="draftSyncToKobo"
                 class="w-11 h-6 rounded-full transition-colors relative shrink-0"
                 :class="draftSyncToKobo ? 'bg-primary' : 'bg-muted'"
-                @click="draftSyncToKobo = !draftSyncToKobo"
+                @click="toggleSyncToKobo"
               >
                 <div
                   class="absolute top-1 w-4 h-4 rounded-full bg-white transition-transform shadow-sm"

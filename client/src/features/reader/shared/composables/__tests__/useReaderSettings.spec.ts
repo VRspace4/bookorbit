@@ -1,6 +1,12 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
-import { EPUB_READER_DEFAULTS, migrateFlatEpubDefaultsToV2, type EpubReaderDefaultsStorageV2, type EpubReaderSettings } from '@bookorbit/types'
+import {
+  EPUB_READER_DEFAULTS,
+  migrateFlatEpubDefaultsToV2,
+  type EpubReaderDefaultsStorageV2,
+  type EpubReaderSettings,
+  type ThemeHighlightColors,
+} from '@bookorbit/types'
 import { isReaderSyncEnabled, useReaderSettings } from '../useReaderSettings'
 import { buildThemeHighlightPatch } from '@/features/reader/epub/theme-highlight'
 
@@ -8,13 +14,11 @@ const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>
 
 vi.mock('@/lib/api', () => ({ api: apiMock }))
 
-const userRef = vi.hoisted(() =>
-  ref({
-    settings: { syncReaderPreferences: true },
-  }),
-)
+const userRef = ref({
+  settings: { syncReaderPreferences: true },
+})
 
-const deviceFormFactorRef = vi.hoisted(() => ref<'mobile' | 'tablet' | 'desktop'>('desktop'))
+const deviceFormFactorRef = ref<'mobile' | 'tablet' | 'desktop'>('desktop')
 
 vi.mock('@/features/auth/composables/useAuth', () => ({
   useAuth: () => ({ user: userRef }),
@@ -52,7 +56,7 @@ describe('useReaderSettings', () => {
     localStorage.clear()
     userRef.value = { settings: { syncReaderPreferences: true } }
     deviceFormFactorRef.value = 'desktop'
-    apiMock.mockResolvedValue({ ok: true })
+    apiMock.mockResolvedValue({ ok: true, json: async () => null })
   })
 
   afterEach(() => {
@@ -230,9 +234,10 @@ describe('useReaderSettings', () => {
         migrateFlatEpubDefaultsToV2({
           ...EPUB_READER_DEFAULTS,
           themeHighlightColors: {
+            // Partial on purpose: stored data from older builds can miss a color.
             default: {
               ttsSentenceHighlightColor: '#aa0000',
-            },
+            } as ThemeHighlightColors,
           },
           ttsSentenceHighlightColor: '#aa0000',
           ttsWordHighlightColor: '#bb0000',

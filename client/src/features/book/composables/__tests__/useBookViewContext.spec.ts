@@ -14,6 +14,7 @@ function makeBook(id: number): BookCard {
   return {
     id,
     status: 'active',
+    coverAspectRatio: '2/3',
     title: `Book ${id}`,
     authors: [],
     seriesName: null,
@@ -29,6 +30,7 @@ function makeBook(id: number): BookCard {
     readStatus: null,
     addedAt: '2024-01-01T00:00:00Z',
     updatedAt: null,
+    coverVersion: 'legacy:2024-01-01T00:00:00Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,

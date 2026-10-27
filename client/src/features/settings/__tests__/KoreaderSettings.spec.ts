@@ -3,6 +3,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import KoreaderSettings from '../KoreaderSettings.vue'
 import type { BookCard, KoreaderCredentials, KoreaderManualHashLink, KoreaderSyncStatus, KoreaderUnmatchedBook } from '@bookorbit/types'
 import { copyToClipboard } from '@/lib/clipboard'
+import { toast } from 'vue-sonner'
+
+const routerState = vi.hoisted(() => ({
+  currentQuery: {} as Record<string, string>,
+  replacedQuery: null as Record<string, string> | null,
+}))
+
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ query: routerState.currentQuery }),
+  useRouter: () => ({
+    replace: vi.fn<(to: { name: string; query: Record<string, string> }) => void>((to) => {
+      routerState.replacedQuery = to.query
+    }),
+  }),
+}))
 
 const koreaderMock = vi.hoisted(() => ({
   credentials: { __v_isRef: true, value: null as KoreaderCredentials | null },
@@ -26,6 +41,7 @@ const koreaderMock = vi.hoisted(() => ({
   relinkManualHashLink: vi.fn<() => Promise<void>>(),
   unlinkManualHashLink: vi.fn<() => Promise<void>>(),
   removeDevice: vi.fn<() => Promise<void>>(),
+  setDeviceRetired: vi.fn<() => Promise<void>>(),
 }))
 
 const searchMock = vi.hoisted(() => ({
@@ -55,16 +71,26 @@ vi.mock('@/lib/clipboard', () => ({
   copyToClipboard: vi.fn<(text: string) => Promise<boolean>>().mockResolvedValue(true),
 }))
 
-vi.mock('../SettingsPageHeader.vue', () => ({
-  default: { template: '<div />' },
+vi.mock('../KoreaderFileNamingSettings.vue', () => ({
+  default: { template: '<div data-testid="file-naming-settings" />' },
 }))
 
 function makeCredentials(overrides: Partial<KoreaderCredentials> = {}): KoreaderCredentials {
   return {
     username: 'reader-user',
     syncEnabled: true,
+    hideAudioOnlyBooks: true,
     createdAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
+  }
+}
+
+function makeRetiredDeviceStatus(): KoreaderSyncStatus {
+  const base = makeSyncStatus()
+  return {
+    ...base,
+    devices: base.devices.map((device) => ({ ...device, retiredAt: '2026-01-05T00:00:00.000Z' })),
+    sweeps: base.sweeps.map((sweep) => ({ ...sweep, retiredAt: '2026-01-05T00:00:00.000Z' })),
   }
 }
 
@@ -77,23 +103,26 @@ function makeSyncStatus(overrides: Partial<KoreaderSyncStatus> = {}): KoreaderSy
         deviceId: 'device-1',
         lastSyncAt: '2026-01-02T00:00:00.000Z',
         lastBookTitle: 'Project Hail Mary',
+        retiredAt: null,
       },
     ],
     totalSyncedBooks: 14,
     lastSyncAt: '2026-01-02T00:00:00.000Z',
-    latestPluginVersion: '0.5.0',
+    latestPluginVersion: '1.6.0',
     pluginUpdateAvailable: true,
     sweeps: [
       {
         deviceId: 'device-1',
         deviceModel: 'Kobo Libra 2',
-        pluginVersion: '0.3.0',
-        latestPluginVersion: '0.5.0',
+        pluginVersion: '1.4.0',
+        latestPluginVersion: '1.6.0',
         updateAvailable: true,
+        requiresManualUpdate: false,
         lastSweepAt: '2026-01-02T00:00:00.000Z',
         lastSweepBooksMatched: 12,
         lastSweepPageStats: 30,
         lastSweepAnnotations: 8,
+        retiredAt: null,
       },
     ],
     pluginTotals: {
@@ -181,9 +210,16 @@ function buttonByText(wrapper: ReturnType<typeof mount>, text: string) {
   return wrapper.findAll('button').find((button) => button.text().includes(text))
 }
 
+function setInputValue(input: HTMLInputElement, value: string): void {
+  input.value = value
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 describe('KoreaderSettings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    routerState.currentQuery = {}
+    routerState.replacedQuery = null
     koreaderMock.credentials.value = null
     koreaderMock.syncStatus.value = null
     koreaderMock.unmatchedBooks.value = []
@@ -205,6 +241,7 @@ describe('KoreaderSettings', () => {
     koreaderMock.relinkManualHashLink.mockResolvedValue(undefined)
     koreaderMock.unlinkManualHashLink.mockResolvedValue(undefined)
     koreaderMock.removeDevice.mockResolvedValue(undefined)
+    koreaderMock.setDeviceRetired.mockResolvedValue(undefined)
     searchMock.results.value = []
     searchMock.loading.value = false
     searchMock.loadingMore.value = false
@@ -212,6 +249,36 @@ describe('KoreaderSettings', () => {
     searchMock.hasMore.value = false
     searchMock.loadMore.mockClear()
     searchMock.clear.mockClear()
+  })
+
+  it('switches between sync and file naming tabs outside embedded mode', async () => {
+    const wrapper = mount(KoreaderSettings)
+    await flushPromises()
+
+    expect(routerState.replacedQuery).toEqual({ tab: 'settings' })
+    const fileNamingTab = buttonByText(wrapper, 'File Naming')!
+    const syncTab = buttonByText(wrapper, 'Sync Settings')!
+    expect(syncTab.attributes('aria-pressed')).toBe('true')
+    expect(fileNamingTab.attributes('aria-pressed')).toBe('false')
+    await fileNamingTab.trigger('click')
+    expect(fileNamingTab.classes()).toContain('border-primary')
+    expect(fileNamingTab.attributes('aria-pressed')).toBe('true')
+    expect(routerState.replacedQuery).toEqual({ tab: 'file-naming' })
+    await syncTab.trigger('click')
+    expect(syncTab.classes()).toContain('border-primary')
+    expect(syncTab.attributes('aria-pressed')).toBe('true')
+    expect(routerState.replacedQuery).toEqual({ tab: 'settings' })
+  })
+
+  it('opens the tab selected by the URL query', async () => {
+    routerState.currentQuery = { tab: 'file-naming' }
+
+    const wrapper = mount(KoreaderSettings)
+    await flushPromises()
+
+    expect(buttonByText(wrapper, 'File Naming')!.attributes('aria-pressed')).toBe('true')
+    expect(wrapper.find('[data-testid="file-naming-settings"]').isVisible()).toBe(true)
+    expect(routerState.replacedQuery).toBeNull()
   })
 
   it('shows loading state', () => {
@@ -242,14 +309,16 @@ describe('KoreaderSettings', () => {
     expect(wrapper.text()).not.toContain('Setup Guide')
 
     await buttonByText(wrapper, 'Create credentials')!.trigger('click')
-    await wrapper.find('input[type="text"]').setValue('new-reader')
-    await wrapper.find('input[type="password"]').setValue('secret1')
+    const [usernameField, passwordField] = wrapper.findAll('input[type="text"]')
+    expect(passwordField.classes()).toContain('input-secret')
+    await usernameField.setValue('new-reader')
+    await passwordField.setValue('secret1')
     await buttonByText(wrapper, 'Create')!.trigger('click')
 
     expect(koreaderMock.createCredentials).toHaveBeenCalledWith({ username: 'new-reader', password: 'secret1' })
   })
 
-  it('renders configured status, setup, device, activity, guide, and danger sections', async () => {
+  it('renders configured status, plugin library, setup, device, activity, guide, and danger sections', async () => {
     const status = makeSyncStatus()
     koreaderMock.credentials.value = status.credentials
     koreaderMock.syncStatus.value = status
@@ -259,10 +328,11 @@ describe('KoreaderSettings', () => {
 
     expect(wrapper.findAll('.settings-group-label').map((label) => label.text())).toEqual([
       'KOReader Status',
+      'Plugin Library',
       'Setup',
       'Devices',
       'Plugin Activity',
-      'Unmatched KOReader Books',
+      'KOReader Books to Review',
       'Manual KOReader Links',
       'Setup Guide',
       'Danger Zone',
@@ -270,19 +340,86 @@ describe('KoreaderSettings', () => {
     expect(wrapper.text()).toContain('reader-user')
     expect(wrapper.text()).toContain('14 books')
     expect(wrapper.text()).toContain('1 device')
-    const syncUrlInput = wrapper.find('input[readonly]').element as HTMLInputElement
-    expect(syncUrlInput.value).toBe('https://bookorbit.example')
+    expect(wrapper.text()).toContain('KOReader sync URL')
+    expect(wrapper.text()).toContain("Works with the BookOrbit plugin and KOReader's built-in progress sync.")
+    expect((wrapper.find('#koreader-sync-url').element as HTMLInputElement).value).toBe('https://bookorbit.example/api/v1/koreader')
     expect(wrapper.text()).toContain('Kobo Libra 2')
     expect(wrapper.text()).toContain('Project Hail Mary')
-    expect(wrapper.text()).toContain('Latest plugin: v0.5.0')
+    expect(wrapper.text()).toContain('Latest plugin: v1.6.0')
     expect(wrapper.text()).toContain('Update available')
-    expect(wrapper.text()).toContain('latest plugin v0.5.0')
+    expect(wrapper.text()).toContain('latest plugin v1.6.0')
     expect(wrapper.text()).toContain('Matched books')
-    expect(wrapper.text()).toContain('No unmatched KOReader books.')
+    expect(wrapper.text()).toContain('No KOReader books to review.')
+    expect(wrapper.text()).toContain('Unlinked books can still sync through an automatic match.')
     expect(wrapper.text()).toContain('No manual KOReader links.')
     expect(wrapper.text()).toContain('2 deleted highlights awaiting KOReader plugin acknowledgement.')
     expect(wrapper.text()).toContain('3 highlight positions need attention.')
     expect(wrapper.text()).not.toContain('Download the preconfigured plugin above.')
+  })
+
+  it('updates an existing KOReader username and password without deleting credentials', async () => {
+    const status = makeSyncStatus()
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await buttonByText(wrapper, 'Change credentials')!.trigger('click')
+    await flushPromises()
+
+    const usernameInput = document.body.querySelector<HTMLInputElement>('#koreader-credentials-username')!
+    const passwordInput = document.body.querySelector<HTMLInputElement>('#koreader-credentials-password')!
+    const saveButton = Array.from(document.body.querySelectorAll('button')).find((button) => button.textContent?.includes('Save credentials'))!
+    expect(usernameInput.value).toBe('reader-user')
+    expect(passwordInput.classList.contains('input-secret')).toBe(true)
+    expect(saveButton.disabled).toBe(true)
+
+    setInputValue(passwordInput, 'short')
+    await flushPromises()
+    expect(saveButton.disabled).toBe(true)
+    expect(document.body.textContent).toContain('The password must be between 6 and 128 characters.')
+
+    setInputValue(usernameInput, 'replacement-reader')
+    setInputValue(passwordInput, 'new-secret')
+    await flushPromises()
+    expect(saveButton.disabled).toBe(false)
+    saveButton.click()
+    await flushPromises()
+
+    expect(koreaderMock.updateCredentials).toHaveBeenCalledWith({
+      username: 'replacement-reader',
+      password: 'new-secret',
+    })
+    expect(document.body.textContent).not.toContain('Change KOReader credentials')
+    wrapper.unmount()
+  })
+
+  it('keeps the credential dialog open when updating credentials fails', async () => {
+    const status = makeSyncStatus()
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+    koreaderMock.updateCredentials.mockRejectedValueOnce(new Error('Username already taken'))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await buttonByText(wrapper, 'Change credentials')!.trigger('click')
+    await flushPromises()
+
+    const usernameInput = document.body.querySelector<HTMLInputElement>('#koreader-credentials-username')!
+    setInputValue(usernameInput, 'taken-reader')
+    await flushPromises()
+    const saveButton = Array.from(document.body.querySelectorAll('button')).find((button) => button.textContent?.includes('Save credentials'))!
+    saveButton.click()
+    await flushPromises()
+
+    expect(koreaderMock.updateCredentials).toHaveBeenCalledWith({
+      username: 'taken-reader',
+    })
+    expect(document.body.textContent).toContain('Username already taken')
+    expect(document.body.textContent).toContain('Change KOReader credentials')
+    wrapper.unmount()
   })
 
   it('expands the setup guide only when requested', async () => {
@@ -298,6 +435,14 @@ describe('KoreaderSettings', () => {
     await buttonByText(wrapper, 'KOReader setup steps')!.trigger('click')
 
     expect(wrapper.text()).toContain('Download the preconfigured plugin above.')
+    expect(wrapper.text()).toContain('Set the custom sync server to the URL shown above.')
+    expect(wrapper.findAll('#koreader-sync-url')).toHaveLength(1)
+
+    const copyButton = wrapper.find('#koreader-sync-url-copy')
+    await copyButton.trigger('click')
+
+    expect(vi.mocked(copyToClipboard)).toHaveBeenLastCalledWith('https://bookorbit.example/api/v1/koreader')
+    expect(copyButton.text()).toContain('Copied')
   })
 
   it('shows current plugin state without an update warning when reported devices are current', async () => {
@@ -307,13 +452,15 @@ describe('KoreaderSettings', () => {
         {
           deviceId: 'device-1',
           deviceModel: 'Kobo Libra 2',
-          pluginVersion: '0.5.0',
-          latestPluginVersion: '0.5.0',
+          pluginVersion: '1.6.0',
+          latestPluginVersion: '1.6.0',
           updateAvailable: false,
+          requiresManualUpdate: false,
           lastSweepAt: '2026-01-02T00:00:00.000Z',
           lastSweepBooksMatched: 12,
           lastSweepPageStats: 30,
           lastSweepAnnotations: 8,
+          retiredAt: null,
         },
       ],
     })
@@ -323,9 +470,39 @@ describe('KoreaderSettings', () => {
     const wrapper = mountComponent()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Latest plugin: v0.5.0')
+    expect(wrapper.text()).toContain('Latest plugin: v1.6.0')
     expect(wrapper.text()).toContain('Up to date')
-    expect(wrapper.text()).not.toContain('latest plugin v0.5.0')
+    expect(wrapper.text()).not.toContain('latest plugin v1.6.0')
+  })
+
+  it('tells the user to install by hand when the device plugin cannot update itself', async () => {
+    const status = makeSyncStatus({
+      sweeps: [
+        {
+          deviceId: 'device-1',
+          deviceModel: 'Kobo Libra 2',
+          pluginVersion: '1.3.0',
+          latestPluginVersion: '1.5.0',
+          updateAvailable: true,
+          requiresManualUpdate: true,
+          lastSweepAt: '2026-01-02T00:00:00.000Z',
+          lastSweepBooksMatched: 12,
+          lastSweepPageStats: 30,
+          lastSweepAnnotations: 8,
+          retiredAt: null,
+        },
+      ],
+    })
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Manual update required')
+    expect(wrapper.text()).toContain('cannot install its own updates')
+    // The device badge must not also claim a self-update is on offer.
+    expect(wrapper.text()).not.toContain('latest plugin v1.5.0')
   })
 
   it('keeps plugin update state explicit when the server cannot report the latest version', async () => {
@@ -336,13 +513,15 @@ describe('KoreaderSettings', () => {
         {
           deviceId: 'device-1',
           deviceModel: 'Kobo Libra 2',
-          pluginVersion: '0.5.0',
+          pluginVersion: '1.6.0',
           latestPluginVersion: null,
           updateAvailable: null,
+          requiresManualUpdate: false,
           lastSweepAt: '2026-01-02T00:00:00.000Z',
           lastSweepBooksMatched: 12,
           lastSweepPageStats: 30,
           lastSweepAnnotations: 8,
+          retiredAt: null,
         },
       ],
     })
@@ -376,7 +555,7 @@ describe('KoreaderSettings', () => {
     expect(koreaderMock.fetchUnmatchedBooks).toHaveBeenCalledTimes(2)
     expect(koreaderMock.fetchManualHashLinks).toHaveBeenCalledTimes(2)
     expect(koreaderMock.updateCredentials).toHaveBeenCalledWith({ syncEnabled: false })
-    expect(vi.mocked(copyToClipboard)).toHaveBeenCalledWith('https://bookorbit.example')
+    expect(vi.mocked(copyToClipboard)).toHaveBeenCalledWith('https://bookorbit.example/api/v1/koreader')
     expect(koreaderMock.downloadPluginPackage).toHaveBeenCalledTimes(1)
     expect(wrapper.text()).toContain('Delete KOReader credentials?')
 
@@ -384,6 +563,47 @@ describe('KoreaderSettings', () => {
     await deleteButtons[deleteButtons.length - 1]!.trigger('click')
 
     expect(koreaderMock.deleteCredentials).toHaveBeenCalledTimes(1)
+  })
+
+  it('names the audiobook-only switch and saves the reader turning it off', async () => {
+    const status = makeSyncStatus()
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    const toggle = wrapper.get('[aria-labelledby="koreader-hide-audio-only-label"]')
+    expect(toggle.attributes('role')).toBe('switch')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(wrapper.get('#koreader-hide-audio-only-label').text()).toBe('Hide audiobook-only books')
+    expect(wrapper.find(`#${toggle.attributes('aria-describedby')}`).exists()).toBe(true)
+
+    await toggle.trigger('click')
+    await flushPromises()
+
+    expect(koreaderMock.updateCredentials).toHaveBeenCalledWith({ hideAudioOnlyBooks: false })
+    expect(vi.mocked(toast.success)).toHaveBeenCalledWith('Audiobook-only books shown in the plugin')
+    expect(toggle.attributes('disabled')).toBeUndefined()
+  })
+
+  it('reports a failed audiobook-only switch and lets the reader try again', async () => {
+    const status = makeSyncStatus()
+    koreaderMock.credentials.value = { ...status.credentials!, hideAudioOnlyBooks: false }
+    koreaderMock.syncStatus.value = status
+    koreaderMock.updateCredentials.mockRejectedValueOnce(new Error('offline'))
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    const toggle = wrapper.get('[aria-labelledby="koreader-hide-audio-only-label"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    await flushPromises()
+
+    expect(koreaderMock.updateCredentials).toHaveBeenCalledWith({ hideAudioOnlyBooks: true })
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith('Failed to update the plugin library setting')
+    expect(toggle.attributes('disabled')).toBeUndefined()
   })
 
   it('opens the unmatched link dialog and submits the selected BookOrbit book', async () => {
@@ -398,6 +618,9 @@ describe('KoreaderSettings', () => {
 
     await buttonByText(wrapper, 'Link')!.trigger('click')
     expect(wrapper.text()).toContain('Link KOReader book')
+    const searchInput = wrapper.find('input[type="search"]')
+    await searchInput.setValue('BookOrbit')
+    expect((searchInput.element as HTMLInputElement).value).toBe('BookOrbit')
     expect(wrapper.text()).toContain('BookOrbit Title')
 
     const bookResult = wrapper.findAll('button').find((button) => button.text().includes('BookOrbit Title'))!
@@ -499,8 +722,8 @@ describe('KoreaderSettings', () => {
 
     await buttonByText(wrapper, 'Dismiss all')!.trigger('click')
 
-    expect(wrapper.text()).toContain('Dismiss all 2 unmatched books?')
-    expect(wrapper.text()).toContain('clears your entire unmatched books list')
+    expect(wrapper.text()).toContain('Dismiss all 2 books to review?')
+    expect(wrapper.text()).toContain('clears your entire books to review list')
 
     const dismissAllButtons = wrapper.findAll('button').filter((button) => button.text() === 'Dismiss all')
     await dismissAllButtons[dismissAllButtons.length - 1]!.trigger('click')
@@ -522,7 +745,7 @@ describe('KoreaderSettings', () => {
     await buttonByText(wrapper, 'Cancel')!.trigger('click')
 
     expect(koreaderMock.dismissAllUnmatchedBooks).not.toHaveBeenCalled()
-    expect(wrapper.text()).not.toContain('clears your entire unmatched books list')
+    expect(wrapper.text()).not.toContain('clears your entire books to review list')
   })
 
   it('keeps the confirm dialog open and reports an error when dismissing all unmatched books fails', async () => {
@@ -541,7 +764,7 @@ describe('KoreaderSettings', () => {
     await flushPromises()
 
     expect(koreaderMock.dismissAllUnmatchedBooks).toHaveBeenCalledTimes(1)
-    expect(wrapper.text()).toContain('clears your entire unmatched books list')
+    expect(wrapper.text()).toContain('clears your entire books to review list')
   })
 
   it('loads more BookOrbit search results from the link dialog', async () => {
@@ -574,7 +797,10 @@ describe('KoreaderSettings', () => {
     expect(wrapper.text()).toContain('Linked KOReader Title')
     expect(wrapper.text()).toContain('Linked to Linked BookOrbit Title')
 
-    await buttonByText(wrapper, 'Change')!.trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Change')!
+      .trigger('click')
     await wrapper
       .findAll('button')
       .find((button) => button.text().includes('Replacement Book'))!
@@ -597,6 +823,7 @@ describe('KoreaderSettings', () => {
     await buttonByText(wrapper, 'Unlink')!.trigger('click')
 
     expect(wrapper.text()).toContain('Unlink KOReader book?')
+    expect(wrapper.text()).toContain('Future syncs will use an automatic match if one exists.')
     expect(wrapper.text()).toContain('Already synced stats will stay on their current BookOrbit book.')
 
     const unlinkButtons = wrapper.findAll('button').filter((button) => button.text() === 'Unlink')
@@ -606,7 +833,7 @@ describe('KoreaderSettings', () => {
     expect(koreaderMock.unlinkManualHashLink).toHaveBeenCalledWith('b'.repeat(32))
   })
 
-  it('confirms before removing a device', async () => {
+  it('retires a device from the active list without deleting anything', async () => {
     const status = makeSyncStatus()
     koreaderMock.credentials.value = status.credentials
     koreaderMock.syncStatus.value = status
@@ -614,38 +841,73 @@ describe('KoreaderSettings', () => {
     const wrapper = mountComponent()
     await flushPromises()
 
-    await buttonByText(wrapper, 'Remove')!.trigger('click')
+    await buttonByText(wrapper, 'Retire')!.trigger('click')
+    await flushPromises()
 
-    expect(wrapper.text()).toContain('Remove Kobo Libra 2?')
-    expect(wrapper.text()).toContain("permanently deletes this device's synced progress, reading activity, and any unmatched-book entries")
+    expect(koreaderMock.setDeviceRetired).toHaveBeenCalledWith('device-1', true)
+    expect(koreaderMock.removeDevice).not.toHaveBeenCalled()
+  })
 
-    const removeButtons = wrapper.findAll('button').filter((button) => button.text() === 'Remove')
-    await removeButtons[removeButtons.length - 1]!.trigger('click')
+  it('lists retired devices in a collapsed group and restores them on request', async () => {
+    const status = makeRetiredDeviceStatus()
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('1 retired device')
+    expect(buttonByText(wrapper, 'Restore')).toBeUndefined()
+
+    await buttonByText(wrapper, '1 retired device')!.trigger('click')
+    await buttonByText(wrapper, 'Restore')!.trigger('click')
+    await flushPromises()
+
+    expect(koreaderMock.setDeviceRetired).toHaveBeenCalledWith('device-1', false)
+  })
+
+  it("confirms before deleting a retired device's synced data", async () => {
+    const status = makeRetiredDeviceStatus()
+    koreaderMock.credentials.value = status.credentials
+    koreaderMock.syncStatus.value = status
+
+    const wrapper = mountComponent()
+    await flushPromises()
+
+    await buttonByText(wrapper, '1 retired device')!.trigger('click')
+    await buttonByText(wrapper, 'Delete data')!.trigger('click')
+
+    expect(wrapper.text()).toContain('Delete synced data from Kobo Libra 2?')
+    expect(wrapper.text()).toContain('Reading sessions already recorded in your stats are kept')
+
+    const deleteButtons = wrapper.findAll('button').filter((button) => button.text() === 'Delete data')
+    await deleteButtons[deleteButtons.length - 1]!.trigger('click')
     await flushPromises()
 
     expect(koreaderMock.removeDevice).toHaveBeenCalledWith('device-1')
-    expect(wrapper.text()).not.toContain('Remove Kobo Libra 2?')
+    expect(wrapper.text()).not.toContain('Delete synced data from Kobo Libra 2?')
   })
 
-  it('cancels removing a device without calling removeDevice', async () => {
-    const status = makeSyncStatus()
+  it('cancels deleting a device without calling removeDevice', async () => {
+    const status = makeRetiredDeviceStatus()
     koreaderMock.credentials.value = status.credentials
     koreaderMock.syncStatus.value = status
 
     const wrapper = mountComponent()
     await flushPromises()
 
-    await buttonByText(wrapper, 'Remove')!.trigger('click')
-    expect(wrapper.text()).toContain('Remove Kobo Libra 2?')
+    await buttonByText(wrapper, '1 retired device')!.trigger('click')
+    await buttonByText(wrapper, 'Delete data')!.trigger('click')
+    expect(wrapper.text()).toContain('Delete synced data from Kobo Libra 2?')
 
     await buttonByText(wrapper, 'Cancel')!.trigger('click')
 
     expect(koreaderMock.removeDevice).not.toHaveBeenCalled()
-    expect(wrapper.text()).not.toContain('Remove Kobo Libra 2?')
+    expect(wrapper.text()).not.toContain('Delete synced data from Kobo Libra 2?')
   })
 
-  it('keeps the confirm dialog open and reports an error when removing a device fails', async () => {
-    const status = makeSyncStatus()
+  it('keeps the confirm dialog open and reports an error when deleting a device fails', async () => {
+    const status = makeRetiredDeviceStatus()
     koreaderMock.credentials.value = status.credentials
     koreaderMock.syncStatus.value = status
     koreaderMock.removeDevice.mockRejectedValueOnce(new Error('Failed to remove KOReader device'))
@@ -653,13 +915,14 @@ describe('KoreaderSettings', () => {
     const wrapper = mountComponent()
     await flushPromises()
 
-    await buttonByText(wrapper, 'Remove')!.trigger('click')
-    const removeButtons = wrapper.findAll('button').filter((button) => button.text() === 'Remove')
-    await removeButtons[removeButtons.length - 1]!.trigger('click')
+    await buttonByText(wrapper, '1 retired device')!.trigger('click')
+    await buttonByText(wrapper, 'Delete data')!.trigger('click')
+    const deleteButtons = wrapper.findAll('button').filter((button) => button.text() === 'Delete data')
+    await deleteButtons[deleteButtons.length - 1]!.trigger('click')
     await flushPromises()
 
     expect(koreaderMock.removeDevice).toHaveBeenCalledWith('device-1')
-    expect(wrapper.text()).toContain('Remove Kobo Libra 2?')
+    expect(wrapper.text()).toContain('Delete synced data from Kobo Libra 2?')
   })
 
   it('renders hash-only unmatched rows with a distinguishable fallback label', async () => {

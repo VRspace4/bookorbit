@@ -1,30 +1,17 @@
-import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { CoverSearchResult } from '@bookorbit/types';
-import { eq } from 'drizzle-orm';
-import { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { CoverSearchResult, type CoverMedium } from '@bookorbit/types';
+import type { BookCoverSource } from '../book-cover-store/book-cover-store.repository';
 
-import { bookCoverDirPath, bookThumbnailPath, findExtractedBookCoverFileName } from '../../common/book-cover-storage';
 import type { RequestUser } from '../../common/types/request-user';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
 import { ensureSafeRemoteHost } from '../../common/utils/ssrf.utils';
-import { DB } from '../../db';
-import * as schema from '../../db/schema';
-import { bookMetadata, books } from '../../db/schema';
 import { BookReadService } from '../book/book-read.service';
+import { BookCoverStore } from '../book-cover-store/book-cover-store.service';
 import { BookMetadataLockService } from '../book-metadata-lock/book-metadata-lock.service';
 import { FileWriteService } from '../file-write/file-write.service';
 import { LibraryService } from '../library/library.service';
-import { generateThumbnail, imageExt } from '../metadata/lib/cover';
-import {
-  COVER_CUSTOM_FILE_PREFIX,
-  COVER_PROXY_MAX_IMAGE_BYTES,
-  COVER_PROXY_MAX_REDIRECTS,
-  COVER_PROXY_TIMEOUT_MS,
-  COVER_PROXY_USER_AGENT,
-} from './constants';
+import { MetadataScoreService } from '../metadata-score/metadata-score.service';
+import { COVER_PROXY_MAX_IMAGE_BYTES, COVER_PROXY_MAX_REDIRECTS, COVER_PROXY_TIMEOUT_MS, COVER_PROXY_USER_AGENT } from './constants';
 import { CoverProviderRegistry } from './provider-registry';
 import {
   COVER_PROVIDER_ALL_KEY,
@@ -34,8 +21,6 @@ import {
   ITUNES_PROVIDER_KEY,
 } from './providers/cover-provider';
 
-type Db = NodePgDatabase<typeof schema>;
-
 const SAFE_REMOTE_PROTOCOLS = new Set(['http:', 'https:']);
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const ITUNES_INTERLEAVE_LIMIT = 5;
@@ -43,19 +28,16 @@ const ITUNES_INTERLEAVE_LIMIT = 5;
 @Injectable()
 export class CoverService {
   private readonly logger = new Logger(CoverService.name);
-  private readonly appDataPath: string;
 
   constructor(
-    @Inject(DB) private readonly db: Db,
     private readonly bookReadService: BookReadService,
     private readonly bookMetadataLockService: BookMetadataLockService,
     private readonly fileWriteService: FileWriteService,
     private readonly libraryService: LibraryService,
-    private readonly config: ConfigService,
     private readonly providerRegistry: CoverProviderRegistry,
-  ) {
-    this.appDataPath = this.config.get<string>('storage.appDataPath')!;
-  }
+    private readonly metadataScoreService: MetadataScoreService,
+    private readonly coverStore: BookCoverStore,
+  ) {}
 
   async searchCovers(params: CoverSearchParams & { provider?: string }): Promise<CoverSearchResult[]> {
     const { provider, ...searchParams } = params;
@@ -108,16 +90,17 @@ export class CoverService {
     }
   }
 
-  async uploadCover(bookId: number, buffer: Buffer, mimeType: string, user: RequestUser): Promise<void> {
+  async uploadCover(bookId: number, buffer: Buffer, mimeType: string, user: RequestUser, requestedMedium?: CoverMedium): Promise<void> {
     const startedAt = Date.now();
     this.logger.log(`[cover.upload] [start] bookId=${bookId} userId=${user.id} - custom cover upload started`);
 
     try {
       if (!mimeType.startsWith('image/')) throw new BadRequestException('File must be an image');
       await this.verifyAccess(bookId, user);
-      await this.bookMetadataLockService.assertFieldsUnlocked(bookId, ['cover']);
-      await this.saveCustomCover(bookId, buffer);
-      await this.setCoverSource(bookId, 'custom');
+      const medium = requestedMedium ?? (await this.unspecifiedWriteMedium(bookId));
+      await this.bookMetadataLockService.assertFieldsUnlocked(bookId, [this.lockField(medium)]);
+      await this.coverStore.saveCustom(bookId, medium, buffer);
+      await this.metadataScoreService.calculateAndSave(bookId);
       this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
       this.logger.log(
         `[cover.upload] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} coverSource=custom - custom cover upload completed`,
@@ -130,7 +113,7 @@ export class CoverService {
     }
   }
 
-  async uploadCoverFromUrl(bookId: number, url: string, user: RequestUser): Promise<void> {
+  async uploadCoverFromUrl(bookId: number, url: string, user: RequestUser, requestedMedium?: CoverMedium): Promise<void> {
     const startedAt = Date.now();
     this.logger.log(
       `[cover.upload_from_url] [start] bookId=${bookId} userId=${user.id} urlHost=${hostForLog(url)} - custom cover upload from URL started`,
@@ -138,10 +121,11 @@ export class CoverService {
 
     try {
       await this.verifyAccess(bookId, user);
-      await this.bookMetadataLockService.assertFieldsUnlocked(bookId, ['cover']);
+      const medium = requestedMedium ?? (await this.unspecifiedWriteMedium(bookId));
+      await this.bookMetadataLockService.assertFieldsUnlocked(bookId, [this.lockField(medium)]);
       const { buffer } = await this.fetchRemoteImage(url);
-      await this.saveCustomCover(bookId, buffer);
-      await this.setCoverSource(bookId, 'custom');
+      await this.coverStore.saveCustom(bookId, medium, buffer);
+      await this.metadataScoreService.calculateAndSave(bookId);
       this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
       this.logger.log(
         `[cover.upload_from_url] [end] bookId=${bookId} userId=${user.id} urlHost=${hostForLog(url)} durationMs=${Date.now() - startedAt} coverSource=custom - custom cover upload from URL completed`,
@@ -154,35 +138,21 @@ export class CoverService {
     }
   }
 
-  async deleteCover(bookId: number, user: RequestUser): Promise<'extracted' | null> {
+  async deleteCover(bookId: number, user: RequestUser, requestedMedium?: CoverMedium): Promise<BookCoverSource | null> {
     const startedAt = Date.now();
     this.logger.log(`[cover.delete] [start] bookId=${bookId} userId=${user.id} - cover deletion started`);
 
     try {
       await this.verifyAccess(bookId, user);
-      await this.bookMetadataLockService.assertFieldsUnlocked(bookId, ['cover']);
-      const dir = bookCoverDirPath(this.appDataPath, bookId);
-      await this.deleteFilesByPrefix(dir, COVER_CUSTOM_FILE_PREFIX);
-
-      const extractedPath = await this.findExtractedCover(bookId);
-      if (!extractedPath) {
-        await this.removeFileIfPresent(bookThumbnailPath(this.appDataPath, bookId));
-        await this.setCoverSource(bookId, null);
-        this.logger.log(
-          `[cover.delete] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} coverSource=null - cover deletion completed`,
-        );
-        return null;
-      }
-
-      const bytes = await readFile(extractedPath);
-      const thumb = await generateThumbnail(bytes);
-      await writeFile(bookThumbnailPath(this.appDataPath, bookId), thumb);
-      await this.setCoverSource(bookId, 'extracted');
-      this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
+      const medium = requestedMedium ?? (await this.coverStore.faceMediumFor(bookId));
+      await this.bookMetadataLockService.assertFieldsUnlocked(bookId, [this.lockField(medium)]);
+      const coverSource = await this.coverStore.revert(bookId, medium);
+      await this.metadataScoreService.calculateAndSave(bookId);
+      if (coverSource) this.fileWriteService.scheduleWrite(bookId, 'auto', user.id);
       this.logger.log(
-        `[cover.delete] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} coverSource=extracted - cover deletion completed`,
+        `[cover.delete] [end] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} coverSource=${coverSource ?? 'null'} - cover deletion completed`,
       );
-      return 'extracted';
+      return coverSource;
     } catch (error) {
       this.logger.warn(
         `[cover.delete] [fail] bookId=${bookId} userId=${user.id} durationMs=${Date.now() - startedAt} errorClass=${errorClass(error)} error="${sanitizeErrorMessage(error)}" - cover deletion failed`,
@@ -239,37 +209,23 @@ export class CoverService {
     return deduped;
   }
 
-  private async saveCustomCover(bookId: number, buffer: Buffer): Promise<void> {
-    const dir = bookCoverDirPath(this.appDataPath, bookId);
-    await mkdir(dir, { recursive: true });
-    await this.deleteFilesByPrefix(dir, COVER_CUSTOM_FILE_PREFIX);
-
-    const ext = imageExt(buffer);
-    await writeFile(join(dir, `${COVER_CUSTOM_FILE_PREFIX}${ext}`), buffer);
-    const thumb = await generateThumbnail(buffer);
-    await writeFile(bookThumbnailPath(this.appDataPath, bookId), thumb);
-  }
-
-  private async findExtractedCover(bookId: number): Promise<string | null> {
-    const dir = bookCoverDirPath(this.appDataPath, bookId);
-    const files = await this.readDirIfExists(dir);
-    const found = findExtractedBookCoverFileName(files);
-    return found ? join(dir, found) : null;
-  }
-
   private async verifyAccess(bookId: number, user: RequestUser): Promise<void> {
     const libraryId = await this.bookReadService.findLibraryIdByBookId(bookId);
     if (libraryId === null) throw new NotFoundException(`Book ${bookId} not found`);
-    await this.libraryService.verifyUserAccess(user.id, libraryId, user.isSuperuser);
+    await this.libraryService.verifyUserAccessLevel(user.id, libraryId, user.isSuperuser, 'editor');
   }
 
-  private async setCoverSource(bookId: number, source: 'extracted' | 'custom' | null): Promise<void> {
-    const now = new Date();
-    await this.db
-      .insert(bookMetadata)
-      .values({ bookId, coverSource: source, updatedAt: now })
-      .onConflictDoUpdate({ target: bookMetadata.bookId, set: { coverSource: source, updatedAt: now } });
-    await this.db.update(books).set({ updatedAt: now }).where(eq(books.id, bookId));
+  /**
+   * A write that names no slot comes from a client that shows one cover per book, the face, such as
+   * an iOS build from before cover slots. It lands in the slot the face shows, not in the slot its
+   * shape suits, or a square image picked for a 2:3 library would change nothing that client sees.
+   */
+  private unspecifiedWriteMedium(bookId: number): Promise<CoverMedium> {
+    return this.coverStore.chooseWriteMedium(bookId);
+  }
+
+  private lockField(medium: CoverMedium): 'cover' | 'audioCover' {
+    return medium === 'ebook' ? 'cover' : 'audioCover';
   }
 
   private async fetchRemoteImage(rawUrl: string): Promise<{ buffer: Buffer; contentType: string }> {
@@ -386,32 +342,6 @@ export class CoverService {
     return Buffer.concat(chunks);
   }
 
-  private async readDirIfExists(path: string): Promise<string[]> {
-    try {
-      return await readdir(path);
-    } catch (error) {
-      if (hasErrorCode(error, 'ENOENT')) return [];
-      throw error;
-    }
-  }
-
-  private async deleteFilesByPrefix(path: string, prefix: string): Promise<void> {
-    const files = await this.readDirIfExists(path);
-    for (const fileName of files) {
-      if (!fileName.startsWith(prefix)) continue;
-      await this.removeFileIfPresent(join(path, fileName));
-    }
-  }
-
-  private async removeFileIfPresent(path: string): Promise<void> {
-    try {
-      await unlink(path);
-    } catch (error) {
-      if (hasErrorCode(error, 'ENOENT')) return;
-      throw error;
-    }
-  }
-
   private isRedirectStatus(status: number): boolean {
     return REDIRECT_STATUS_CODES.has(status);
   }
@@ -423,10 +353,6 @@ function hostForLog(rawUrl: string): string {
   } catch {
     return 'invalid';
   }
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: string }).code === code);
 }
 
 function sanitizeErrorMessage(error: unknown): string {

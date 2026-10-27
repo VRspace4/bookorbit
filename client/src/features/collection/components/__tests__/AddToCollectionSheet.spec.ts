@@ -44,12 +44,17 @@ vi.mock('@/composables/useVirtualKeyboard', () => ({
 function makeCollection(overrides: Partial<Collection> = {}): Collection {
   return {
     id: 10,
+    userId: 1,
+    mediaType: 'books',
     name: 'Favorites',
     icon: 'FolderOpen',
     description: null,
+    isPublic: false,
+    isOwner: true,
     syncToKobo: false,
     displayOrder: 0,
     bookCount: 3,
+    podcastCount: 0,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...overrides,
@@ -215,14 +220,14 @@ describe('AddToCollectionSheet', () => {
     await flushPromises()
 
     expect(fetchCollectionsWithMembershipMock).toHaveBeenCalledWith(selectionPayload)
-    expect(wrapper.text()).toContain('1833 books selected')
+    expect(wrapper.text()).toContain('1,833 books selected')
     expect(wrapper.text()).toContain('100 of 1833 in this collection')
 
     await findButtonByText(wrapper, 'All Dune').trigger('click')
     await flushPromises()
 
     expect(addBooksToCollectionMock).toHaveBeenCalledWith(20, selectionPayload)
-    expect(toastSuccess).toHaveBeenCalledWith('Added 1733 new books to "All Dune" (100 already there)')
+    expect(toastSuccess).toHaveBeenCalledWith('Added 1,733 new books to "All Dune" (100 already there)')
   })
 
   it('does not emit done when no membership changes occurred', async () => {

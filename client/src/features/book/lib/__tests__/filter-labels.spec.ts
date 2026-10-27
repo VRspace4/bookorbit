@@ -1,31 +1,145 @@
-import { describe, expect, it } from 'vitest'
-import type { Rule } from '@bookorbit/types'
-import { FIELD_LABELS, OPERATOR_LABELS, ruleToParts } from '../filter-labels'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CustomMetadataFieldSummary, Rule } from '@bookorbit/types'
+import { RULE_FIELDS, RULE_OPERATORS, SORT_FIELDS } from '@bookorbit/types'
+import { activateI18nLocale, i18n } from '@/i18n'
+import { compileIcuCatalog } from '@/i18n/icu'
+import en from '@/locales/en.json'
+import { activeCustomFieldLabel } from '@/features/book/composables/useActiveCustomFields'
+import { fieldLabel, operatorLabel, ruleToParts, sortFieldLabel } from '../filter-labels'
+
+vi.mock('@/features/book/composables/useActiveCustomFields', () => ({
+  activeCustomFieldLabel: vi.fn<(fieldId: number) => string | null>(() => null),
+}))
+
+function mockCustomFieldLabel(label: CustomMetadataFieldSummary['label'] | null) {
+  vi.mocked(activeCustomFieldLabel).mockReturnValue(label)
+}
+
+describe('catalog coverage', () => {
+  it('translates every rule field', () => {
+    for (const field of RULE_FIELDS) {
+      expect(fieldLabel(field)).not.toBe(`book.filter.fields.${field}`)
+    }
+  })
+
+  it('translates every rule operator', () => {
+    for (const operator of RULE_OPERATORS) {
+      expect(operatorLabel(operator)).not.toBe(`book.filter.operators.${operator}`)
+    }
+  })
+
+  it('translates every sort field', () => {
+    for (const field of SORT_FIELDS) {
+      expect(sortFieldLabel(field)).not.toBe(`book.sort.fields.${field}`)
+    }
+  })
+})
+
+describe('custom metadata sort fields', () => {
+  it('shows the user-authored field label verbatim', () => {
+    mockCustomFieldLabel('Shelf Location')
+
+    expect(sortFieldLabel('custom:7')).toBe('Shelf Location')
+    expect(activeCustomFieldLabel).toHaveBeenCalledWith(7)
+  })
+
+  it('falls back to a translated placeholder when the field no longer resolves', () => {
+    mockCustomFieldLabel(null)
+
+    expect(sortFieldLabel('custom:7')).toBe('Custom field')
+  })
+})
+
+describe('custom metadata filter fields', () => {
+  it('shows the user-authored field label verbatim', () => {
+    mockCustomFieldLabel('Shelf Location')
+
+    expect(fieldLabel('custom:7')).toBe('Shelf Location')
+    expect(activeCustomFieldLabel).toHaveBeenCalledWith(7)
+  })
+
+  it('falls back to a translated placeholder when the field no longer resolves', () => {
+    mockCustomFieldLabel(null)
+
+    expect(fieldLabel('custom:7')).toBe('Custom field')
+  })
+
+  it('does not treat a malformed custom reference as a custom field', () => {
+    mockCustomFieldLabel('Shelf Location')
+    vi.mocked(activeCustomFieldLabel).mockClear()
+
+    expect(fieldLabel('custom:0' as never)).toBe('book.filter.fields.custom:0')
+    expect(activeCustomFieldLabel).not.toHaveBeenCalled()
+  })
+
+  it('renders a custom field rule summary with its label and value', () => {
+    mockCustomFieldLabel('Shelf Location')
+
+    expect(ruleToParts({ type: 'rule', field: 'custom:7', operator: 'contains', value: 'A3' } as Rule)).toEqual({
+      field: 'Shelf Location',
+      operator: 'contains',
+      value: 'A3',
+    })
+  })
+
+  it('renders boolean custom field rules without a value', () => {
+    mockCustomFieldLabel('Signed')
+
+    expect(ruleToParts({ type: 'rule', field: 'custom:7', operator: 'isTrue' } as Rule)).toEqual({
+      field: 'Signed',
+      operator: 'is yes',
+      value: null,
+    })
+  })
+})
+
+describe('active locale', () => {
+  afterEach(() => {
+    activateI18nLocale('en')
+  })
+
+  it('resolves labels from the active locale instead of hardcoded English', () => {
+    const catalog = structuredClone(en)
+    catalog.book.filter.fields.title = 'Titel'
+    catalog.book.filter.operators.contains = 'enthält'
+    catalog.book.sort.fields.title = 'Titel'
+    i18n.global.setLocaleMessage('de', compileIcuCatalog(catalog, 'de'))
+    activateI18nLocale('de')
+
+    expect(fieldLabel('title')).toBe('Titel')
+    expect(operatorLabel('contains')).toBe('enthält')
+    expect(sortFieldLabel('title')).toBe('Titel')
+  })
+})
 
 describe('lock status labels', () => {
   it('exposes a Lock Status field label', () => {
-    expect(FIELD_LABELS.lockStatus).toBe('Lock Status')
+    expect(fieldLabel('lockStatus')).toBe('Lock Status')
   })
 
   it('exposes is locked / is unlocked operator labels', () => {
-    expect(OPERATOR_LABELS.isLocked).toBe('is locked')
-    expect(OPERATOR_LABELS.isUnlocked).toBe('is unlocked')
+    expect(operatorLabel('isLocked')).toBe('is locked')
+    expect(operatorLabel('isUnlocked')).toBe('is unlocked')
   })
 })
 
 describe('series status labels', () => {
   it('exposes a Series Status field label', () => {
-    expect(FIELD_LABELS.seriesStatus).toBe('Series Status')
+    expect(fieldLabel('seriesStatus')).toBe('Series Status')
   })
 
   it('exposes an is up next operator label', () => {
-    expect(OPERATOR_LABELS.isUpNext).toBe('is up next')
+    expect(operatorLabel('isUpNext')).toBe('is up next')
   })
 })
 
 describe('community rating labels', () => {
   it('exposes a Community Rating field label', () => {
-    expect(FIELD_LABELS.communityRating).toBe('Community Rating')
+    expect(fieldLabel('communityRating')).toBe('Community Rating')
+  })
+
+  it('exposes a Community Review Count field label', () => {
+    expect(fieldLabel('communityRatingCount')).toBe('Community Review Count')
   })
 })
 
@@ -50,6 +164,11 @@ describe('ruleToParts', () => {
     expect(ruleToParts(rule)).toEqual({ field: 'Added Date', operator: 'within last', value: '7 days' })
   })
 
+  it('renders moreThanAgo rules as a day age', () => {
+    const rule: Rule = { type: 'rule', field: 'finishedAt', operator: 'moreThanAgo', value: 30 }
+    expect(ruleToParts(rule)).toEqual({ field: 'Date Finished', operator: 'more than', value: '30 days ago' })
+  })
+
   it('joins array values with commas', () => {
     const rule: Rule = { type: 'rule', field: 'author', operator: 'includesAny', value: ['Tolkien', 'Le Guin'] }
     expect(ruleToParts(rule)).toEqual({ field: 'Author', operator: 'includes any of', value: 'Tolkien, Le Guin' })
@@ -58,6 +177,11 @@ describe('ruleToParts', () => {
   it('renders a range when valueTo is present', () => {
     const rule: Rule = { type: 'rule', field: 'pageCount', operator: 'between', value: 100, valueTo: 200 }
     expect(ruleToParts(rule)).toEqual({ field: 'Page Count', operator: 'between', value: '100 - 200' })
+  })
+
+  it('formats primary file size values as readable byte sizes', () => {
+    const rule: Rule = { type: 'rule', field: 'fileSize', operator: 'between', value: 10_485_760, valueTo: 26_214_400 }
+    expect(ruleToParts(rule)).toEqual({ field: 'Primary File Size', operator: 'between', value: '10 MB - 25 MB' })
   })
 
   it('renders an empty value when a valued operator has no value', () => {
@@ -73,5 +197,10 @@ describe('ruleToParts', () => {
   it('renders any-provider context for community rating rules', () => {
     const rule: Rule = { type: 'rule', field: 'communityRating', provider: 'any', operator: 'gte', value: 4.5 }
     expect(ruleToParts(rule)).toEqual({ field: 'Community Rating (Any provider)', operator: 'at least', value: '4.5' })
+  })
+
+  it('renders provider context for community review count rules', () => {
+    const rule: Rule = { type: 'rule', field: 'communityRatingCount', provider: 'hardcover', operator: 'gte', value: 1000 }
+    expect(ruleToParts(rule)).toEqual({ field: 'Community Review Count (Hardcover)', operator: 'at least', value: '1000' })
   })
 })

@@ -1,14 +1,15 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { ref, watch } from 'vue'
 import { Loader2, Save } from '@lucide/vue'
-import type { TtsProviderConfigKey, TtsProviderConfigurations, TtsProviderStatus } from '@bookorbit/types'
+import type { TtsProviderConfigKey, TtsProviderConfigurations, EpubTtsProviderStatus } from '@bookorbit/types'
 import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'
 import { AZURE_REGIONS, regionSupportsAzureHd } from '@/features/reader/epub/tts/voices'
 
 const props = defineProps<{
   config: TtsProviderConfigurations | null
-  statuses: TtsProviderStatus[]
+  statuses: EpubTtsProviderStatus[]
   saving: boolean
 }>()
 
@@ -94,11 +95,11 @@ function onSecretFieldFocus(event: FocusEvent) {
         <span class="text-xs font-bold text-muted-foreground uppercase tracking-widest">Cloud TTS Providers</span>
         <p class="settings-hint mt-1">API keys configured here apply to all users and devices.</p>
       </div>
-      <button class="settings-btn-primary h-8 px-3" :disabled="saving || !draft" @click="save">
+      <Button size="sm" :disabled="saving || !draft" @click="save">
         <Loader2 v-if="saving" :size="14" class="animate-spin" />
         <Save v-else :size="14" />
         <span>Save Changes</span>
-      </button>
+      </Button>
     </div>
 
     <div v-if="draft" class="divide-y divide-border">
@@ -142,7 +143,7 @@ function onSecretFieldFocus(event: FocusEvent) {
             data-1p-ignore="true"
             data-form-type="other"
             style="--webkit-text-security: disc"
-            class="h-9 w-full sm:w-64 lg:w-80 rounded-md border border-input bg-background px-3 text-xs font-medium placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary transition-all"
+            class="h-9 w-full sm:w-64 lg:w-80 rounded-md border border-input bg-background px-3 text-xs font-medium placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary transition-all"
             @focus="onSecretFieldFocus"
           />
 

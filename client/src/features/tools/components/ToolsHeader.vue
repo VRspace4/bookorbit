@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { Wrench } from '@lucide/vue'
 import { usePermissions } from '@/features/auth/composables/usePermissions'
 
 const route = useRoute()
@@ -22,6 +23,11 @@ const sections = computed<ToolSection[]>(() => {
     result.push({ label: t('tools.header.bulkRename'), routeName: 'tools-bulk-rename' })
   }
 
+  if (hasPermission('library_delete_books')) {
+    result.push({ label: t('tools.header.duplicateBooks'), routeName: 'tools-duplicate-books' })
+    result.push({ label: t('tools.header.missingResources'), routeName: 'tools-missing-resources' })
+  }
+
   return result
 })
 
@@ -32,6 +38,11 @@ function navigateToSection(section: ToolSection): void {
 
 <template>
   <div class="flex items-stretch h-11 px-4 border-b overflow-x-auto shrink-0 scrollbar-none snap-x snap-mandatory md:snap-none">
+    <!-- Without a global header the band names the page itself. -->
+    <div class="flex shrink-0 items-center gap-2 border-e border-border/70 pe-4 me-2 my-3 max-sm:hidden">
+      <Wrench :size="16" class="text-primary" aria-hidden="true" />
+      <span class="text-sm font-semibold text-foreground">{{ t('components.sidebar.tools') }}</span>
+    </div>
     <button
       v-for="section in sections"
       :key="section.routeName"

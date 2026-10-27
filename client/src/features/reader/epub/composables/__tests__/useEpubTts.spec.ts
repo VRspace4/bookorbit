@@ -16,10 +16,10 @@ vi.mock('vue-sonner', () => ({
 
 vi.mock('@jofr/capacitor-media-session', () => ({
   MediaSession: {
-    setMetadata: vi.fn(async () => undefined),
-    setPlaybackState: vi.fn(async () => undefined),
-    setActionHandler: vi.fn(async () => undefined),
-    setPositionState: vi.fn(async () => undefined),
+    setMetadata: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+    setPlaybackState: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+    setActionHandler: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
+    setPositionState: vi.fn<(...args: unknown[]) => Promise<void>>(async () => undefined),
   },
 }))
 
@@ -33,8 +33,7 @@ vi.mock('microsoft-cognitiveservices-speech-sdk', () => {
   const PropertyId = { SpeechServiceResponse_RequestWordBoundary: 'SpeechServiceResponse_RequestWordBoundary' }
 
   class SpeechSynthesizer {
-    wordBoundary: ((sender: unknown, event: { boundaryType: string; text: string; textOffset: number; audioOffset: number }) => void) | null =
-      null
+    wordBoundary: ((sender: unknown, event: { boundaryType: string; text: string; textOffset: number; audioOffset: number }) => void) | null = null
     close = vi.fn<() => void>()
 
     speakSsmlAsync(ssml: string, onSuccess: (result: { reason: string; audioData: ArrayBuffer }) => void) {
@@ -61,7 +60,7 @@ vi.mock('microsoft-cognitiveservices-speech-sdk', () => {
           speechSynthesisOutputFormat?: string
           setProperty: ReturnType<typeof vi.fn>
         }
-      >(() => ({ setProperty: vi.fn() })),
+      >(() => ({ setProperty: vi.fn<(...args: unknown[]) => void>() })),
     },
     SpeechSynthesizer,
     ResultReason,
@@ -586,7 +585,7 @@ describe('useEpubTts cloud playback', () => {
       scrollBy.mockClear()
       await tts.anchorViewportToWord(2)
       expect(scrollToAnchor).toHaveBeenCalledTimes(2)
-      expect((scrollToAnchor.mock.calls[1]?.[0] as Range).toString()).toBe('Charlie')
+      expect(String(scrollToAnchor.mock.calls[1]?.[0])).toBe('Charlie')
     } finally {
       if (original) {
         Range.prototype.getBoundingClientRect = original
@@ -605,9 +604,7 @@ describe('useEpubTts cloud playback', () => {
     }
     Object.defineProperty(doc, 'caretRangeFromPoint', {
       configurable: true,
-      value: vi.fn<() => Range | null>(
-        makeCaretRangeAtTextOffset(doc, 'This is the first sentence. This is the second'.length - 2),
-      ),
+      value: vi.fn<() => Range | null>(makeCaretRangeAtTextOffset(doc, 'This is the first sentence. This is the second'.length - 2)),
     })
     const tts = useEpubTts({ fileId: 1, getDocument: () => doc, getSettings: makeSettings, bookLanguage: ref('en') })
     tts.handleDocumentLoad(doc)

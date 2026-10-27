@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   confirmDelete: vi.fn<() => void>(),
   routerPush: vi.fn<(to: unknown) => void>(),
   setBookContext: vi.fn<(ids: number[], total: number) => void>(),
+  useBookViewSelectionCalls: [] as Array<[unknown, { value: boolean } | undefined]>,
   useBookBulkActions: vi.fn<(...args: unknown[]) => object>(() => ({
     handleBulkRefreshMetadata: vi.fn<() => void>(),
     handleBulkReExtractCover: vi.fn<() => void>(),
@@ -32,6 +33,13 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: mocks.routerPush }),
 }))
 
+vi.mock('@/features/auth/composables/usePermissions', () => ({
+  usePermissions: () => ({ hasPermission: () => true, isSuperuser: ref(false) }),
+}))
+vi.mock('@/features/library/composables/useLibraries', () => ({
+  useLibraries: () => ({ libraries: ref([{ id: 7, accessLevel: 'editor' }]) }),
+}))
+
 vi.mock('../useBookNavigation', () => ({
   useBookNavigation: () => ({ setBookContext: mocks.setBookContext }),
 }))
@@ -41,15 +49,18 @@ vi.mock('../useTableViewControls', () => ({
 }))
 
 vi.mock('../useBookViewSelection', () => ({
-  useBookViewSelection: () => ({
-    selectedIds: mockSelectedIds,
-    selectionMode: mockSelectionMode,
-    enterSelectionMode: mocks.enterSelectionMode,
-    exitSelectionMode: mocks.exitSelectionMode,
-    toggleBook: mocks.toggleBook,
-    handleSelect: vi.fn<() => void>(),
-    toggleSelectionMode: vi.fn<() => void>(),
-  }),
+  useBookViewSelection: (books: unknown, selectionMode?: { value: boolean }) => {
+    mocks.useBookViewSelectionCalls.push([books, selectionMode])
+    return {
+      selectedIds: mockSelectedIds,
+      selectionMode: selectionMode ?? mockSelectionMode,
+      enterSelectionMode: mocks.enterSelectionMode,
+      exitSelectionMode: mocks.exitSelectionMode,
+      toggleBook: mocks.toggleBook,
+      handleSelect: vi.fn<() => void>(),
+      toggleSelectionMode: vi.fn<() => void>(),
+    }
+  },
 }))
 
 vi.mock('../useDeleteBook', () => ({
@@ -74,7 +85,9 @@ import { useBookTableShell } from '../useBookTableShell'
 function makeBook(overrides: Partial<BookCard> = {}): BookCard {
   return {
     id: 1,
+    libraryId: 7,
     status: 'present',
+    coverAspectRatio: '2/3',
     title: 'Test Book',
     authors: ['Test Author'],
     seriesName: null,
@@ -90,6 +103,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     readStatus: null,
     addedAt: '2026-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2026-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -115,6 +129,7 @@ describe('useBookTableShell', () => {
     mocks.cancelDelete.mockClear()
     mocks.confirmDelete.mockClear()
     mocks.useBookBulkActions.mockClear()
+    mocks.useBookViewSelectionCalls.length = 0
     mocks.routerPush.mockClear()
     mocks.setBookContext.mockClear()
   })
@@ -146,6 +161,16 @@ describe('useBookTableShell', () => {
     const call = mocks.useBookBulkActions.mock.calls[0]!
     const [, , thirdArg] = call
     expect(thirdArg).toBe(books)
+  })
+
+  it('passes an external selection-mode ref to the view selection state', () => {
+    const books = ref([makeBook()])
+    const selectionMode = ref(false)
+
+    const shell = useBookTableShell({ books, selectionMode })
+
+    expect(mocks.useBookViewSelectionCalls).toEqual([[books, selectionMode]])
+    expect(shell.selectionMode).toBe(selectionMode)
   })
 
   describe('handleBookAction', () => {
@@ -196,6 +221,30 @@ describe('useBookTableShell', () => {
 
       expect(quickViewOpen.value).toBe(false)
       expect(mocks.promptDelete).toHaveBeenCalledWith(5)
+    })
+
+    it('delegates a single-book move to the host view', () => {
+      const books = ref([makeBook({ id: 9 })])
+      const onMoveToLibrary = vi.fn<(bookId: number) => void>()
+      const { handleBookAction, quickViewOpen } = useBookTableShell({ books, onMoveToLibrary })
+      quickViewOpen.value = true
+
+      handleBookAction(makeBook({ id: 9 }), 'move-to-library')
+
+      expect(onMoveToLibrary).toHaveBeenCalledWith(9)
+      expect(quickViewOpen.value).toBe(false)
+      // A quick move must not drag the book into the global selection.
+      expect(mocks.enterSelectionMode).not.toHaveBeenCalled()
+      expect(mocks.toggleBook).not.toHaveBeenCalled()
+      expect(mocks.promptDelete).not.toHaveBeenCalled()
+    })
+
+    it('ignores a move when the host view provides no handler', () => {
+      const books = ref([makeBook({ id: 9 })])
+      const { handleBookAction } = useBookTableShell({ books })
+
+      expect(() => handleBookAction(makeBook({ id: 9 }), 'move-to-library')).not.toThrow()
+      expect(mocks.promptDelete).not.toHaveBeenCalled()
     })
   })
 

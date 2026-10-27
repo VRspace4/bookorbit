@@ -2,7 +2,7 @@ import { BookDockGateway } from './book-dock.gateway';
 
 function makeGateway() {
   const jwtService = { verify: vi.fn() };
-  const authService = { validateUser: vi.fn() };
+  const authService = { validateSessionUser: vi.fn() };
   const gateway = new BookDockGateway(jwtService as any, authService as any);
   return { gateway, jwtService, authService };
 }
@@ -14,6 +14,7 @@ describe('BookDockGateway', () => {
       id: 'socket-1',
       handshake: { auth: {} },
       data: {},
+      emit: vi.fn(),
       disconnect: vi.fn(),
     } as any;
 
@@ -25,17 +26,18 @@ describe('BookDockGateway', () => {
   it('disconnects sockets when user cannot be validated', async () => {
     const { gateway, jwtService, authService } = makeGateway();
     jwtService.verify.mockReturnValue({ sub: 8, ver: 3 });
-    authService.validateUser.mockResolvedValue(null);
+    authService.validateSessionUser.mockResolvedValue(null);
     const client = {
       id: 'socket-2',
       handshake: { auth: { token: 'jwt' } },
       data: {},
+      emit: vi.fn(),
       disconnect: vi.fn(),
     } as any;
 
     await gateway.handleConnection(client);
 
-    expect(authService.validateUser).toHaveBeenCalledWith(8, 3);
+    expect(authService.validateSessionUser).toHaveBeenCalledWith(8, 3, 'legacy', undefined);
     expect(client.disconnect).toHaveBeenCalledTimes(1);
   });
 
@@ -43,11 +45,12 @@ describe('BookDockGateway', () => {
     const { gateway, jwtService, authService } = makeGateway();
     const user = { id: 9, isSuperuser: false, permissions: [] };
     jwtService.verify.mockReturnValue({ sub: 9, ver: 4 });
-    authService.validateUser.mockResolvedValue(user);
+    authService.validateSessionUser.mockResolvedValue(user);
     const client = {
       id: 'socket-3',
       handshake: { auth: { token: 'jwt' } },
       data: {},
+      emit: vi.fn(),
       disconnect: vi.fn(),
     } as any;
 
@@ -57,19 +60,13 @@ describe('BookDockGateway', () => {
     expect(client.disconnect).not.toHaveBeenCalled();
   });
 
-  it('emitSummary broadcasts summary payload on websocket namespace', () => {
+  it('broadcasts an invalidation event without leaking a global summary', () => {
     const { gateway } = makeGateway();
     const emit = vi.fn();
     gateway.server = { emit } as any;
 
-    gateway.emitSummary({ pending: 2, ready: 4, error: 1, total: 7, paused: true });
+    gateway.emitChanged();
 
-    expect(emit).toHaveBeenCalledWith('book-dock:summary', {
-      pending: 2,
-      ready: 4,
-      error: 1,
-      total: 7,
-      paused: true,
-    });
+    expect(emit).toHaveBeenCalledWith('book-dock:changed');
   });
 });

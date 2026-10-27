@@ -2,7 +2,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useElementSize, useWindowSize, watchDebounced } from '@vueuse/core'
 import { RecycleScroller } from 'vue-virtual-scroller'
-import { isAudioFormat, type BookCard, type CoverAspectRatio } from '@bookorbit/types'
+import type { BookCard, CoverAspectRatio, JumpBucketKind } from '@bookorbit/types'
 import BookCoverCard from './BookCoverCard.vue'
 import BookCoverSkeleton from './BookCoverSkeleton.vue'
 import CollapsedSeriesCard from './CollapsedSeriesCard.vue'
@@ -10,7 +10,7 @@ import { COVER_ASPECT_RATIO_KEY, DEFAULT_COVER_ASPECT_RATIO } from '../lib/cover
 import { isBookPlaceholder, type BookSlot } from '../composables/useBookWindow'
 import { useDisplaySettings } from '@/composables/useDisplaySettings'
 
-type BookActionType = 'quick-view' | 'add-to-collection' | 'delete'
+type BookActionType = 'quick-view' | 'add-to-collection' | 'move-to-library' | 'delete'
 
 const props = withDefaults(
   defineProps<{
@@ -21,16 +21,19 @@ const props = withDefaults(
     isSelected?: (bookId: number) => boolean
     newBookIds?: Set<number>
     virtualized?: boolean
-    audioCoverScale?: number
+    squareCoverScale?: number
     railGutter?: boolean
+    railGutterKind?: JumpBucketKind | null
+    allowMoveToLibrary?: boolean
   }>(),
   {
     selectionMode: false,
     isSelected: undefined,
     newBookIds: () => new Set<number>(),
     virtualized: true,
-    audioCoverScale: 1,
+    squareCoverScale: 1,
     railGutter: false,
+    railGutterKind: null,
   },
 )
 
@@ -43,7 +46,7 @@ const emit = defineEmits<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const scrollerRef = ref<{ scrollToItem: (index: number) => void } | null>(null)
+const scrollerRef = ref<{ scrollToItem: (index: number, options?: { align?: 'start' | 'center' | 'end' | 'auto' }) => void } | null>(null)
 const { width: containerWidth } = useElementSize(containerRef)
 const { width: windowWidth } = useWindowSize()
 
@@ -84,7 +87,7 @@ watchDebounced(
 
 const coverPx = computed(() => asPositiveInt(props.coverSize, 140))
 const gapPx = computed(() => asPositiveInt(props.gridGap, 20))
-const audioCoverScale = computed(() => normalizeScale(props.audioCoverScale))
+const squareCoverScale = computed(() => normalizeScale(props.squareCoverScale))
 
 const availableWidth = computed(() => {
   if (settledWidth.value > 0) return settledWidth.value
@@ -141,7 +144,7 @@ const staticVariableWrapStyle = computed(() => ({
   gap: `${gapPx.value}px`,
 }))
 
-const useVariableStaticWidths = computed(() => !props.virtualized && audioCoverScale.value > 1)
+const useVariableStaticWidths = computed(() => !props.virtualized && squareCoverScale.value > 1)
 
 const staticBooks = computed(() => props.books.filter((slot): slot is BookCard => !isBookPlaceholder(slot)))
 
@@ -149,19 +152,14 @@ function asBook(slot: BookSlot): BookCard {
   return slot as BookCard
 }
 
-function isAudiobook(book: BookCard): boolean {
-  return book.files.some((file) => (file.format ? isAudioFormat(file.format) : false))
-}
-
 function staticItemStyle(book: BookCard): { width: string; maxWidth: string } {
-  const scale = isAudiobook(book) ? audioCoverScale.value : 1
+  const scale = book.coverAspectRatio === '1/1' ? squareCoverScale.value : 1
   const width = Math.max(1, Math.round(coverPx.value * scale))
   return { width: `${width}px`, maxWidth: '100%' }
 }
 
 function staticCoverAspectRatio(book: BookCard): CoverAspectRatio {
-  if (isAudiobook(book)) return '1/1'
-  return coverAspectRatio.value
+  return book.coverAspectRatio ?? coverAspectRatio.value
 }
 
 function handleScrollerUpdate(startIndex: number, endIndex: number) {
@@ -173,6 +171,8 @@ function handleScrollerUpdate(startIndex: number, endIndex: number) {
 const firstVisibleIndex = ref(0)
 let scrollParent: HTMLElement | null = null
 let scrollRafId = 0
+let jumpAnchorIndex: number | null = null
+let jumpAnchorRowStart: number | null = null
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   for (let node = el?.parentElement ?? null; node; node = node.parentElement) {
@@ -191,14 +191,27 @@ function computeFirstVisibleIndex() {
   const row = Math.max(0, Math.floor(scrolledIntoGrid / itemSize.value))
   const cols = gridItems.value
   const rowStart = Math.min(props.books.length - 1, row * cols)
-  if (rowStart === firstVisibleIndex.value) return
   firstVisibleIndex.value = rowStart
-  // Report the middle cell of the first visible row, not its first cell. A
-  // letter bucket usually starts mid-row, so reporting the row start would
-  // resolve the active bucket to the previous letter (the tail still showing
-  // in the top-left). The midpoint lands inside the dominant letter of the
-  // row, which is also the one a jump targets.
-  const activeIndex = Math.min(props.books.length - 1, rowStart + Math.floor((cols - 1) / 2))
+  if (jumpAnchorIndex !== null) {
+    const lastVisibleRow = Math.max(row, Math.floor(Math.max(0, parentRect.bottom - gridRect.top - 1) / itemSize.value))
+    const anchorRow = Math.floor(jumpAnchorIndex / cols)
+    if (jumpAnchorRowStart === null) {
+      if (anchorRow >= row && anchorRow <= lastVisibleRow) {
+        jumpAnchorRowStart = rowStart
+        emit('first-visible-index', jumpAnchorIndex)
+      }
+      return
+    }
+    if (rowStart === jumpAnchorRowStart) {
+      emit('first-visible-index', jumpAnchorIndex)
+      return
+    }
+    jumpAnchorIndex = null
+    jumpAnchorRowStart = null
+  }
+  // At the top boundary the first rail target must stay active. Below it, the
+  // midpoint represents the section occupying most of the first visible row.
+  const activeIndex = row === 0 ? 0 : Math.min(props.books.length - 1, rowStart + Math.floor((cols - 1) / 2))
   emit('first-visible-index', activeIndex)
 }
 
@@ -237,15 +250,20 @@ watch(gridItems, (next, prev) => {
 })
 
 function scrollToIndex(index: number) {
-  scrollerRef.value?.scrollToItem(index)
-  handleScrollParentScroll()
+  jumpAnchorIndex = index
+  jumpAnchorRowStart = null
+  scrollerRef.value?.scrollToItem(index, { align: 'start' })
 }
 
 defineExpose({ scrollToIndex })
 </script>
 
 <template>
-  <div ref="containerRef" class="w-full" :class="{ 'pr-9': railGutter }">
+  <div
+    ref="containerRef"
+    class="w-full"
+    :class="railGutter ? (railGutterKind === 'category' ? 'pr-22' : railGutterKind === 'temporal' ? 'pr-14' : 'pr-10') : ''"
+  >
     <div
       v-if="!virtualized && useVariableStaticWidths"
       class="flex w-full flex-wrap content-start items-end"
@@ -259,7 +277,7 @@ defineExpose({ scrollToIndex })
         :class="{ 'book-grid-cell--new': props.newBookIds.has(book.id) }"
         :style="staticItemStyle(book)"
       >
-        <CollapsedSeriesCard v-if="book.collapsedSeries" :book="book" :show-label="showLabel" />
+        <CollapsedSeriesCard v-if="book.collapsedSeries" :book="book" :show-label="showLabel" :selection-mode="selectionMode" />
         <BookCoverCard
           v-else
           :book="book"
@@ -267,6 +285,7 @@ defineExpose({ scrollToIndex })
           :cover-aspect-ratio="staticCoverAspectRatio(book)"
           :selection-mode="selectionMode"
           :selected="isSelected?.(book.id) ?? false"
+          :allow-move-to-library="allowMoveToLibrary"
           @action="emit('action', book, $event)"
           @select="emit('select', book.id, $event)"
           @update:book="emit('update:book', $event)"
@@ -274,15 +293,16 @@ defineExpose({ scrollToIndex })
       </div>
     </div>
 
-    <div v-else-if="!virtualized" class="grid w-full max-w-full items-start" :style="staticGridStyle" data-testid="book-grid-static">
+    <div v-else-if="!virtualized" class="grid w-full max-w-full items-end" :style="staticGridStyle" data-testid="book-grid-static">
       <div v-for="book in staticBooks" :key="book.id" class="min-w-0" :class="{ 'book-grid-cell--new': props.newBookIds.has(book.id) }">
-        <CollapsedSeriesCard v-if="book.collapsedSeries" :book="book" :show-label="showLabel" />
+        <CollapsedSeriesCard v-if="book.collapsedSeries" :book="book" :show-label="showLabel" :selection-mode="selectionMode" />
         <BookCoverCard
           v-else
           :book="book"
           :show-label="showLabel"
           :selection-mode="selectionMode"
           :selected="isSelected?.(book.id) ?? false"
+          :allow-move-to-library="allowMoveToLibrary"
           @action="emit('action', book, $event)"
           @select="emit('select', book.id, $event)"
           @update:book="emit('update:book', $event)"
@@ -308,13 +328,22 @@ defineExpose({ scrollToIndex })
       <template #default="{ item }">
         <div class="book-grid-cell" :class="{ 'book-grid-cell--new': props.newBookIds.has(item.id) }">
           <BookCoverSkeleton v-if="isBookPlaceholder(item)" />
-          <CollapsedSeriesCard v-else-if="asBook(item).collapsedSeries" :book="asBook(item)" :show-label="showLabel" />
+          <!-- Every tile takes the grid's shape; art of the other shape follows the cover display setting. -->
+          <CollapsedSeriesCard
+            v-else-if="asBook(item).collapsedSeries"
+            :book="asBook(item)"
+            :cover-aspect-ratio="coverAspectRatio"
+            :show-label="showLabel"
+            :selection-mode="selectionMode"
+          />
           <BookCoverCard
             v-else
             :book="asBook(item)"
+            :cover-aspect-ratio="coverAspectRatio"
             :show-label="showLabel"
             :selection-mode="selectionMode"
             :selected="isSelected?.(item.id) ?? false"
+            :allow-move-to-library="allowMoveToLibrary"
             @action="emit('action', asBook(item), $event)"
             @select="emit('select', item.id, $event)"
             @update:book="emit('update:book', $event)"
@@ -346,7 +375,9 @@ defineExpose({ scrollToIndex })
 }
 
 .book-grid-cell {
-  height: calc(var(--book-grid-height) + var(--book-grid-label-height, 0px));
+  display: grid;
+  align-items: end;
+  height: calc(var(--book-grid-height) + var(--book-grid-label-height, 0px) + var(--book-grid-gap));
   box-sizing: border-box;
   padding-left: 0;
   padding-right: var(--book-grid-gap);

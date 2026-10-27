@@ -5,13 +5,37 @@ import { existsSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { join, resolve } from 'path';
 
+import type { KoreaderPluginCapability, KoreaderPluginVersionInfo } from '@bookorbit/types';
 import { appConfig } from '../../config/config';
 import { sanitizeLogValue } from '../../common/utils/log-sanitize.utils';
+import { KOREADER_DEVICE_ID_REGEX } from './dto/koreader-device-param.dto';
+import { KoreaderPluginRepository } from './koreader-plugin.repository';
+import { SELF_UPDATE_MIN_PLUGIN_VERSION, pluginRequiresManualUpdate } from './koreader-plugin-update.util';
 import { KoreaderRepository } from './koreader.repository';
 
 const PACKAGE_EVENT = 'koreader.plugin_package';
+const SELF_UPDATE_GATE_EVENT = 'koreader.plugin_self_update_gate';
 const PLUGIN_FOLDER = 'bookorbit.koplugin';
 const PROVISION_FILE = 'bookorbit_provision.lua';
+
+interface SelfUpdateClientIdentity {
+  deviceId?: string;
+  pluginVersion?: string;
+}
+
+// Wire features this server advertises. The plugin selects a new route only
+// when its name appears here, so a downgraded server transparently returns the
+// plugin to its legacy path.
+const SERVER_CAPABILITIES: readonly KoreaderPluginCapability[] = [
+  'catalogBulkManifest',
+  'catalogDashboardSections',
+  'bookmarkSync',
+  'readAloudDeliveryVariants',
+  'readAloudDeliverySettings',
+  'catalogListsV2',
+  'sidecarState',
+  'annotationPendingBooks',
+];
 
 @Injectable()
 export class KoreaderPackageService {
@@ -19,6 +43,7 @@ export class KoreaderPackageService {
 
   constructor(
     private readonly repo: KoreaderRepository,
+    private readonly pluginRepo: KoreaderPluginRepository,
     @Inject(appConfig.KEY) private readonly config: ConfigType<typeof appConfig>,
   ) {}
 
@@ -70,11 +95,58 @@ export class KoreaderPackageService {
     }
   }
 
-  async getVersionInfo(): Promise<{ pluginVersion: string; serverVersion: string }> {
+  async getVersionInfo(): Promise<KoreaderPluginVersionInfo> {
     return {
       pluginVersion: await this.readPluginVersion(),
       serverVersion: this.config.version,
+      capabilities: [...SERVER_CAPABILITIES],
     };
+  }
+
+  /**
+   * Version info for the plugin's own update check.
+   *
+   * Withholds `pluginVersion` from users who still run a plugin that would crash
+   * KOReader trying to apply the update. Those clients treat "unknown" as "the
+   * server could not tell me" and show a message instead of the update prompt,
+   * so the crashing path stays unreachable. Current clients identify themselves
+   * on the request and are evaluated independently. Older clients carry no
+   * identity, so they retain the conservative user-wide gate.
+   */
+  async getVersionInfoForSelfUpdate(userId: number, client: SelfUpdateClientIdentity = {}): Promise<KoreaderPluginVersionInfo> {
+    const startedAt = Date.now();
+    const info = await this.getVersionInfo();
+    // Only `null` means "every device can self-update". A device that reported a
+    // blank version is a blocker whose label is falsy, so testing truthiness here
+    // would open the gate for exactly the unparseable case it exists to catch.
+    const reportedBlocker = this.getReportedSelfUpdateBlocker(client);
+    const blockedBy = reportedBlocker === undefined ? await this.findSelfUpdateBlocker(userId) : reportedBlocker;
+    if (blockedBy === null) return info;
+
+    this.logger.log(
+      `[${SELF_UPDATE_GATE_EVENT}] [end] userId=${userId} devicePluginVersion="${sanitizeLogValue(blockedBy)}" minVersion=${SELF_UPDATE_MIN_PLUGIN_VERSION} durationMs=${Date.now() - startedAt} - withholding plugin version, device cannot self-update`,
+    );
+    return { ...info, pluginVersion: 'unknown' };
+  }
+
+  /** `undefined` means the client did not provide a complete usable identity. */
+  private getReportedSelfUpdateBlocker(client: SelfUpdateClientIdentity): string | null | undefined {
+    if (typeof client.deviceId !== 'string' || !KOREADER_DEVICE_ID_REGEX.test(client.deviceId)) return undefined;
+    if (typeof client.pluginVersion !== 'string') return undefined;
+    if (!pluginRequiresManualUpdate(client.pluginVersion)) return null;
+    return client.pluginVersion || 'unreported';
+  }
+
+  /**
+   * The reported plugin version of one device that cannot self-update, or null
+   * when every device can. Versions that are absent or blank report as
+   * `unreported` so the caller never receives a falsy blocker.
+   */
+  private async findSelfUpdateBlocker(userId: number): Promise<string | null> {
+    const versions = await this.pluginRepo.listDevicePluginVersions(userId);
+    const blocked = versions.find(pluginRequiresManualUpdate);
+    if (blocked === undefined) return null;
+    return blocked || 'unreported';
   }
 
   private async readPluginVersion(): Promise<string> {

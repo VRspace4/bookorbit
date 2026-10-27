@@ -76,6 +76,7 @@ assertEqual(hasRow(rows, "Last highlight sync"), false, "logged-out diagnostics 
 assertEqual(hasRow(rows, "Retry highlight sync"), false, "logged-out diagnostics hides highlight retry")
 assertEqual(hasRow(rows, "Retry open-book match"), false, "logged-out diagnostics hides match retry")
 assertEqual(hasRow(rows, "Test connection"), false, "logged-out diagnostics hides connection action without credentials")
+assertEqual(hasRow(rows, "Recheck all book matches"), false, "logged-out diagnostics hides the match recheck")
 
 plugin.settings.server_url = "https://bookorbit.example.com"
 plugin.settings.username = "reader"
@@ -90,6 +91,9 @@ assertEqual(hasRow(rows, "Retry open-book match"), false, "file manager diagnost
 assertEqual(hasRow(rows, "Test connection"), true, "file manager diagnostics keeps connection action")
 assertEqual(hasRow(rows, "Open highlights"), true, "logged-in diagnostics shows sync state")
 assertEqual(hasRow(rows, "Last highlight sync"), true, "logged-in diagnostics shows highlight summary")
+-- "Sync all books" is incremental now, so the full rematch lives here as its
+-- own explicit maintenance action.
+assertEqual(hasRow(rows, "Recheck all book matches"), true, "logged-in diagnostics offers the match recheck")
 
 plugin.ui = { document = {} }
 plugin.getDocumentDigest = function()
@@ -107,5 +111,24 @@ plugin.settings.annotation_sync = false
 rows = plugin:diagnosticsRows()
 assertEqual(hasRow(rows, "Retry highlight sync"), false, "two-way-off diagnostics hides highlight retry")
 assertEqual(hasRow(rows, "Retry open-book match"), true, "two-way-off diagnostics keeps match retry")
+
+-- The Technical details page draws the same facts as titled sections, with
+-- the actions apart from them.
+local d = plugin:diagnosticsSections()
+local titles = {}
+for _, section in ipairs(d.sections) do table.insert(titles, section.title) end
+assertEqual(table.concat(titles, ","), "This device,Account,Last results,Library,Sync,Highlights", "logged-in sections in reading order")
+local kinds = {}
+for _, action in ipairs(d.actions) do table.insert(kinds, action.kind) end
+assertEqual(table.concat(kinds, ","), "retry-match,recheck,test,check-update", "reader actions without two-way sync")
+
+package.loaded["device"].model = "Kobo_monza"
+d = plugin:diagnosticsSections()
+assertEqual(d.sections[1].rows[1][2], "Kobo Libra Colour (Kobo_monza)", "the device is named as sold, with the model id kept for bug reports")
+
+plugin = newPlugin(false)
+d = plugin:diagnosticsSections()
+assertEqual(#d.sections, 2, "signed out, only the device and the account")
+assertEqual(#d.actions, 0, "and nothing to run without credentials")
 
 print("bookorbit_diagnostics_rows_test.lua: ok")

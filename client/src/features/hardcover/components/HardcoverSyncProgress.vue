@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from '@/components/ui/button'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertCircle, RefreshCw, XCircle, Loader2 } from '@lucide/vue'
@@ -45,8 +46,8 @@ const lastSyncedLabel = computed(() => {
   const days = Math.floor(diff / 86_400_000)
   if (minutes < 1) return t('hardcover.sync.lastSynced.justNow')
   if (minutes < 60) return t('hardcover.sync.lastSynced.minutesAgo', { count: minutes })
-  if (hours < 24) return t('hardcover.sync.lastSynced.hoursAgo', { count: hours }, hours)
-  return t('hardcover.sync.lastSynced.daysAgo', { count: days }, days)
+  if (hours < 24) return t('hardcover.sync.lastSynced.hoursAgo', { count: hours })
+  return t('hardcover.sync.lastSynced.daysAgo', { count: days })
 })
 </script>
 
@@ -76,26 +77,15 @@ const lastSyncedLabel = computed(() => {
       </div>
 
       <div class="flex items-center gap-2">
-        <button
-          v-if="!isSyncing"
-          type="button"
-          :disabled="syncButtonDisabled"
-          class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          @click="startSync"
-        >
+        <Button size="sm" v-if="!isSyncing" type="button" :disabled="syncButtonDisabled" @click="startSync">
           <Loader2 v-if="syncing" class="size-3.5 animate-spin" />
           <RefreshCw v-else class="size-3.5" />
           {{ syncButtonLabel }}
-        </button>
-        <button
-          v-else
-          type="button"
-          class="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
-          @click="cancelSync"
-        >
+        </Button>
+        <Button variant="outline" size="sm" v-else type="button" @click="cancelSync">
           <XCircle class="size-3.5" />
           {{ t('common.cancel') }}
-        </button>
+        </Button>
       </div>
     </div>
 

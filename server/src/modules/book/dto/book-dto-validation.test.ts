@@ -1,8 +1,11 @@
 import 'reflect-metadata';
 
+import { ValidationPipe } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { MetadataProviderKey } from '@bookorbit/types';
+
+import { PROVIDER_ID_MAX_LENGTHS } from '../../../common/utils/provider-id.utils';
 
 import { BulkBookIdsDto } from './bulk-book-ids.dto';
 import { BulkQuerySelectionDto } from './bulk-query-selection.dto';
@@ -18,10 +21,12 @@ import { MetadataExportDto } from './metadata-export.dto';
 import { GetBooksDto } from './get-books.dto';
 import { SaveProgressDto } from './save-progress.dto';
 import { SearchBooksDto } from './search-books.dto';
+import { UpsertAudioProgressDto } from './upsert-audio-progress.dto';
 import { UpdateBookMetadataDto } from './update-book-metadata.dto';
+import { UpdateBookMetadataAndLocksDto } from './update-book-metadata-and-locks.dto';
+import { UpdateBookAddedAtDto } from './update-book-added-at.dto';
 import { UpdatePersonalNoteDto } from './update-personal-note.dto';
 import { UpdateRatingDto } from './update-rating.dto';
-import { UpsertAudioProgressDto } from './upsert-audio-progress.dto';
 
 async function errorsFor<T extends object>(cls: new () => T, value: Record<string, unknown>) {
   const dto = plainToInstance(cls, value);
@@ -131,6 +136,8 @@ describe('Book DTO validation', () => {
           percentage: 100,
           cfi: 'epubcfi(/6/2)',
           pageNumber: 5,
+          mediaOverlayFragment: 'OPS/ch1.xhtml#s1',
+          mediaOverlaySectionIndex: 3,
           koreaderProgress: '/body/DocFragment[2]/body/p[1]/text()[1].0',
         })
       ).length,
@@ -139,9 +146,22 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(SaveProgressDto, { percentage: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, cfi: 123 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 'five' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, mediaOverlayFragment: 123 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, mediaOverlaySectionIndex: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 10, ttsSectionIndex: 2, ttsWordIndex: 15 })).length).toBe(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 10, ttsWordIndex: -1 })).length).toBeGreaterThan(0);
     expect((await errorsFor(SaveProgressDto, { percentage: 50, koreaderProgress: 123 })).length).toBeGreaterThan(0);
+  });
+
+  it('accepts only integer page numbers that fit the reading_progress column', async () => {
+    expect((await errorsFor(SaveProgressDto, { percentage: 50 })).length).toBe(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: null })).length).toBe(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 0 })).length).toBe(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 2147483647 })).length).toBe(0);
+
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 2.5 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: -1 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(SaveProgressDto, { percentage: 50, pageNumber: 2147483648 })).length).toBeGreaterThan(0);
   });
 
   it('requires non-empty search text and bounds search limit', async () => {
@@ -164,6 +184,8 @@ describe('Book DTO validation', () => {
           publishedDate: '1965-08-01',
           publishedYear: 1965,
           rating: 5,
+          seriesIndex: '5.10',
+          seriesMemberships: [{ seriesName: 'Dune', seriesIndex: '5.10' }],
           authors: ['Frank Herbert'],
           genres: ['Sci-Fi'],
           tags: ['classic'],
@@ -199,6 +221,19 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(UpdateBookMetadataDto, { authors: ['ok', 1] })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { language: 'a'.repeat(101) })).length).toBeGreaterThan(0);
     expect((await errorsFor(UpdateBookMetadataDto, { isbn10: '12345678901' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesIndex: 5.1 })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesIndex: '5.10' })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesIndex: '1e2' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesIndex: '1.2.3' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesIndex: '1'.repeat(21) })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesMemberships: [{ seriesName: 'Dune', seriesIndex: 5.1 }] })).length).toBeGreaterThan(0);
+  });
+
+  it('requires an ISO date key when updating the added date', async () => {
+    expect((await errorsFor(UpdateBookAddedAtDto, { addedAt: '2020-06-15' })).length).toBe(0);
+    expect((await errorsFor(UpdateBookAddedAtDto, { addedAt: '2020-6-15' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookAddedAtDto, { addedAt: '2020-06-15T00:00:00.000Z' })).length).toBeGreaterThan(0);
+    expect((await errorsFor(UpdateBookAddedAtDto, {})).length).toBeGreaterThan(0);
   });
 
   it('accepts aladinId and enforces its length bound', async () => {
@@ -211,6 +246,70 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(UpdateBookMetadataDto, { librofmId: '9781234567890' })).length).toBe(0);
     expect((await errorsFor(UpdateBookMetadataDto, { librofmId: null })).length).toBe(0);
     expect((await errorsFor(UpdateBookMetadataDto, { librofmId: 'a'.repeat(51) })).length).toBeGreaterThan(0);
+  });
+
+  it('enforces every provider id bound at exactly its declared length', async () => {
+    for (const [field, max] of Object.entries(PROVIDER_ID_MAX_LENGTHS)) {
+      expect({ field, errors: (await errorsFor(UpdateBookMetadataDto, { [field]: 'a'.repeat(max) })).length }).toEqual({ field, errors: 0 });
+      expect({ field, errors: (await errorsFor(UpdateBookMetadataDto, { [field]: 'a'.repeat(max + 1) })).length }).toEqual({ field, errors: 1 });
+    }
+  });
+
+  // The client renders these strings verbatim, because they carry the only description of what the
+  // server refused. A message that stops naming its field makes the save unfixable. See issue #1015.
+  it('names the rejected field and its limit in the validation message', async () => {
+    const [error] = await errorsFor(UpdateBookMetadataDto, { amazonId: 'https://www.amazon.com/dp/0345415000' });
+
+    expect(error?.property).toBe('amazonId');
+    expect(Object.values(error?.constraints ?? {}).join(' ')).toBe('amazonId must be shorter than or equal to 20 characters');
+  });
+
+  // Issue #1624: identifiers pasted from Amazon carry hyphens and invisible characters.
+  it('cleans pasted identifiers before validating them instead of rejecting them', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
+
+    const result = (await pipe.transform(
+      {
+        metadata: {
+          isbn13: '978-3426226223',
+          isbn10: '\u200B0-8044-2957-x',
+          amazonId: '\u200BB00X47ZVXM',
+          audibleId: ' b002v0qk4c\u200E',
+          googleBooksId: '\u00A0zyTC-Al_FPjgYC\uFEFF',
+          hardcoverId: 'the-name-of-the-wind ',
+        },
+        lockedFields: [],
+      },
+      { type: 'body', metatype: UpdateBookMetadataAndLocksDto, data: undefined },
+    )) as UpdateBookMetadataAndLocksDto;
+
+    expect(result.metadata).toEqual({
+      isbn13: '9783426226223',
+      isbn10: '080442957X',
+      amazonId: 'B00X47ZVXM',
+      audibleId: 'B002V0QK4C',
+      googleBooksId: 'zyTC-Al_FPjgYC',
+      hardcoverId: 'the-name-of-the-wind',
+    });
+  });
+
+  it('rejects an identifier that is still too long once cleaned, without truncating it', async () => {
+    const dto = plainToInstance(UpdateBookMetadataDto, { isbn13: '978-3426226223-1', isbn10: '0-306-40615-22' });
+    const errors = await validate(dto);
+
+    expect(dto.isbn13).toBe('97834262262231');
+    expect(dto.isbn10).toBe('03064061522');
+    expect(errors.map((error) => error.property).sort()).toEqual(['isbn10', 'isbn13']);
+  });
+
+  it('leaves cleared and non-string identifiers to the existing validators', async () => {
+    const cleared = plainToInstance(UpdateBookMetadataDto, { isbn13: null, amazonId: '', goodreadsId: ' \u200B ' });
+    expect(await validate(cleared)).toHaveLength(0);
+    expect(cleared).toMatchObject({ isbn13: null, amazonId: '', goodreadsId: '' });
+
+    const [error] = await errorsFor(UpdateBookMetadataDto, { isbn13: 9783426226223 });
+    expect(error?.property).toBe('isbn13');
+    expect(error?.constraints).toHaveProperty('isString');
   });
 
   it('normalizes a zero page count to null and validates other page count values', async () => {
@@ -238,7 +337,7 @@ describe('Book DTO validation', () => {
     // Single title patch
     expect((await errorsFor(UpdateBookMetadataDto, { title: 'New Title' })).length).toBe(0);
     // Single series patch
-    expect((await errorsFor(UpdateBookMetadataDto, { seriesName: 'My Series', seriesIndex: 1.5 })).length).toBe(0);
+    expect((await errorsFor(UpdateBookMetadataDto, { seriesName: 'My Series', seriesIndex: '1.5' })).length).toBe(0);
     // Series cleared to null
     expect((await errorsFor(UpdateBookMetadataDto, { seriesName: null, seriesIndex: null })).length).toBe(0);
     // Language valid 2-letter code
@@ -259,7 +358,7 @@ describe('Book DTO validation', () => {
     expect((await errorsFor(UpdateBookMetadataDto, { tags: ['to-read'] })).length).toBe(0);
     // Empty payload (all fields optional)
     expect((await errorsFor(UpdateBookMetadataDto, {})).length).toBe(0);
-    // seriesIndex must be a number
+    // seriesIndex must be a numeric label
     expect((await errorsFor(UpdateBookMetadataDto, { seriesIndex: 'not-a-number' })).length).toBeGreaterThan(0);
   });
 

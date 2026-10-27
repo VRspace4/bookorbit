@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EPUB_READER_DEFAULTS, type EpubReaderSettings } from '@bookorbit/types'
+import { EPUB_READER_DEFAULTS, type EpubReaderSettings, type ThemeHighlightColors } from '@bookorbit/types'
 import {
   buildThemeHighlightPatch,
   buildThemeSwitchHighlightPatch,
@@ -43,9 +43,10 @@ describe('theme-highlight', () => {
       resolveThemeHighlightColors({
         ...baseSettings,
         themeHighlightColors: {
+          // Partial on purpose: stored data from older builds can miss a color.
           default: {
             ttsSentenceHighlightColor: '#aa0000',
-          },
+          } as ThemeHighlightColors,
         },
         ttsSentenceHighlightColor: '#aa0000',
         ttsWordHighlightColor: '#bb0000',

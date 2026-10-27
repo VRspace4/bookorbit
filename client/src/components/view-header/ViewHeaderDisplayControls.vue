@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import { Circle, Square } from '@lucide/vue'
+import { TABLE_DENSITIES, type TableDensity } from '@bookorbit/types'
 import type { BookViewMode } from '@/composables/useDisplaySettings'
 
 const { t } = useI18n()
@@ -10,7 +11,25 @@ withDefaults(
     viewMode: BookViewMode
     coverSize: number
     gridGap: number
+    showJumpRailToggle?: boolean
+    showJumpRails?: boolean
+    /** View modes the rail actually applies to. Books only rail in grid; authors do both. */
+    jumpRailModes?: BookViewMode[]
     coverShape?: 'square' | 'circle'
+    /** Row height for list mode. Omitted by views whose list rows are not adjustable. */
+    rowDensity?: TableDensity
+    /**
+     * Only the authors views offer this. A declared Boolean prop defaults to false
+     * rather than undefined in Vue, so presence needs its own flag - the same shape
+     * the jump-rail toggle above uses.
+     */
+    showCoverFallbackToggle?: boolean
+    coverFallback?: boolean
+    /** Book views only: series stacking, moved here from its own bar button. */
+    showCollapseSeries?: boolean
+    collapseSeries?: boolean
+    /** Selection keeps every book visible, so stacking is locked while selecting. */
+    collapseSeriesLocked?: boolean
     coverSizeMin?: number
     coverSizeMax?: number
     coverSizeStep?: number
@@ -19,6 +38,7 @@ withDefaults(
     gridGapStep?: number
   }>(),
   {
+    jumpRailModes: () => ['grid'] as BookViewMode[],
     coverSizeMin: 100,
     coverSizeMax: 280,
     coverSizeStep: 10,
@@ -31,13 +51,55 @@ withDefaults(
 const emit = defineEmits<{
   'update:coverSize': [value: number]
   'update:gridGap': [value: number]
+  'update:showJumpRails': [value: boolean]
   'update:coverShape': [value: 'square' | 'circle']
+  'update:rowDensity': [value: TableDensity]
+  'update:coverFallback': [value: boolean]
+  'update:collapseSeries': [value: boolean]
 }>()
+
+function handleCollapseSeriesChange(event: Event) {
+  emit('update:collapseSeries', (event.target as HTMLInputElement).checked)
+}
+
+function handleCoverFallbackChange(event: Event) {
+  emit('update:coverFallback', (event.target as HTMLInputElement).checked)
+}
+
+const DENSITY_LABELS: Record<TableDensity, string> = {
+  compact: 'components.viewHeader.displayControls.densityCompact',
+  comfortable: 'components.viewHeader.displayControls.densityComfortable',
+  roomy: 'components.viewHeader.displayControls.densityRoomy',
+}
+
+function handleShowJumpRailsChange(event: Event) {
+  emit('update:showJumpRails', (event.target as HTMLInputElement).checked)
+}
 </script>
 
 <template>
   <div class="space-y-4">
     <p class="text-xs font-semibold text-foreground uppercase tracking-wider">{{ t('components.viewHeader.displayControls.display') }}</p>
+
+    <div v-if="rowDensity !== undefined && viewMode === 'list'" class="space-y-1.5">
+      <span class="text-xs text-muted-foreground">{{ t('components.viewHeader.displayControls.rowDensity') }}</span>
+      <div class="mt-1.5 flex items-center gap-1">
+        <button
+          v-for="density in TABLE_DENSITIES"
+          :key="density"
+          class="flex flex-1 items-center justify-center rounded-md border py-1.5 text-xs font-medium transition-colors"
+          :class="
+            rowDensity === density
+              ? 'border-primary text-primary bg-primary/8'
+              : 'border-border text-muted-foreground hover:text-foreground hover:border-muted-foreground/40'
+          "
+          :aria-pressed="rowDensity === density"
+          @click="emit('update:rowDensity', density)"
+        >
+          {{ t(DENSITY_LABELS[density]) }}
+        </button>
+      </div>
+    </div>
 
     <template v-if="viewMode !== 'table'">
       <div class="space-y-1.5">
@@ -45,6 +107,8 @@ const emit = defineEmits<{
           <span class="text-xs text-muted-foreground">{{ t('components.viewHeader.displayControls.coverSize') }}</span>
           <span class="text-xs font-medium tabular-nums text-foreground">{{ coverSize }}px</span>
         </div>
+        <!-- The label and the value sit in the row above for sighted users; the slider carries them
+             itself so assistive technology is not handed an unnamed control reading a bare number. -->
         <input
           :value="coverSize"
           @input="emit('update:coverSize', Number(($event.target as HTMLInputElement).value))"
@@ -52,6 +116,8 @@ const emit = defineEmits<{
           :min="coverSizeMin"
           :max="coverSizeMax"
           :step="coverSizeStep"
+          :aria-label="t('components.viewHeader.displayControls.coverSize')"
+          :aria-valuetext="t('components.viewHeader.displayControls.pixelValue', { value: coverSize })"
           class="w-full accent-primary cursor-pointer"
         />
       </div>
@@ -68,9 +134,31 @@ const emit = defineEmits<{
           :min="gridGapMin"
           :max="gridGapMax"
           :step="gridGapStep"
+          :aria-label="t('components.viewHeader.displayControls.gridGap')"
+          :aria-valuetext="t('components.viewHeader.displayControls.pixelValue', { value: gridGap })"
           class="w-full accent-primary cursor-pointer"
         />
       </div>
+
+      <label v-if="showCoverFallbackToggle" class="flex cursor-pointer items-center justify-between gap-3 pt-1">
+        <span class="text-xs text-muted-foreground">{{ t('components.viewHeader.displayControls.coverFallback') }}</span>
+        <input
+          type="checkbox"
+          :checked="coverFallback"
+          class="size-4 shrink-0 cursor-pointer rounded-xs border-input accent-primary"
+          @change="handleCoverFallbackChange"
+        />
+      </label>
+
+      <label v-if="showJumpRailToggle && jumpRailModes.includes(viewMode)" class="flex cursor-pointer items-center justify-between gap-3 pt-1">
+        <span class="text-xs text-muted-foreground">{{ t('components.viewHeader.displayControls.showJumpRails') }}</span>
+        <input
+          type="checkbox"
+          :checked="showJumpRails"
+          class="size-4 shrink-0 cursor-pointer rounded-xs border-input accent-primary"
+          @change="handleShowJumpRailsChange"
+        />
+      </label>
     </template>
 
     <template v-else>
@@ -78,6 +166,24 @@ const emit = defineEmits<{
         <p class="text-xs text-muted-foreground">{{ t('components.viewHeader.displayControls.columnsHint') }}</p>
       </slot>
     </template>
+
+    <label
+      v-if="showCollapseSeries"
+      class="flex items-center justify-between gap-3 pt-1"
+      :class="collapseSeriesLocked ? 'cursor-not-allowed' : 'cursor-pointer'"
+    >
+      <span class="flex flex-col gap-0.5">
+        <span class="text-xs text-muted-foreground">{{ t('views.bookView.collapseSeries') }}</span>
+        <span v-if="collapseSeriesLocked" class="text-[11px] text-muted-foreground">{{ t('views.bookView.collapseLockedWhileSelecting') }}</span>
+      </span>
+      <input
+        type="checkbox"
+        :checked="collapseSeries"
+        :disabled="collapseSeriesLocked"
+        class="size-4 shrink-0 cursor-pointer rounded-xs border-input accent-primary disabled:cursor-not-allowed"
+        @change="handleCollapseSeriesChange"
+      />
+    </label>
 
     <div v-if="coverShape !== undefined && viewMode !== 'table'" class="space-y-1.5">
       <span class="text-xs text-muted-foreground">{{ t('components.viewHeader.displayControls.coverShape') }}</span>
@@ -107,5 +213,6 @@ const emit = defineEmits<{
         </button>
       </div>
     </div>
+    <slot name="extra" />
   </div>
 </template>

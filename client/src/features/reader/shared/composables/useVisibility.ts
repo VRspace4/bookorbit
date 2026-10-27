@@ -1,90 +1,64 @@
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onUnmounted, ref } from 'vue'
 
+const AUTO_HIDE_DELAY_MS = 3000
 export const READER_DESKTOP_MIN_WIDTH = 768
 
 export function isReaderDesktopViewport() {
-  return typeof window !== 'undefined' && window.matchMedia(`(min-width: ${READER_DESKTOP_MIN_WIDTH}px)`).matches
+  return typeof window !== 'undefined' && window.matchMedia?.(`(min-width: ${READER_DESKTOP_MIN_WIDTH}px)`).matches === true
 }
 
 export function useVisibility() {
-  const desktopDefaultVisible = isReaderDesktopViewport()
-  const headerVisible = ref(desktopDefaultVisible)
-  const footerVisible = ref(desktopDefaultVisible)
+  // Desktop has room for the chrome, so it starts pinned; phones start with the page alone.
+  const desktopDefault = isReaderDesktopViewport()
+  const headerVisible = ref(desktopDefault)
+  const footerVisible = ref(desktopDefault)
+  const isPinned = ref(desktopDefault)
 
-  let isPinned = desktopDefaultVisible
   let isVisibilityLocked = false
   let hideTimer: ReturnType<typeof setTimeout> | null = null
-  let desktopMediaQuery: MediaQueryList | null = null
-
-  const HEADER_TRIGGER = 24
-  const FOOTER_TRIGGER = 24
 
   function clearHideTimer() {
-    if (hideTimer) clearTimeout(hideTimer)
+    if (!hideTimer) return
+    clearTimeout(hideTimer)
     hideTimer = null
   }
 
   function scheduleHide() {
-    if (isReaderDesktopViewport() && isPinned) return
-
     clearHideTimer()
     hideTimer = setTimeout(() => {
-      if (!isPinned && !isVisibilityLocked) {
+      if (!isPinned.value && !isVisibilityLocked) {
         headerVisible.value = false
         footerVisible.value = false
       }
-    }, 3000)
-  }
-
-  function applyViewportDefaults() {
-    if (isVisibilityLocked) return
-
-    if (isReaderDesktopViewport()) {
-      isPinned = true
-      headerVisible.value = true
-      footerVisible.value = true
-      clearHideTimer()
-      return
-    }
-
-    isPinned = false
-    headerVisible.value = false
-    footerVisible.value = false
-    clearHideTimer()
-  }
-
-  function onMouseMove(e: MouseEvent) {
-    if (isVisibilityLocked) return
-    if (isReaderDesktopViewport() && isPinned) return
-
-    const y = e.clientY
-    const height = window.innerHeight
-
-    if (!isPinned) {
-      if (y < HEADER_TRIGGER) {
-        headerVisible.value = true
-        scheduleHide()
-      } else if (headerVisible.value) {
-        scheduleHide()
-      }
-
-      if (y > height - FOOTER_TRIGGER) {
-        footerVisible.value = true
-        scheduleHide()
-      } else if (footerVisible.value) {
-        scheduleHide()
-      }
-    }
+      hideTimer = null
+    }, AUTO_HIDE_DELAY_MS)
   }
 
   function handleMiddleTap() {
     if (isVisibilityLocked) return
+    if (isPinned.value) return
 
-    isPinned = !isPinned
-    headerVisible.value = isPinned
-    footerVisible.value = isPinned
-    if (!isPinned) {
+    if (headerVisible.value || footerVisible.value) {
       clearHideTimer()
+      headerVisible.value = false
+      footerVisible.value = false
+      return
+    }
+
+    headerVisible.value = true
+    footerVisible.value = true
+    scheduleHide()
+  }
+
+  function togglePinned() {
+    isPinned.value = !isPinned.value
+    headerVisible.value = true
+    footerVisible.value = true
+
+    if (isPinned.value) {
+      clearHideTimer()
+    } else {
+      scheduleHide()
     }
   }
 
@@ -94,13 +68,10 @@ export function useVisibility() {
       return
     }
 
-    if (isPinned) {
+    if (!isPinned.value) {
       headerVisible.value = true
-      return
+      scheduleHide()
     }
-
-    headerVisible.value = true
-    scheduleHide()
   }
 
   function showFooter() {
@@ -109,13 +80,19 @@ export function useVisibility() {
       return
     }
 
-    if (isPinned) {
+    if (!isPinned.value) {
       footerVisible.value = true
-      return
+      scheduleHide()
     }
+  }
 
-    footerVisible.value = true
-    scheduleHide()
+  function hideOverlays(force = false) {
+    if (isVisibilityLocked && !force) return
+
+    clearHideTimer()
+    isPinned.value = false
+    headerVisible.value = false
+    footerVisible.value = false
   }
 
   function setVisibilityLock(locked: boolean) {
@@ -128,7 +105,7 @@ export function useVisibility() {
       return
     }
 
-    if (isPinned || isReaderDesktopViewport()) {
+    if (isPinned.value) {
       headerVisible.value = true
       footerVisible.value = true
       return
@@ -138,18 +115,7 @@ export function useVisibility() {
     footerVisible.value = false
   }
 
-  onMounted(() => {
-    document.addEventListener('mousemove', onMouseMove)
-    desktopMediaQuery = window.matchMedia(`(min-width: ${READER_DESKTOP_MIN_WIDTH}px)`)
-    desktopMediaQuery.addEventListener('change', applyViewportDefaults)
-    applyViewportDefaults()
-  })
+  onUnmounted(clearHideTimer)
 
-  onUnmounted(() => {
-    document.removeEventListener('mousemove', onMouseMove)
-    desktopMediaQuery?.removeEventListener('change', applyViewportDefaults)
-    clearHideTimer()
-  })
-
-  return { headerVisible, footerVisible, handleMiddleTap, onMouseMove, showHeader, showFooter, setVisibilityLock }
+  return { headerVisible, footerVisible, isPinned, handleMiddleTap, togglePinned, showHeader, showFooter, hideOverlays, setVisibilityLock }
 }

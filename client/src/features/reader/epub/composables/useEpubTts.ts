@@ -139,7 +139,10 @@ const DEFAULT_RUNTIME = (): SpeechRuntime => ({
 })
 
 function normalizeBoundaryToken(value: string): string {
-  return value.trim().toLowerCase().replace(/[^\p{L}\p{N}']/gu, '')
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}']/gu, '')
 }
 
 function resolveAzureBoundaryWordIndex(
@@ -1700,10 +1703,7 @@ export function useEpubTts(options: UseEpubTtsOptions) {
 
   /** Persist and return the first word index of the sentence containing `wordIndex`. */
   function checkpointAtSentenceStart(wordIndex = activeIndex.value): number | null {
-    if (
-      playingSentenceStartIdx !== null &&
-      (!Number.isInteger(wordIndex) || wordIndex < 0 || wordIndex < playingSentenceStartIdx)
-    ) {
+    if (playingSentenceStartIdx !== null && (!Number.isInteger(wordIndex) || wordIndex < 0 || wordIndex < playingSentenceStartIdx)) {
       wordIndex = playingSentenceStartIdx
     }
     if (!Number.isInteger(wordIndex) || wordIndex < 0) return null

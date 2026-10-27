@@ -1,58 +1,58 @@
 <script setup lang="ts">
-import { type Component, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import { useVirtualizer } from '@tanstack/vue-virtual'
+import { useMediaQuery } from '@vueuse/core'
 import {
-  AlignJustify,
-  ArrowDownUp,
   ArrowLeft,
-  ArrowLeftRight,
-  ArrowRight,
-  BookOpen,
-  Circle,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
-  Image as ImageIcon,
-  Info,
-  Layers,
-  LayoutGrid,
   Maximize,
   Minimize,
-  Moon,
-  ScanLine,
+  Minus,
+  Pin,
+  PinOff,
+  Plus,
   Settings,
-  Sun,
+  FileText,
 } from '@lucide/vue'
 import { useVisibility } from '../shared/composables/useVisibility'
 import { useReaderProgress } from '../shared/composables/useReaderProgress'
 import { useReadingSession } from '../shared/composables/useReadingSession'
 import { useCbz } from './composables/useCbz'
+import { useSeriesNextBook } from '../shared/composables/useSeriesNextBook'
 import { useCbzSettings } from './composables/useCbzSettings'
-import type { BgColor, Direction, FitMode, ScrollMode, SpreadAlignment, ViewMode, WidePageSingletonMode } from './composables/useCbzSettings'
 import { useReaderSettings } from '../shared/composables/useReaderSettings'
 import { leaveReader } from '../shared/lib/reader-navigation'
 import { useFullscreen } from '../shared/composables/useFullscreen'
 import type { CbxReaderSettings } from '@bookorbit/types'
 import { DEFAULT_WIDE_PAGE_RATIO_THRESHOLD, createCbzSpreadLayout } from './lib/spread-layout'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import ReaderSettingsSheet from '@/features/reader/shared/components/ReaderSettingsSheet.vue'
+import CbzSettingsPanel from './components/CbzSettingsPanel.vue'
+import NextIssueCard from './components/NextIssueCard.vue'
+import DjvuTextSheet from '../djvu/DjvuTextSheet.vue'
 
 const TWO_PAGE_BREAKPOINT = 900
+// A page turn that only just landed on the last page must not carry through into the next book:
+// wheel bursts and held keys arrive in quick succession, so the crossing needs a deliberate turn.
+const AUTO_ADVANCE_ARM_DELAY_MS = 500
+const MIN_ZOOM_SCALE = 0.5
+const MAX_ZOOM_SCALE = 3
+const ZOOM_STEP = 0.25
 
 const { t } = useI18n()
 
-const props = defineProps<{ bookId: number; fileId: number; peekMode?: boolean }>()
+const props = defineProps<{ bookId: number; fileId: number; peekMode?: boolean; source?: 'cbz' | 'djvu' }>()
 const route = useRoute()
 const router = useRouter()
 const trackingEnabled = computed(() => !props.peekMode)
 
-async function handleBack() {
-  await leaveReader(router)
-}
-
-const { headerVisible, footerVisible, handleMiddleTap, showHeader, showFooter, setVisibilityLock } = useVisibility()
+const { headerVisible, footerVisible, isPinned, handleMiddleTap, togglePinned, showHeader, showFooter, setVisibilityLock } = useVisibility()
 const { isFullscreen, toggleFullscreen } = useFullscreen()
 
 const { onActivity, elapsedMinutes } = useReadingSession(
@@ -64,119 +64,131 @@ const { onActivity, elapsedMinutes } = useReadingSession(
   { trackingEnabled },
 )
 const progress = useReaderProgress(props.bookId, props.fileId, elapsedMinutes, 0, { trackingEnabled })
-const { pageCount, bookTitle, loading, error, pageUrl, load } = useCbz(props.fileId, props.bookId)
-const { fitMode, viewMode, scrollMode, direction, spreadAlignment, forceTwoPage, widePageSingletonMode, bgColor, bgValue, imgFitClass } =
-  useCbzSettings()
-const bookSettings = useReaderSettings(props.fileId, 'cbz')
+const { pageCount, bookTitle, seriesId, loading, error, pageUrl, load } = useCbz(props.fileId, props.bookId, props.source ?? 'cbz')
+const {
+  fitMode,
+  viewMode,
+  scrollMode,
+  direction,
+  spreadAlignment,
+  spreadGap,
+  forceTwoPage,
+  widePageSingletonMode,
+  bgColor,
+  autoAdvance,
+  bgValue,
+  imgFitClass,
+} = useCbzSettings()
+const { nextBook, load: loadNextBook } = useSeriesNextBook('cbx')
+const bookSettings = useReaderSettings(props.fileId, props.source === 'djvu' ? 'djvu' : 'cbz')
 
 const currentPage = ref(0)
+const imageError = ref(false)
+const imageGeneration = ref(0)
+const showPageText = ref(false)
+function goBack() {
+  void leaveReader(router)
+}
+function firstPage() {
+  goToPage(0)
+}
+function lastPage() {
+  goToPage(pageCount.value - 1)
+}
+function onPageSlider(event: Event) {
+  goToPage(Number((event.target as HTMLInputElement).value))
+}
+function openPageText() {
+  showPageText.value = true
+}
+function onTextOpenChange(open: boolean) {
+  showPageText.value = open
+}
+function onImageError() {
+  imageError.value = true
+}
+async function retryImages() {
+  await load()
+  if (disposed || error.value || pageCount.value <= 0) return
+  currentPage.value = Math.min(currentPage.value, pageCount.value - 1)
+  imageError.value = false
+  currentImageLoaded.value = false
+  loadedImageCount.value = 0
+  imageGeneration.value++
+  preloadCache.clear()
+}
+function onPaginatedLoad(event: Event) {
+  const image = event.target
+  if (image instanceof HTMLImageElement) onPaginatedImageLoad(Number(image.dataset.page), event)
+}
 const showSettings = ref(false)
-type SettingsTab = 'view' | 'reading' | 'layout'
-const settingsTab = ref<SettingsTab>('view')
-const settingsContentRef = ref<HTMLElement | null>(null)
-const hasSettingsTabBarShadow = ref(false)
-const settingsScrollMemory = ref<Record<SettingsTab, number>>({
-  view: 0,
-  reading: 0,
-  layout: 0,
-})
 const scrollContainer = ref<HTMLElement | null>(null)
+const paginatedViewport = ref<HTMLElement | null>(null)
 const viewportWidth = ref(0)
+const viewportHeight = ref(0)
 const currentImageLoaded = ref(false)
 const pendingImageLoads = ref(0)
 const loadedImageCount = ref(0)
 const pageRatios = ref<number[]>([])
-const highlightForceTwoPage = ref(false)
-const forceTwoPageToggleButton = ref<HTMLButtonElement | null>(null)
-let forceToggleHighlightTimer: ReturnType<typeof setTimeout> | null = null
+const pageDimensions = ref<Array<{ width: number; height: number } | undefined>>([])
+const stripImagesReady = ref(false)
+const zoomScale = ref(1)
 
-watch(showSettings, (open) => {
-  setVisibilityLock(open)
-  if (!open) return
-  settingsTab.value = 'view'
-  nextTick(() => {
-    if (!settingsContentRef.value) return
-    settingsContentRef.value.scrollTop = settingsScrollMemory.value.view ?? 0
-    hasSettingsTabBarShadow.value = settingsContentRef.value.scrollTop > 0
-  })
+// Only keyboard focus holds the controls open; a clicked or tapped button keeps focus too, and
+// must not stop the bars from hiding.
+const controlsFocused = ref(false)
+function onControlsFocus(event: FocusEvent) {
+  controlsFocused.value = event.target instanceof HTMLElement && event.target.matches(':focus-visible')
+}
+function onControlsBlur(event: FocusEvent) {
+  const next = event.relatedTarget
+  if (!(next instanceof HTMLElement && next.closest('[data-reader-controls]'))) controlsFocused.value = false
+}
+watch([showSettings, showPageText, controlsFocused], ([settings, text, focused]) => {
+  setVisibilityLock(settings || text || focused)
+  if (focused) footerVisible.value = true
 })
 
-// ── Settings options ───────────────────────────────────────────────────────────
-const FIT_OPTIONS = computed<{ value: FitMode; label: string; icon: Component }[]>(() => [
-  { value: 'fit-page', label: t('reader.cbz.fit.page'), icon: Maximize },
-  { value: 'fit-width', label: t('reader.cbz.fit.width'), icon: ArrowLeftRight },
-  { value: 'fit-height', label: t('reader.cbz.fit.height'), icon: ArrowDownUp },
-  { value: 'actual', label: t('reader.cbz.fit.actual'), icon: ImageIcon },
-])
-const VIEW_OPTIONS = computed<{ value: ViewMode; label: string; icon: Component }[]>(() => [
-  { value: 'single', label: t('reader.cbz.view.single'), icon: BookOpen },
-  { value: 'two-page', label: t('reader.cbz.view.twoPage'), icon: LayoutGrid },
-])
-const SCROLL_OPTIONS = computed<{ value: ScrollMode; label: string; icon: Component }[]>(() => [
-  { value: 'paginated', label: t('reader.cbz.scroll.paged'), icon: ScanLine },
-  { value: 'infinite', label: t('reader.cbz.scroll.infinite'), icon: Layers },
-  { value: 'long-strip', label: t('reader.cbz.scroll.noGaps'), icon: AlignJustify },
-])
-const DIRECTION_OPTIONS = computed<{ value: Direction; label: string; icon: Component }[]>(() => [
-  { value: 'ltr', label: t('reader.cbz.direction.ltr'), icon: ArrowRight },
-  { value: 'rtl', label: t('reader.cbz.direction.rtl'), icon: ArrowLeft },
-])
-const SPREAD_ALIGNMENT_OPTIONS = computed<{ value: SpreadAlignment; label: string; icon: Component }[]>(() => [
-  { value: 'normal', label: t('reader.cbz.spreadAlignment.normal'), icon: LayoutGrid },
-  { value: 'shifted', label: t('reader.cbz.spreadAlignment.shifted'), icon: BookOpen },
-])
-const WIDE_PAGE_OPTIONS = computed<{ value: WidePageSingletonMode; label: string; icon: Component }[]>(() => [
-  { value: 'auto', label: t('reader.cbz.widePage.auto'), icon: ImageIcon },
-  { value: 'disable', label: t('reader.cbz.widePage.inSpreads'), icon: LayoutGrid },
-])
-const BG_OPTIONS = computed<{ value: BgColor; label: string; icon: Component }[]>(() => [
-  { value: 'black', label: t('reader.cbz.bg.black'), icon: Moon },
-  { value: 'gray', label: t('reader.cbz.bg.gray'), icon: Circle },
-  { value: 'white', label: t('reader.cbz.bg.white'), icon: Sun },
-])
+// The settings surface is one panel in two containers: an anchored popover where there
+// is room beside the page, a bottom sheet where the thumb is and the page must stay visible.
+const isCompact = useMediaQuery('(max-width: 639px)')
 
-function onSettingsContentScroll() {
-  if (!settingsContentRef.value) return
-  settingsScrollMemory.value[settingsTab.value] = settingsContentRef.value.scrollTop
-  hasSettingsTabBarShadow.value = settingsContentRef.value.scrollTop > 0
+const panelSettings = computed<CbxReaderSettings>(() => ({
+  fitMode: fitMode.value,
+  viewMode: viewMode.value,
+  scrollMode: scrollMode.value,
+  direction: direction.value,
+  spreadAlignment: spreadAlignment.value,
+  spreadGap: spreadGap.value,
+  forceTwoPage: forceTwoPage.value,
+  widePageSingletonMode: widePageSingletonMode.value,
+  bgColor: bgColor.value,
+  autoAdvance: autoAdvance.value,
+}))
+
+// Persists here rather than via watches on the refs, so applySettings can restore
+// load-time or reset values without immediately re-recording them as book overrides.
+function applyPanelUpdate(partial: Partial<CbxReaderSettings>) {
+  if (partial.fitMode !== undefined) fitMode.value = partial.fitMode
+  if (partial.viewMode !== undefined) viewMode.value = partial.viewMode
+  if (partial.scrollMode !== undefined) scrollMode.value = partial.scrollMode
+  if (partial.direction !== undefined) direction.value = partial.direction
+  if (partial.spreadAlignment !== undefined) spreadAlignment.value = partial.spreadAlignment
+  if (partial.spreadGap !== undefined) spreadGap.value = partial.spreadGap
+  if (partial.forceTwoPage !== undefined) forceTwoPage.value = partial.forceTwoPage
+  if (partial.widePageSingletonMode !== undefined) widePageSingletonMode.value = partial.widePageSingletonMode
+  if (partial.bgColor !== undefined) bgColor.value = partial.bgColor
+  if (partial.autoAdvance !== undefined) autoAdvance.value = partial.autoAdvance
+  bookSettings.updateBookSettings(partial)
 }
 
-function setSettingsTab(tab: SettingsTab) {
-  if (tab === settingsTab.value) return
-  if (settingsContentRef.value) {
-    settingsScrollMemory.value[settingsTab.value] = settingsContentRef.value.scrollTop
-  }
-  settingsTab.value = tab
-  nextTick(() => {
-    if (!settingsContentRef.value) return
-    settingsContentRef.value.scrollTop = settingsScrollMemory.value[tab] ?? 0
-    hasSettingsTabBarShadow.value = settingsContentRef.value.scrollTop > 0
-  })
+function onSettingsOpenChange(open: boolean) {
+  showSettings.value = open
 }
 
-function setFitMode(v: FitMode) {
-  fitMode.value = v
-}
-function setViewMode(v: ViewMode) {
-  viewMode.value = v
-}
-function setScrollMode(v: ScrollMode) {
-  scrollMode.value = v
-}
-function setDirection(v: Direction) {
-  direction.value = v
-}
-function setSpreadAlignment(v: SpreadAlignment) {
-  spreadAlignment.value = v
-}
-function setWidePageMode(v: WidePageSingletonMode) {
-  widePageSingletonMode.value = v
-}
-function setForceTwoPage(v: boolean) {
-  forceTwoPage.value = v
-}
-function setBgColor(v: BgColor) {
-  bgColor.value = v
+/** Mirrors PopoverTrigger on the wide path, so the icon means the same thing in both containers. */
+function toggleSettings() {
+  showSettings.value = !showSettings.value
 }
 
 function applySettings(s: CbxReaderSettings) {
@@ -185,9 +197,11 @@ function applySettings(s: CbxReaderSettings) {
   scrollMode.value = s.scrollMode
   direction.value = s.direction
   spreadAlignment.value = s.spreadAlignment
+  spreadGap.value = s.spreadGap
   forceTwoPage.value = s.forceTwoPage
   widePageSingletonMode.value = s.widePageSingletonMode
   bgColor.value = s.bgColor
+  autoAdvance.value = s.autoAdvance
 }
 
 function resetBookViewSettings() {
@@ -196,22 +210,6 @@ function resetBookViewSettings() {
   if (scrollMode.value === 'paginated' && isTwoPageEffective.value) {
     currentPage.value = spreadLayout.value.anchorForPage(currentPage.value)
   }
-}
-
-function confirmResetBookViewSettings() {
-  if (!confirm(t('reader.cbz.resetConfirm'))) return
-  resetBookViewSettings()
-}
-
-function focusForceTwoPageFromHint() {
-  nextTick(() => {
-    forceTwoPageToggleButton.value?.focus()
-    highlightForceTwoPage.value = true
-    if (forceToggleHighlightTimer) clearTimeout(forceToggleHighlightTimer)
-    forceToggleHighlightTimer = setTimeout(() => {
-      highlightForceTwoPage.value = false
-    }, 1400)
-  })
 }
 
 // ── Layout engine ──────────────────────────────────────────────────────────────
@@ -235,16 +233,13 @@ const renderSpread = computed(() => currentSpread.value?.kind === 'spread')
 const renderSinglePage = computed(() => (currentSpread.value?.kind === 'single' ? currentSpread.value.singlePage : null))
 const renderLeftPage = computed(() => (currentSpread.value?.kind === 'spread' ? currentSpread.value.leftPage : null))
 const renderRightPage = computed(() => (currentSpread.value?.kind === 'spread' ? currentSpread.value.rightPage : null))
+const spreadContainerStyle = computed(() => ({ columnGap: `${spreadGap.value}px` }))
 const renderKey = computed(() => {
   const spread = currentSpread.value
   if (!spread) return 'none'
   if (spread.kind === 'single') return `single:${spread.singlePage ?? -1}`
   return `spread:${spread.leftPage ?? 'blank'}:${spread.rightPage ?? 'blank'}`
 })
-
-const showSpreadAlignmentControl = computed(() => isTwoPageEffective.value)
-const showAutoFallbackBadge = computed(() => isTwoPagePreferred.value && !isTwoPageEffective.value)
-const showSpreadAlignmentHint = computed(() => isTwoPagePreferred.value && !isTwoPageEffective.value)
 
 const pageLabel = computed(() => {
   const spread = currentSpread.value
@@ -259,6 +254,26 @@ const pageLabel = computed(() => {
 })
 
 const fullscreenLabel = computed(() => (isFullscreen.value ? 'Exit fullscreen' : 'Enter fullscreen'))
+const zoomPercent = computed(() => Math.round(zoomScale.value * 100))
+const canZoomOut = computed(() => zoomScale.value > MIN_ZOOM_SCALE)
+const canZoomIn = computed(() => zoomScale.value < MAX_ZOOM_SCALE)
+
+const paginatedStageStyle = computed(() => {
+  const stageScale = Math.max(1, zoomScale.value)
+  return {
+    width: `${stageScale * 100}%`,
+    height: `${stageScale * 100}%`,
+  }
+})
+
+const paginatedContentStyle = computed(() => {
+  const stageScale = Math.max(1, zoomScale.value)
+  return {
+    width: `${100 / stageScale}%`,
+    height: `${100 / stageScale}%`,
+    transform: `scale(${zoomScale.value})`,
+  }
+})
 
 const progressPageIndex = computed(() => {
   const spread = currentSpread.value
@@ -279,10 +294,49 @@ const sliderFillPercent = computed(() => {
 
 const stripFrameClass = computed(() => {
   if (fitMode.value === 'fit-height' || fitMode.value === 'fit-page') {
-    return 'w-full h-[100dvh] flex items-center justify-center overflow-hidden'
+    return 'flex items-center justify-center overflow-hidden'
   }
-  return 'w-full flex justify-center'
+  return 'flex justify-center'
 })
+
+const stripGap = computed(() => (scrollMode.value === 'long-strip' ? 0 : 8))
+const stripPadding = computed(() => (scrollMode.value === 'long-strip' ? 0 : 16))
+const stripViewportWidth = computed(() => Math.max(1, viewportWidth.value - (scrollMode.value === 'long-strip' ? 0 : 16)))
+
+const stripVirtualizer = useVirtualizer(
+  computed(() => {
+    const mode = scrollMode.value
+    const fit = fitMode.value
+    const height = Math.max(1, viewportHeight.value)
+    const width = stripViewportWidth.value
+    const scale = zoomScale.value
+    const ratios = pageRatios.value
+
+    return {
+      count: mode === 'paginated' ? 0 : pageCount.value,
+      getScrollElement: () => scrollContainer.value,
+      estimateSize: (index: number) => {
+        if (fit === 'fit-page' || fit === 'fit-height') return height * scale
+        const ratio = ratios[index]
+        if (fit === 'fit-width' && ratio && ratio > 0) return (width * scale) / ratio
+        return height * scale
+      },
+      gap: stripGap.value,
+      paddingStart: stripPadding.value,
+      paddingEnd: stripPadding.value,
+      overscan: 2,
+      getItemKey: (index: number) => index,
+    }
+  }),
+)
+
+const virtualStripPages = computed(() => stripVirtualizer.value.getVirtualItems())
+const virtualStripSize = computed(() => stripVirtualizer.value.getTotalSize())
+const renderedStripPages = computed(() => (stripImagesReady.value ? virtualStripPages.value : []))
+
+function measureStripPage(element: unknown) {
+  if (element instanceof Element) stripVirtualizer.value.measureElement(element)
+}
 
 const stripImageClass = computed(() => {
   switch (fitMode.value) {
@@ -297,6 +351,27 @@ const stripImageClass = computed(() => {
   }
 })
 
+function stripFrameStyle(pageStart: number) {
+  const scaledWidth = stripViewportWidth.value * zoomScale.value
+  const frameHeight = fitMode.value === 'fit-height' || fitMode.value === 'fit-page' ? viewportHeight.value * zoomScale.value : undefined
+  return {
+    width: `${scaledWidth}px`,
+    height: frameHeight === undefined ? undefined : `${frameHeight}px`,
+    insetInlineStart: `${Math.max(0, (viewportWidth.value - scaledWidth) / 2)}px`,
+    transform: `translateY(${pageStart}px)`,
+  }
+}
+
+function stripImageStyle(pageIndex: number) {
+  if (fitMode.value !== 'actual') return undefined
+  const dimensions = pageDimensions.value[pageIndex]
+  if (!dimensions) return undefined
+  return {
+    width: `${dimensions.width * zoomScale.value}px`,
+    height: `${dimensions.height * zoomScale.value}px`,
+  }
+}
+
 const canGoPrev = computed(() => {
   if (pageCount.value <= 0) return false
   if (isTwoPageEffective.value) return spreadLayout.value.prevAnchor(currentPage.value) !== currentPage.value
@@ -310,6 +385,7 @@ const canGoNext = computed(() => {
 })
 
 watch(renderKey, () => {
+  imageError.value = false
   const spread = currentSpread.value
   const expected = spread?.pages.length ?? 0
   pendingImageLoads.value = expected
@@ -327,6 +403,9 @@ function setPageRatio(pageIndex: number, width: number, height: number) {
   const next = [...pageRatios.value]
   next[pageIndex] = ratio
   pageRatios.value = next
+  const nextDimensions = [...pageDimensions.value]
+  nextDimensions[pageIndex] = { width, height }
+  pageDimensions.value = nextDimensions
 }
 
 function preload(n: number) {
@@ -337,12 +416,16 @@ function preload(n: number) {
   preloadCache.set(n, img)
 }
 
+// Every DjVu page is rendered on the server by a small shared decoder pool, so it looks one spread
+// ahead instead of four and leaves the pool free for the page on screen.
+const PRELOAD_SPREAD_OFFSETS = props.source === 'djvu' ? [0, 1] : [-1, 0, 1, 2]
+
 function schedulePreload(anchorPage: number) {
   const layout = spreadLayout.value
   const centerSpreadIndex = layout.spreadIndexForPage(anchorPage)
   const pagesToPreload = new Set<number>()
 
-  for (const offset of [-1, 0, 1, 2]) {
+  for (const offset of PRELOAD_SPREAD_OFFSETS) {
     const spread = layout.spreads[centerSpreadIndex + offset]
     if (!spread) continue
     for (const page of spread.pages) pagesToPreload.add(page)
@@ -372,12 +455,52 @@ function onStripImageLoad(pageIndex: number, e: Event) {
   setPageRatio(pageIndex, target.naturalWidth, target.naturalHeight)
 }
 
+// ── Series handoff ─────────────────────────────────────────────────────────────
+// Peeking is a look inside one book, so it never crosses into another.
+const seriesFlowEnabled = computed(() => !props.peekMode)
+const isAtLastPage = computed(() => pageCount.value > 0 && !canGoNext.value)
+const showNextBookCard = computed(() => seriesFlowEnabled.value && nextBook.value !== null && !loading.value && error.value === null)
+const showNextBookOverlay = computed(() => showNextBookCard.value && scrollMode.value === 'paginated' && isAtLastPage.value)
+const canAutoAdvance = computed(() => autoAdvance.value && showNextBookCard.value && scrollMode.value === 'paginated')
+
+let lastPageReachedAt = 0
+let openingNextBook = false
+
+watch(isAtLastPage, (atLastPage) => {
+  lastPageReachedAt = atLastPage ? Date.now() : 0
+})
+
+function shouldAutoAdvance(): boolean {
+  if (!canAutoAdvance.value || !isAtLastPage.value) return false
+  return lastPageReachedAt > 0 && Date.now() - lastPageReachedAt >= AUTO_ADVANCE_ARM_DELAY_MS
+}
+
+async function openNextBook() {
+  const target = nextBook.value
+  if (!target || openingNextBook) return
+  openingNextBook = true
+
+  try {
+    // The route keeps its name and only its params change, so the leave guard never runs: the last
+    // page has to be written here or the book it just finished stays short of complete.
+    await flushPendingProgress()
+    await router.push({ name: 'reader', params: { bookId: target.bookId, fileId: target.fileId }, query: { format: target.format } })
+  } finally {
+    openingNextBook = false
+  }
+}
+
 // ── Navigation ─────────────────────────────────────────────────────────────────
 function goToPage(n: number) {
   if (pageCount.value <= 0) return
 
   const clamped = Math.max(0, Math.min(n, pageCount.value - 1))
   const target = isTwoPageEffective.value ? spreadLayout.value.anchorForPage(clamped) : clamped
+  if (scrollMode.value !== 'paginated') {
+    currentPage.value = target
+    void scrollContinuousToPage(target)
+    return
+  }
   if (target === currentPage.value) return
 
   currentPage.value = target
@@ -385,6 +508,10 @@ function goToPage(n: number) {
 
 function nextPage() {
   if (pageCount.value <= 0) return
+  if (!canGoNext.value) {
+    if (shouldAutoAdvance()) void openNextBook()
+    return
+  }
   if (isTwoPageEffective.value) {
     goToPage(spreadLayout.value.nextAnchor(currentPage.value))
     return
@@ -438,8 +565,59 @@ function onTouchEnd(e: TouchEvent) {
   else prevPage()
 }
 
-// ── Wheel (paginated mode only) ────────────────────────────────────────────────
+// ── Zoom / wheel navigation ────────────────────────────────────────────────────
+interface ZoomFocalPoint {
+  clientX: number
+  clientY: number
+}
+
+function setZoomScale(nextScale: number, focalPoint?: ZoomFocalPoint) {
+  const clampedScale = Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, nextScale))
+  const previousScale = zoomScale.value
+  if (clampedScale === previousScale) return
+
+  const viewport = scrollMode.value === 'paginated' ? paginatedViewport.value : scrollContainer.value
+  if (!viewport) {
+    zoomScale.value = clampedScale
+    return
+  }
+
+  const bounds = viewport.getBoundingClientRect()
+  const anchorX = focalPoint ? Math.min(viewport.clientWidth, Math.max(0, focalPoint.clientX - bounds.left)) : viewport.clientWidth / 2
+  const anchorY = focalPoint ? Math.min(viewport.clientHeight, Math.max(0, focalPoint.clientY - bounds.top)) : viewport.clientHeight / 2
+  const previousHorizontalInset = previousScale < 1 ? (viewport.clientWidth * (1 - previousScale)) / 2 : 0
+  const previousVerticalInset = scrollMode.value === 'paginated' && previousScale < 1 ? (viewport.clientHeight * (1 - previousScale)) / 2 : 0
+  const contentX = (viewport.scrollLeft + anchorX - previousHorizontalInset) / previousScale
+  const contentY = (viewport.scrollTop + anchorY - previousVerticalInset) / previousScale
+
+  zoomScale.value = clampedScale
+  void nextTick(() => {
+    const nextHorizontalInset = clampedScale < 1 ? (viewport.clientWidth * (1 - clampedScale)) / 2 : 0
+    const nextVerticalInset = scrollMode.value === 'paginated' && clampedScale < 1 ? (viewport.clientHeight * (1 - clampedScale)) / 2 : 0
+    viewport.scrollLeft = Math.max(0, nextHorizontalInset + contentX * clampedScale - anchorX)
+    viewport.scrollTop = Math.max(0, nextVerticalInset + contentY * clampedScale - anchorY)
+  })
+}
+
+function zoomIn() {
+  setZoomScale(zoomScale.value + ZOOM_STEP)
+}
+
+function zoomOut() {
+  setZoomScale(zoomScale.value - ZOOM_STEP)
+}
+
 function onWheel(e: WheelEvent) {
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault()
+    const focalPoint = { clientX: e.clientX, clientY: e.clientY }
+    if (e.deltaY < 0) setZoomScale(zoomScale.value + ZOOM_STEP, focalPoint)
+    else if (e.deltaY > 0) setZoomScale(zoomScale.value - ZOOM_STEP, focalPoint)
+    return
+  }
+
+  if (scrollMode.value !== 'paginated') return
+  if (zoomScale.value > 1) return
   e.preventDefault()
   if (e.deltaY > 0) nextPage()
   else if (e.deltaY < 0) prevPage()
@@ -448,7 +626,14 @@ function onWheel(e: WheelEvent) {
 // ── Keyboard ───────────────────────────────────────────────────────────────────
 function onKeyDown(e: KeyboardEvent) {
   const target = (e.composedPath?.()[0] || e.target) as HTMLElement | null
-  if (target?.tagName === 'INPUT') return
+  if (e.defaultPrevented || showPageText.value) return
+  if (showSettings.value) {
+    if (e.key === 'Escape') showSettings.value = false
+    return
+  }
+  if (target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable=true], [role=dialog]')) return
+  // A clicked button keeps focus, so arrows must still turn pages; only its own activation keys are left to it.
+  if ((e.key === ' ' || e.key === 'Enter') && target instanceof HTMLElement && target.closest('button, a')) return
   const isRtl = direction.value === 'rtl'
 
   switch (e.key) {
@@ -477,43 +662,74 @@ function onKeyDown(e: KeyboardEvent) {
       e.preventDefault()
       goToPage(pageCount.value - 1)
       break
-    case 'Escape':
-      showSettings.value = false
+    case '+':
+    case '=':
+      e.preventDefault()
+      zoomIn()
+      break
+    case '-':
+      e.preventDefault()
+      zoomOut()
+      break
+    case '0':
+      e.preventDefault()
+      setZoomScale(1)
       break
   }
 }
 
-// ── Infinite scroll page tracking ─────────────────────────────────────────────
-let io: IntersectionObserver | null = null
+let readerReady = false
+let disposed = false
+let restoringContinuousPosition = false
+let stripScrollFrame: number | null = null
 
-function setupScrollObserver() {
-  io?.disconnect()
-  if (!scrollContainer.value) return
+function syncCurrentPageFromScroll() {
+  stripScrollFrame = null
+  if (restoringContinuousPosition || !scrollContainer.value) return
 
-  io = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          currentPage.value = parseInt((entry.target as HTMLElement).dataset.page ?? '0')
-        }
-      }
-    },
-    { root: scrollContainer.value, threshold: 0.5 },
-  )
+  const viewportStart = scrollContainer.value.scrollTop
+  const viewportEnd = viewportStart + scrollContainer.value.clientHeight
+  let visiblePage = currentPage.value
+  let visiblePixels = -1
 
-  nextTick(() => {
-    scrollContainer.value?.querySelectorAll('[data-page]').forEach((el) => io?.observe(el))
+  for (const item of stripVirtualizer.value.getVirtualItems()) {
+    const overlap = Math.max(0, Math.min(item.end, viewportEnd) - Math.max(item.start, viewportStart))
+    if (overlap > visiblePixels) {
+      visiblePage = item.index
+      visiblePixels = overlap
+    }
+  }
+
+  currentPage.value = visiblePage
+}
+
+function onStripScroll() {
+  if (stripScrollFrame !== null) cancelAnimationFrame(stripScrollFrame)
+  stripScrollFrame = requestAnimationFrame(syncCurrentPageFromScroll)
+}
+
+async function scrollContinuousToPage(page: number, restoring = false) {
+  if (scrollMode.value === 'paginated' || pageCount.value <= 0) return
+  restoringContinuousPosition = restoring
+  await nextTick()
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      stripVirtualizer.value.scrollToIndex(page, { align: 'start' })
+      resolve()
+    })
   })
+  if (restoring) {
+    requestAnimationFrame(() => {
+      restoringContinuousPosition = false
+    })
+  }
 }
 
 watch(scrollMode, async (mode) => {
-  if (mode !== 'paginated') {
-    await nextTick()
-    setupScrollObserver()
-    scrollContainer.value?.querySelector(`[data-page="${currentPage.value}"]`)?.scrollIntoView()
-  } else {
-    io?.disconnect()
-  }
+  stripImagesReady.value = false
+  if (mode === 'paginated' || !readerReady) return
+  await scrollContinuousToPage(currentPage.value, true)
+  stripImagesReady.value = true
 })
 
 watch(spreadLayout, (layout) => {
@@ -539,17 +755,42 @@ const sliderTicks = computed(() => {
 })
 
 // ── Progress save ──────────────────────────────────────────────────────────────
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+let progressSavePending = false
+
+async function savePageProgress(page: number) {
+  progress.pageNumber.value = page + 1
+  progress.percentage.value = progressPercent.value
+  progressSavePending = false
+  await progress.save()
+}
+
+async function flushPendingProgress() {
+  if (!progressSavePending) return
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  await savePageProgress(currentPage.value)
+}
+
 watch(currentPage, (page) => {
   schedulePreload(page)
   onActivity()
 
-  progress.pageNumber.value = page + 1
-  progress.percentage.value = progressPercent.value
-  progress.scheduleSave()
+  if (!readerReady || restoringContinuousPosition) return
+
+  if (saveTimer) clearTimeout(saveTimer)
+  progressSavePending = true
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    void savePageProgress(page)
+  }, 2000)
 })
 
 function onResize() {
   viewportWidth.value = window.innerWidth
+  viewportHeight.value = window.innerHeight
 }
 
 async function startTrackedReading() {
@@ -564,63 +805,93 @@ async function startTrackedReading() {
 }
 
 // ── Mount / unmount ────────────────────────────────────────────────────────────
-onMounted(async () => {
+async function initializeReader() {
   viewportWidth.value = window.innerWidth
+  viewportHeight.value = window.innerHeight
+  loading.value = true
+  error.value = null
+  try {
+    await progress.load()
+    if (disposed) return
+    await bookSettings.load()
+    if (disposed) return
+
+    applySettings(bookSettings.effective.value as CbxReaderSettings)
+
+    await load()
+    if (disposed || error.value || pageCount.value <= 0) return
+    const saved = progress.pageNumber.value
+    if (saved && saved > 1) {
+      currentPage.value = Math.min(saved - 1, pageCount.value - 1)
+    } else if (progress.percentage.value > 0 && pageCount.value > 1) {
+      const estimated = Math.round((progress.percentage.value / 100) * pageCount.value)
+      currentPage.value = Math.max(0, Math.min(estimated - 1, pageCount.value - 1))
+    }
+
+    if (scrollMode.value === 'paginated' && isTwoPageEffective.value) {
+      currentPage.value = spreadLayout.value.anchorForPage(currentPage.value)
+    }
+
+    if (seriesFlowEnabled.value) void loadNextBook(seriesId.value, props.bookId)
+
+    readerReady = true
+    if (scrollMode.value !== 'paginated') {
+      await scrollContinuousToPage(currentPage.value, true)
+      stripImagesReady.value = true
+    }
+    schedulePreload(currentPage.value)
+  } catch {
+    error.value = 'reader.pageImages.loadFailed'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(() => {
   window.addEventListener('resize', onResize)
   window.addEventListener('keydown', onKeyDown)
-
-  await progress.load()
-  await bookSettings.load()
-
-  applySettings(bookSettings.effective.value as CbxReaderSettings)
-
-  watch(fitMode, (v) => bookSettings.updateBookSettings({ fitMode: v }))
-  watch(viewMode, (v) => bookSettings.updateBookSettings({ viewMode: v }))
-  watch(scrollMode, (v) => bookSettings.updateBookSettings({ scrollMode: v }))
-  watch(direction, (v) => bookSettings.updateBookSettings({ direction: v }))
-  watch(spreadAlignment, (v) => bookSettings.updateBookSettings({ spreadAlignment: v }))
-  watch(forceTwoPage, (v) => bookSettings.updateBookSettings({ forceTwoPage: v }))
-  watch(widePageSingletonMode, (v) => bookSettings.updateBookSettings({ widePageSingletonMode: v }))
-  watch(bgColor, (v) => bookSettings.updateBookSettings({ bgColor: v }))
-
-  await load()
-  const saved = progress.pageNumber.value
-  if (saved && saved > 1) {
-    currentPage.value = Math.min(saved - 1, pageCount.value - 1)
-  } else if (progress.percentage.value > 0 && pageCount.value > 1) {
-    const estimated = Math.round((progress.percentage.value / 100) * pageCount.value)
-    currentPage.value = Math.max(0, Math.min(estimated - 1, pageCount.value - 1))
-  }
-
-  if (scrollMode.value === 'paginated' && isTwoPageEffective.value) {
-    currentPage.value = spreadLayout.value.anchorForPage(currentPage.value)
-  }
-
-  schedulePreload(currentPage.value)
+  void initializeReader()
 })
 
 onBeforeRouteLeave(async () => {
-  await progress.flush()
-  return true
+  await flushPendingProgress()
+})
+
+// Before unmount, because useReadingSession ends the session from its own unmounted hook, which
+// runs first and would otherwise miss a page turn still inside the save debounce.
+onBeforeUnmount(() => {
+  disposed = true
+  for (const image of preloadCache.values()) image.onload = null
+  preloadCache.clear()
+  void flushPendingProgress()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
   window.removeEventListener('keydown', onKeyDown)
-  io?.disconnect()
-  if (forceToggleHighlightTimer) clearTimeout(forceToggleHighlightTimer)
+  if (stripScrollFrame !== null) cancelAnimationFrame(stripScrollFrame)
 })
 </script>
 
 <template>
   <div class="fixed inset-0 select-none overflow-hidden" :style="{ background: bgValue }">
+    <span class="sr-only" role="status" aria-live="polite">{{ pageLabel }}</span>
     <!-- ── Header ──────────────────────────────────────────────────────────── -->
     <div
+      data-reader-controls
+      @focusin="onControlsFocus"
+      @focusout="onControlsBlur"
       class="absolute top-0 inset-x-0 z-50 transition-all duration-300"
       :class="headerVisible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-full pointer-events-none'"
     >
       <div class="h-12 flex items-center gap-1 px-3 bg-background/90 backdrop-blur-md border-b border-border">
-        <button class="viewer-btn" @click="handleBack()"><ArrowLeft :size="16" /></button>
+        <button
+          class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+          :aria-label="t('common.back')"
+          @click="goBack"
+        >
+          <ArrowLeft :size="16" />
+        </button>
         <div class="flex-1 min-w-0 flex flex-col justify-center px-2">
           <span v-if="bookTitle" class="text-sm font-serif text-foreground truncate leading-tight">{{ bookTitle }}</span>
           <span class="text-xs text-muted-foreground tabular-nums">{{ pageLabel }}</span>
@@ -634,360 +905,233 @@ onUnmounted(() => {
             {{ t('reader.peek.startReading') }}
           </button>
         </div>
+        <div class="hidden items-center md:flex" :aria-label="t('reader.cbz.zoomControls')" role="group">
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <button
+                class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+                :disabled="!canZoomOut"
+                :aria-label="t('reader.cbz.zoomOut')"
+                @click="zoomOut"
+              >
+                <Minus :size="15" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{{ t('reader.cbz.zoomOut') }}</TooltipContent>
+          </Tooltip>
+          <span class="min-w-12 text-center text-xs tabular-nums text-muted-foreground" aria-live="polite">{{ zoomPercent }}%</span>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <button
+                class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+                :disabled="!canZoomIn"
+                :aria-label="t('reader.cbz.zoomIn')"
+                @click="zoomIn"
+              >
+                <Plus :size="15" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{{ t('reader.cbz.zoomIn') }}</TooltipContent>
+          </Tooltip>
+        </div>
         <Tooltip>
           <TooltipTrigger as-child>
-            <button class="viewer-btn" :aria-label="fullscreenLabel" @click="toggleFullscreen">
+            <button
+              class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+              :aria-label="fullscreenLabel"
+              @click="toggleFullscreen"
+            >
               <Minimize v-if="isFullscreen" :size="15" />
               <Maximize v-else :size="15" />
             </button>
           </TooltipTrigger>
           <TooltipContent>{{ fullscreenLabel }}</TooltipContent>
         </Tooltip>
-        <DropdownMenu v-model:open="showSettings">
-          <DropdownMenuTrigger as-child>
-            <button class="viewer-btn" :class="showSettings ? '!bg-muted !text-foreground' : ''">
+
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <button
+              class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+              :class="isPinned ? '!bg-muted !text-primary' : ''"
+              :aria-label="t(isPinned ? 'reader.pageImages.unpin' : 'reader.pageImages.pin')"
+              @click="togglePinned"
+            >
+              <PinOff v-if="isPinned" :size="15" />
+              <Pin v-else :size="15" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t(isPinned ? 'reader.pageImages.unpin' : 'reader.pageImages.pin') }}</TooltipContent>
+        </Tooltip>
+        <button
+          v-if="props.source === 'djvu'"
+          type="button"
+          class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+          :aria-label="t('reader.djvu.pageText')"
+          :title="t('reader.djvu.pageText')"
+          @click="openPageText"
+        >
+          <FileText :size="16" />
+        </button>
+        <template v-if="isCompact">
+          <button
+            class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+            :class="showSettings ? '!bg-muted !text-foreground' : ''"
+            :title="t('reader.settings.title')"
+            :aria-label="t('reader.settings.ariaLabel')"
+            @click="toggleSettings"
+          >
+            <Settings :size="15" />
+          </button>
+          <ReaderSettingsSheet :open="showSettings" @update:open="onSettingsOpenChange">
+            <CbzSettingsPanel
+              :settings="panelSettings"
+              :can-reset="bookSettings.isCustomized.value"
+              :is-spread-active="isTwoPageEffective"
+              @update="applyPanelUpdate"
+              @reset="resetBookViewSettings"
+            />
+          </ReaderSettingsSheet>
+        </template>
+
+        <Popover v-else :open="showSettings" @update:open="onSettingsOpenChange">
+          <PopoverTrigger as-child>
+            <button
+              class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+              :class="showSettings ? '!bg-muted !text-foreground' : ''"
+              :title="t('reader.settings.title')"
+              :aria-label="t('reader.settings.ariaLabel')"
+            >
               <Settings :size="15" />
             </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
+          </PopoverTrigger>
+          <PopoverContent
             align="end"
             side="bottom"
             :side-offset="10"
-            class="w-[22rem] max-w-[calc(100vw-1rem)] max-h-[min(80vh,38rem)] rounded-lg border-border bg-card p-0 shadow-2xl overflow-hidden"
+            class="flex max-h-[min(80vh,40rem)] w-[21rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl border-border bg-card p-0 shadow-2xl"
           >
-            <section
-              class="bg-card text-card-foreground flex max-h-[min(80vh,38rem)] flex-col overflow-hidden [&_button:focus-visible]:outline-none [&_button:focus-visible]:ring-2 [&_button:focus-visible]:ring-primary/55 [&_button:focus-visible]:ring-offset-1 [&_button:focus-visible]:ring-offset-card"
-            >
-              <div
-                class="sticky top-0 z-10 border-b border-border bg-card/95 px-3 py-3 backdrop-blur-sm transition-shadow"
-                :class="hasSettingsTabBarShadow ? 'shadow-sm' : ''"
-              >
-                <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/55 p-1">
-                  <button
-                    class="flex h-8.5 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] font-medium leading-none transition-colors"
-                    :class="
-                      settingsTab === 'view'
-                        ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                    "
-                    @click.stop="setSettingsTab('view')"
-                  >
-                    <ImageIcon :size="13" />
-                    <span class="truncate whitespace-nowrap">{{ t('reader.cbz.tabs.view') }}</span>
-                  </button>
-                  <button
-                    class="flex h-8.5 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] font-medium leading-none transition-colors"
-                    :class="
-                      settingsTab === 'reading'
-                        ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                    "
-                    @click.stop="setSettingsTab('reading')"
-                  >
-                    <ScanLine :size="13" />
-                    <span class="truncate whitespace-nowrap">{{ t('reader.cbz.tabs.reading') }}</span>
-                  </button>
-                  <button
-                    class="flex h-8.5 min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] font-medium leading-none transition-colors"
-                    :class="
-                      settingsTab === 'layout'
-                        ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                    "
-                    @click.stop="setSettingsTab('layout')"
-                  >
-                    <LayoutGrid :size="13" />
-                    <span class="truncate whitespace-nowrap">{{ t('reader.cbz.tabs.layout') }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div ref="settingsContentRef" class="overflow-y-auto p-5.5 space-y-6" @scroll="onSettingsContentScroll">
-                <template v-if="settingsTab === 'view'">
-                  <div class="space-y-6">
-                    <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.fitMode') }}</p>
-                      <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in FIT_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            fitMode === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setFitMode(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div class="h-px bg-border/70" />
-
-                    <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.background') }}</p>
-                      <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in BG_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            bgColor === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setBgColor(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-
-                <template v-else-if="settingsTab === 'reading'">
-                  <div class="space-y-6">
-                    <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.scrollMode') }}</p>
-                      <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in SCROLL_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            scrollMode === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setScrollMode(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                      <p class="mt-1.5 text-[11px] leading-tight text-muted-foreground">{{ t('reader.cbz.scrollModeHint') }}</p>
-                    </div>
-
-                    <div class="h-px bg-border/70" />
-
-                    <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.readingDirection') }}</p>
-                      <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in DIRECTION_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            direction === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setDirection(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-
-                <template v-else>
-                  <div class="space-y-6">
-                    <div>
-                      <div class="mb-2 flex items-center justify-between">
-                        <p class="text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.pageView') }}</p>
-                        <span
-                          v-if="showAutoFallbackBadge"
-                          class="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
-                        >
-                          <Info :size="11" />
-                          {{ t('reader.cbz.autoFallback') }}
-                        </span>
-                      </div>
-                      <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in VIEW_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            viewMode === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setViewMode(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div class="h-px bg-border/70" />
-
-                    <div v-if="showSpreadAlignmentControl">
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.spreadAlignmentLabel') }}</p>
-                      <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in SPREAD_ALIGNMENT_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            spreadAlignment === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setSpreadAlignment(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div v-else-if="showSpreadAlignmentHint" class="rounded-lg border border-border/70 bg-muted/35 px-3 py-2">
-                      <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.cbz.spreadAlignmentHint') }}</p>
-                      <button class="mt-1 text-xs text-primary hover:underline" @click.stop="focusForceTwoPageFromHint">
-                        {{ t('reader.cbz.focusTwoPageToggle') }}
-                      </button>
-                    </div>
-
-                    <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.forceTwoPage') }}</p>
-                      <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          ref="forceTwoPageToggleButton"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="[
-                            !forceTwoPage
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70',
-                            highlightForceTwoPage ? 'ring-2 ring-primary/50' : '',
-                          ]"
-                          @click.stop="setForceTwoPage(false)"
-                        >
-                          {{ t('reader.cbz.off') }}
-                        </button>
-                        <button
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            forceTwoPage
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setForceTwoPage(true)"
-                        >
-                          {{ t('reader.cbz.on') }}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div>
-                      <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.cbz.widePages') }}</p>
-                      <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
-                        <button
-                          v-for="opt in WIDE_PAGE_OPTIONS"
-                          :key="opt.value"
-                          class="flex h-[2.125rem] min-w-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium leading-none transition-colors"
-                          :class="
-                            widePageSingletonMode === opt.value
-                              ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                              : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                          "
-                          @click.stop="setWidePageMode(opt.value)"
-                        >
-                          <component :is="opt.icon" :size="13" />
-                          <span class="truncate whitespace-nowrap">{{ opt.label }}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div class="h-px bg-border/70" />
-
-                    <button
-                      class="w-full rounded-lg border border-destructive/40 px-3 py-2 text-sm font-medium text-destructive transition-colors hover:bg-destructive/10"
-                      @click.stop="confirmResetBookViewSettings"
-                    >
-                      {{ t('reader.cbz.resetBookViewSettings') }}
-                    </button>
-                  </div>
-                </template>
-              </div>
-            </section>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            <CbzSettingsPanel
+              :settings="panelSettings"
+              :can-reset="bookSettings.isCustomized.value"
+              :is-spread-active="isTwoPageEffective"
+              @update="applyPanelUpdate"
+              @reset="resetBookViewSettings"
+            />
+          </PopoverContent>
+        </Popover>
       </div>
     </div>
 
     <!-- ── Paginated view ──────────────────────────────────────────────────── -->
     <div
       v-if="scrollMode === 'paginated'"
-      class="absolute inset-0 flex items-center justify-center overflow-hidden"
+      ref="paginatedViewport"
+      data-testid="cbz-paginated-viewport"
+      class="absolute inset-0 overflow-auto"
       @click="handleImageClick"
       @touchstart.passive="onTouchStart"
       @touchend.passive="onTouchEnd"
-      @wheel.prevent="onWheel"
+      @wheel="onWheel"
     >
       <div v-if="!currentImageLoaded && !error" class="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
         <div class="w-8 h-8 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
       </div>
 
-      <div class="flex items-center justify-center h-full w-full gap-0.5 px-1">
-        <template v-if="renderSpread">
-          <div class="h-full w-1/2 flex items-center justify-center">
-            <img
-              v-if="renderLeftPage !== null"
-              :src="pageUrl(renderLeftPage)"
-              :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
-              :style="{ maxWidth: '100%', maxHeight: '100%' }"
-              draggable="false"
-              @load="onPaginatedImageLoad(renderLeftPage, $event)"
-            />
-            <div v-else class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
-          </div>
-          <div class="h-full w-1/2 flex items-center justify-center">
-            <img
-              v-if="renderRightPage !== null"
-              :src="pageUrl(renderRightPage)"
-              :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
-              :style="{ maxWidth: '100%', maxHeight: '100%' }"
-              draggable="false"
-              @load="onPaginatedImageLoad(renderRightPage, $event)"
-            />
-            <div v-else class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
-          </div>
-        </template>
+      <div class="flex min-h-full min-w-full items-center justify-center" :style="paginatedStageStyle">
+        <div
+          data-testid="cbz-paginated-pages"
+          class="flex shrink-0 items-center-safe justify-center-safe px-1 origin-center"
+          :style="[paginatedContentStyle, renderSpread ? spreadContainerStyle : undefined]"
+        >
+          <template v-if="renderSpread">
+            <div data-spread-side="left" class="flex h-full min-w-0 flex-1 items-center-safe justify-end">
+              <img
+                v-if="renderLeftPage !== null"
+                :src="pageUrl(renderLeftPage)"
+                :key="`${renderLeftPage}:${imageGeneration}`"
+                :data-page="renderLeftPage"
+                :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
+                :style="{ maxWidth: '100%', maxHeight: '100%' }"
+                :alt="t('reader.pageImages.pageAlt', { page: renderLeftPage + 1 })"
+                draggable="false"
+                @load="onPaginatedLoad"
+                @error="onImageError"
+              />
+              <div v-else aria-hidden="true" class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
+            </div>
+            <div data-spread-side="right" class="flex h-full min-w-0 flex-1 items-center-safe justify-start">
+              <img
+                v-if="renderRightPage !== null"
+                :src="pageUrl(renderRightPage)"
+                :key="`${renderRightPage}:${imageGeneration}`"
+                :data-page="renderRightPage"
+                :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
+                :style="{ maxWidth: '100%', maxHeight: '100%' }"
+                :alt="t('reader.pageImages.pageAlt', { page: renderRightPage + 1 })"
+                draggable="false"
+                @load="onPaginatedLoad"
+                @error="onImageError"
+              />
+              <div v-else aria-hidden="true" class="h-[92%] w-[92%] rounded-sm border border-border/60 bg-background/30" />
+            </div>
+          </template>
 
-        <img
-          v-else-if="renderSinglePage !== null"
-          :src="pageUrl(renderSinglePage)"
-          :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
-          draggable="false"
-          @load="onPaginatedImageLoad(renderSinglePage, $event)"
-        />
-      </div>
-    </div>
-
-    <!-- ── Infinite / long-strip view ─────────────────────────────────────── -->
-    <div
-      v-else
-      ref="scrollContainer"
-      class="absolute inset-0 overflow-y-auto overflow-x-hidden"
-      :class="scrollMode === 'long-strip' ? '' : 'flex flex-col items-center'"
-    >
-      <div :class="scrollMode === 'long-strip' ? '' : 'flex flex-col items-center w-full gap-2 py-4 px-2'">
-        <div v-for="i in pageCount" :key="i - 1" :data-page="i - 1" :class="stripFrameClass">
-          <img :src="pageUrl(i - 1)" :class="stripImageClass" loading="lazy" draggable="false" @load="onStripImageLoad(i - 1, $event)" />
+          <img
+            v-else-if="renderSinglePage !== null"
+            :src="pageUrl(renderSinglePage)"
+            :key="`${renderSinglePage}:${imageGeneration}`"
+            :data-page="renderSinglePage"
+            :class="[imgFitClass, 'pointer-events-none transition-opacity duration-150', currentImageLoaded ? 'opacity-100' : 'opacity-0']"
+            :alt="t('reader.pageImages.pageAlt', { page: renderSinglePage + 1 })"
+            draggable="false"
+            @load="onPaginatedLoad"
+            @error="onImageError"
+          />
         </div>
       </div>
     </div>
 
+    <!-- ── Infinite / long-strip view ─────────────────────────────────────── -->
+    <div v-else ref="scrollContainer" class="absolute inset-0 overflow-auto" @scroll.passive="onStripScroll" @wheel="onWheel">
+      <div class="relative w-full" :style="{ height: `${virtualStripSize}px` }">
+        <div
+          v-for="page in renderedStripPages"
+          :key="String(page.key)"
+          :ref="measureStripPage"
+          :data-index="page.index"
+          :data-page="page.index"
+          class="absolute start-0 top-0"
+          :class="[stripFrameClass, scrollMode === 'long-strip' ? '' : 'px-2']"
+          :style="stripFrameStyle(page.start)"
+        >
+          <img
+            :src="pageUrl(page.index)"
+            :key="`${page.index}:${imageGeneration}`"
+            :class="stripImageClass"
+            :style="stripImageStyle(page.index)"
+            :alt="t('reader.pageImages.pageAlt', { page: page.index + 1 })"
+            decoding="async"
+            draggable="false"
+            @load="onStripImageLoad(page.index, $event)"
+            @error="onImageError"
+          />
+        </div>
+      </div>
+      <div v-if="showNextBookCard && nextBook" class="flex justify-center px-3 py-10">
+        <NextIssueCard :next-book="nextBook" @open="openNextBook" />
+      </div>
+    </div>
+
+    <!-- ── End of book: next in series ─────────────────────────────────────── -->
+    <div v-if="showNextBookOverlay && nextBook" class="absolute inset-x-0 bottom-16 z-40 flex justify-center px-3 sm:bottom-20">
+      <NextIssueCard :next-book="nextBook" :auto-advance="canAutoAdvance" @open="openNextBook" />
+    </div>
+
     <!-- ── Footer ──────────────────────────────────────────────────────────── -->
     <div
+      data-reader-controls
+      @focusin="onControlsFocus"
+      @focusout="onControlsBlur"
       class="absolute bottom-0 inset-x-0 z-50 transition-all duration-300"
       :class="footerVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-full pointer-events-none'"
     >
@@ -995,12 +1139,25 @@ onUnmounted(() => {
         <div class="hidden sm:block">
           <Tooltip>
             <TooltipTrigger as-child>
-              <button class="viewer-btn" @click="goToPage(0)"><ChevronsLeft :size="16" /></button>
+              <button
+                class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+                :aria-label="t('reader.cbz.firstPage')"
+                @click="firstPage"
+              >
+                <ChevronsLeft :size="16" />
+              </button>
             </TooltipTrigger>
             <TooltipContent>{{ t('reader.cbz.firstPage') }}</TooltipContent>
           </Tooltip>
         </div>
-        <button class="viewer-btn" :disabled="!canGoPrev" @click="prevPage"><ChevronLeft :size="16" /></button>
+        <button
+          class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+          :disabled="!canGoPrev"
+          :aria-label="t('reader.pageImages.previousPage')"
+          @click="prevPage"
+        >
+          <ChevronLeft :size="16" />
+        </button>
 
         <div class="relative flex-1 min-w-0 flex items-center h-6">
           <input
@@ -1014,18 +1171,32 @@ onUnmounted(() => {
               accentColor: 'var(--primary)',
               background: `linear-gradient(to right, var(--primary) ${sliderFillPercent}%, var(--border) ${sliderFillPercent}%)`,
             }"
-            @input="goToPage(Number(($event.target as HTMLInputElement).value))"
+            :aria-label="t('reader.pageImages.goToPage')"
+            @input="onPageSlider"
           />
           <datalist id="cbz-ticks">
             <option v-for="t in sliderTicks" :key="t" :value="t" />
           </datalist>
         </div>
 
-        <button class="viewer-btn" :disabled="!canGoNext" @click="nextPage"><ChevronRight :size="16" /></button>
+        <button
+          class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+          :disabled="!canGoNext"
+          :aria-label="t('reader.pageImages.nextPage')"
+          @click="nextPage"
+        >
+          <ChevronRight :size="16" />
+        </button>
         <div class="hidden sm:block">
           <Tooltip>
             <TooltipTrigger as-child>
-              <button class="viewer-btn" @click="goToPage(pageCount - 1)"><ChevronsRight :size="16" /></button>
+              <button
+                class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+                :aria-label="t('reader.cbz.lastPage')"
+                @click="lastPage"
+              >
+                <ChevronsRight :size="16" />
+              </button>
             </TooltipTrigger>
             <TooltipContent>{{ t('reader.cbz.lastPage') }}</TooltipContent>
           </Tooltip>
@@ -1034,8 +1205,8 @@ onUnmounted(() => {
     </div>
 
     <!-- Hover zones to reveal header / footer -->
-    <div class="absolute top-0 inset-x-0 h-16 z-40 pointer-events-auto" @mouseenter="showHeader()" />
-    <div class="absolute bottom-0 inset-x-0 h-16 z-40 pointer-events-auto" @mouseenter="showFooter()" />
+    <div class="absolute top-0 inset-x-0 h-16 z-40 pointer-events-auto" @mouseenter="showHeader" />
+    <div class="absolute bottom-0 inset-x-0 h-16 z-40 pointer-events-auto" @mouseenter="showFooter" />
 
     <!-- ── Loading / error overlays ─────────────────────────────────────────── -->
     <div v-if="loading" class="absolute inset-0 flex items-center justify-center z-50 bg-background">
@@ -1046,8 +1217,43 @@ onUnmounted(() => {
     </div>
 
     <div v-if="error" class="absolute inset-0 flex items-center justify-center z-50 p-8 text-center bg-background">
-      <p class="text-sm text-foreground">{{ error }}</p>
+      <div class="flex flex-col items-center gap-4" role="alert">
+        <p class="text-sm text-foreground">{{ t(error) }}</p>
+        <button
+          type="button"
+          class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+          @click="initializeReader"
+        >
+          {{ t('common.retry') }}
+        </button>
+        <button type="button" class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2" @click="goBack">
+          {{ t('common.back') }}
+        </button>
+      </div>
     </div>
+
+    <div v-if="imageError && !error && !loading" class="absolute inset-0 z-40 flex items-center justify-center bg-background/95 p-8">
+      <div class="flex flex-col items-center gap-4 text-center" role="alert">
+        <p class="text-sm text-foreground">{{ t('reader.pageImages.pageFailed') }}</p>
+        <button
+          type="button"
+          class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2"
+          @click="retryImages"
+        >
+          {{ t('common.retry') }}
+        </button>
+        <button type="button" class="viewer-btn focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2" @click="goBack">
+          {{ t('common.back') }}
+        </button>
+      </div>
+    </div>
+    <DjvuTextSheet
+      v-if="props.source === 'djvu'"
+      :open="showPageText"
+      :file-id="props.fileId"
+      :page-index="currentPage"
+      @update:open="onTextOpenChange"
+    />
 
     <!-- Progress bar -->
     <div v-if="!loading && !error && pageCount > 0" class="absolute bottom-0 left-0 right-0 h-0.5 bg-border z-30">

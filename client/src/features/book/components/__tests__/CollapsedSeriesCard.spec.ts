@@ -51,11 +51,12 @@ function makeBook(overrides?: Partial<BookCard>): BookCard {
   return {
     id: 1,
     status: 'present',
+    coverAspectRatio: '2/3',
     title: 'Book One',
     authors: ['Author A'],
     seriesId: 42,
     seriesName: 'The Arc',
-    seriesIndex: 1,
+    seriesIndex: '1',
     files: [],
     publishedDate: null,
     publishedYear: null,
@@ -67,6 +68,7 @@ function makeBook(overrides?: Partial<BookCard>): BookCard {
     readStatus: null,
     addedAt: '2024-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2024-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,
@@ -88,7 +90,8 @@ function makeBook(overrides?: Partial<BookCard>): BookCard {
 const expectedCoverUrl = (bookId: number, version = '2024-01-01T00:00:00.000Z') =>
   `/api/v1/books/${bookId}/thumbnail?t=${new Date(version).getTime()}`
 
-const { bookSpineOverlay, seriesCardCoverMode, gridCardPrimaryLabel, gridCardSecondaryLabel, cardInfoMode, cardOverlays } = useDisplaySettings()
+const { bookSpineOverlay, bookCoverDisplayMode, seriesCardCoverMode, gridCardPrimaryLabel, gridCardSecondaryLabel, cardInfoMode, cardOverlays } =
+  useDisplaySettings()
 
 describe('CollapsedSeriesCard', () => {
   beforeEach(() => {
@@ -99,6 +102,7 @@ describe('CollapsedSeriesCard', () => {
 
   afterEach(() => {
     bookSpineOverlay.value = 'off'
+    bookCoverDisplayMode.value = 'blurred-fit'
     seriesCardCoverMode.value = 'stack'
     gridCardPrimaryLabel.value = 'hidden'
     gridCardSecondaryLabel.value = 'hidden'
@@ -213,6 +217,24 @@ describe('CollapsedSeriesCard', () => {
       params: { seriesId: 42 },
       query: { from: '/test-path' },
     })
+  })
+
+  it('does not navigate while selection mode is replacing collapsed rows', async () => {
+    gridCardPrimaryLabel.value = 'series-title'
+    gridCardSecondaryLabel.value = 'author'
+    cardInfoMode.value = 'below-cover'
+    const wrapper = mount(CollapsedSeriesCard, {
+      props: { book: makeBook(), selectionMode: true, showLabel: true },
+    })
+
+    await wrapper.trigger('click')
+    await wrapper.find('[data-testid="series-hover-action"]').trigger('click')
+    await wrapper.find('[data-testid="grid-card-label-primary"]').trigger('click')
+    await wrapper.find('[data-testid="grid-card-label-secondary"]').trigger('click')
+
+    expect(wrapper.attributes('inert')).toBeDefined()
+    expect(mockRouterPush).not.toHaveBeenCalled()
+    expect(mockFetchAuthors).not.toHaveBeenCalled()
   })
 
   it('uses series id even when series name has special characters', async () => {
@@ -359,9 +381,68 @@ describe('CollapsedSeriesCard', () => {
       expect(wrapper.find('[data-testid="series-hover-action"]').exists()).toBe(false)
       expect(wrapper.find('[data-testid="series-progress-bar"]').exists()).toBe(false)
     })
+
+    it('fits stacked covers to the tile shape the grid passes', async () => {
+      bookCoverDisplayMode.value = 'natural-bottom'
+      const wrapper = mount(CollapsedSeriesCard, {
+        props: {
+          coverAspectRatio: '1/1',
+          book: makeBook({ coverAspectRatio: '1/1', collapsedSeries: { bookCount: 1, readCount: 0, coverBookIds: [73], seriesLatestAddedAt: null } }),
+        },
+      })
+      const image = wrapper.find('[data-testid="series-stack-cover"] .book-cover-artwork-frame img')
+      Object.defineProperty(image.element, 'naturalWidth', { configurable: true, value: 400 })
+      Object.defineProperty(image.element, 'naturalHeight', { configurable: true, value: 400 })
+
+      await image.trigger('load')
+
+      expect(wrapper.find('[data-testid="series-stack-cover"] .book-cover-artwork-frame').attributes('style')).toContain('inset: 0')
+    })
   })
 
   describe('single cover mode (non-mosaic)', () => {
+    function mountSquareSeriesInPortraitGrid(firstVolumeBookId: number) {
+      seriesCardCoverMode.value = 'first-volume'
+      return mount(CollapsedSeriesCard, {
+        props: {
+          coverAspectRatio: '2/3',
+          book: makeBook({
+            coverAspectRatio: '1/1',
+            collapsedSeries: { bookCount: 2, readCount: 0, coverBookIds: [firstVolumeBookId], seriesLatestAddedAt: null, firstVolumeBookId },
+          }),
+        },
+      })
+    }
+
+    async function loadSquareCover(wrapper: ReturnType<typeof mountSquareSeriesInPortraitGrid>) {
+      const image = wrapper.find('[data-testid="series-single-cover"] .book-cover-artwork-frame img')
+      Object.defineProperty(image.element, 'naturalWidth', { configurable: true, value: 400 })
+      Object.defineProperty(image.element, 'naturalHeight', { configurable: true, value: 400 })
+      await image.trigger('load')
+    }
+
+    it('keeps the grid tile shape and fits square art inside it instead of cropping', async () => {
+      bookCoverDisplayMode.value = 'blurred-fit'
+      const wrapper = mountSquareSeriesInPortraitGrid(71)
+
+      await loadSquareCover(wrapper)
+
+      expect(wrapper.find('.book-cover-surface').attributes('style')).toContain('aspect-ratio: 2/3')
+      expect(wrapper.find('[data-testid="series-single-cover"] .book-cover-artwork-frame img').classes()).toContain('object-contain')
+    })
+
+    it('keeps the badges on a natural-bottom cover that is shorter than the tile', async () => {
+      bookCoverDisplayMode.value = 'natural-bottom'
+      const wrapper = mountSquareSeriesInPortraitGrid(72)
+
+      await loadSquareCover(wrapper)
+
+      const overlayFrame = wrapper.find('[data-testid="series-overlay-frame"]')
+      expect(overlayFrame.attributes('style')).toContain('bottom: 0')
+      expect(overlayFrame.attributes('style')).toMatch(/height: 66\.6/)
+      expect(overlayFrame.find('[data-testid="series-count-badge"]').exists()).toBe(true)
+    })
+
     it('renders single cover for first-volume mode', () => {
       seriesCardCoverMode.value = 'first-volume'
       const wrapper = mount(CollapsedSeriesCard, {

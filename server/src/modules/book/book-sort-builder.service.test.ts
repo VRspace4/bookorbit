@@ -32,6 +32,46 @@ describe('BookSortBuilder', () => {
     expect(result[0]).toMatchObject({ type: 'sql', text: ' ASC NULLS LAST' });
   });
 
+  it('still falls back to title for an empty sort inside a collection query', () => {
+    const result = service.build([], 7, undefined, { defaultCollectionId: 42 });
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ type: 'sql', text: ' ASC NULLS LAST' });
+    expect(result[0]?.values).not.toContain(42);
+  });
+
+  it('builds collectionOrder as a correlated lookup of the membership position', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    const result = service.build([{ field: 'collectionOrder', dir: 'asc' }], 7, undefined, { defaultCollectionId: 42 });
+
+    expect(result).toHaveLength(2);
+    expect(result[0]?.text).toContain('SELECT');
+    expect(result[0]?.text).toContain('NULLS LAST');
+    expect(result[0]?.values).toContain(42);
+    expect(raw).toHaveBeenCalledWith('ASC');
+  });
+
+  it('honours a descending collectionOrder', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    service.build([{ field: 'collectionOrder', dir: 'desc' }], 7, undefined, { defaultCollectionId: 42 });
+
+    expect(raw).toHaveBeenCalledWith('DESC');
+  });
+
+  it('rejects collectionOrder outside a collection scope', () => {
+    expect(() => service.build([{ field: 'collectionOrder', dir: 'asc' }], 7)).toThrow(
+      new BadRequestException('collectionOrder sort requires a collection scope'),
+    );
+  });
+
+  it('rejects collectionOrder with an unusable collection id', () => {
+    expect(() => service.build([{ field: 'collectionOrder', dir: 'asc' }], 7, undefined, { defaultCollectionId: 0 })).toThrow(
+      new BadRequestException('Invalid collection id for collectionOrder sort'),
+    );
+  });
+
   it('builds simple field sorts for title asc and desc', () => {
     const raw = (sql as unknown as { raw: vi.Mock }).raw;
 
@@ -42,6 +82,23 @@ describe('BookSortBuilder', () => {
     expect(descResult).toHaveLength(2);
     expect(raw).toHaveBeenNthCalledWith(1, 'ASC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+  });
+
+  it('builds weighted relevance sorting when a query is present', () => {
+    const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+    const result = service.build([{ field: 'relevance', dir: 'desc' }], 42, undefined, { query: 'dune' });
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ type: 'sql' });
+    expect(result[1]).toMatchObject({ type: 'sql', text: ' ASC NULLS LAST' });
+    expect(raw).toHaveBeenCalledWith('DESC');
+  });
+
+  it('rejects relevance sorting without a query', () => {
+    expect(() => service.build([{ field: 'relevance', dir: 'desc' }], 42)).toThrow(
+      new BadRequestException('relevance sort requires a non-empty search query'),
+    );
   });
 
   it('builds author sort with the denormalized sort key', () => {
@@ -97,6 +154,24 @@ describe('BookSortBuilder', () => {
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
   });
 
+  it('uses the supplied shuffle seed instead of the daily fallback', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-15T00:00:00Z'));
+
+    const result = service.build([{ field: 'random', dir: 'asc' }], 7, undefined, { randomSeed: 12345 });
+
+    expect(result[0]?.values[1]).toBe(12345);
+  });
+
+  it('falls back to the daily seed when the supplied shuffle seed is out of range', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-15T00:00:00Z'));
+
+    const result = service.build([{ field: 'random', dir: 'asc' }], 7, undefined, { randomSeed: -1 });
+
+    expect(result[0]?.values[1]).toBe(Math.floor(new Date('2025-01-15T00:00:00Z').getTime() / 86_400_000) + 7);
+  });
+
   it('throws for readProgress sort without userId', () => {
     expect(() => service.build([{ field: 'readProgress', dir: 'asc' }])).toThrow(
       new BadRequestException('readProgress sort requires an authenticated user'),
@@ -118,6 +193,17 @@ describe('BookSortBuilder', () => {
     expect(() => service.build([{ field: 'lastReadAt', dir: 'asc' }])).toThrow(
       new BadRequestException('lastReadAt sort requires an authenticated user'),
     );
+  });
+
+  // reading_progress.updated_at is frozen by the KOReader sync path, so ordering on it left
+  // KOReader-only readers with an effectively random "Last Read" order.
+  it('orders lastReadAt on last_read_at rather than the row update timestamp', () => {
+    const result = service.build([{ field: 'lastReadAt', dir: 'desc' }], 42);
+
+    const text = (result[0] as unknown as { text: string }).text;
+    expect(text).toContain('SELECT max(rp.last_read_at)');
+    expect(text).not.toContain('rp.updated_at');
+    expect(result[0]?.values[0]).toBe(42);
   });
 
   it('throws for finishedAt sort without userId', () => {
@@ -188,9 +274,10 @@ describe('BookSortBuilder', () => {
 
     const result = service.build([{ field: 'seriesIndex', dir: 'desc' }]);
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(raw).toHaveBeenNthCalledWith(1, 'DESC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+    expect(raw).toHaveBeenNthCalledWith(3, 'DESC');
   });
 
   it('does not add series name fallback when series is already sorted', () => {
@@ -201,9 +288,10 @@ describe('BookSortBuilder', () => {
       { field: 'seriesIndex', dir: 'desc' },
     ]);
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(raw).toHaveBeenNthCalledWith(1, 'ASC');
     expect(raw).toHaveBeenNthCalledWith(2, 'DESC');
+    expect(raw).toHaveBeenNthCalledWith(3, 'DESC');
   });
 
   it('adds multiple sorts in the requested order', () => {
@@ -237,5 +325,72 @@ describe('BookSortBuilder', () => {
 
     expect(result).toHaveLength(2);
     expect(raw).not.toHaveBeenCalled();
+  });
+
+  describe('custom metadata field sorts', () => {
+    it.each([
+      ['text', 'value_text'],
+      ['url', 'value_text'],
+      ['number', 'value_number'],
+      ['date', 'value_date'],
+      ['boolean', 'value_boolean'],
+    ] as const)('orders %s fields by %s', (type, column) => {
+      const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+      const result = service.build([{ field: 'custom:7', dir: 'asc' }], 42, new Map([[7, type]]));
+
+      expect(result).toHaveLength(2);
+      expect(result[0]).toMatchObject({ type: 'sql', text: expect.stringContaining('FROM book_custom_metadata_values v') });
+      expect(result[0]?.text).toContain(' NULLS LAST');
+      expect(raw).toHaveBeenCalledWith(column);
+      expect(raw).toHaveBeenCalledWith('ASC');
+    });
+
+    it('binds the field id as a parameter rather than inlining it', () => {
+      const result = service.build([{ field: 'custom:7', dir: 'desc' }], 42, new Map([[7, 'text']]));
+
+      expect(result[0]?.values).toContain(7);
+    });
+
+    it('drops the tier when the field is archived or deleted, falling back to the default order', () => {
+      const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+      const result = service.build([{ field: 'custom:7', dir: 'asc' }], 42, new Map());
+
+      expect(result).toHaveLength(2);
+      expect(raw).not.toHaveBeenCalled();
+    });
+
+    it('drops the tier when no field types were resolved at all', () => {
+      const result = service.build([{ field: 'custom:7', dir: 'asc' }], 42);
+
+      expect(result).toHaveLength(2);
+    });
+
+    it('keeps the remaining tiers when one custom field no longer resolves', () => {
+      const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+      const result = service.build(
+        [
+          { field: 'custom:7', dir: 'asc' },
+          { field: 'title', dir: 'desc' },
+        ],
+        42,
+        new Map(),
+      );
+
+      expect(result).toHaveLength(2);
+      expect(raw).toHaveBeenCalledTimes(1);
+      expect(raw).toHaveBeenCalledWith('DESC');
+    });
+
+    it('ignores custom-looking fields that are not valid references', () => {
+      const raw = (sql as unknown as { raw: vi.Mock }).raw;
+
+      const result = service.build([{ field: 'custom:0 OR 1=1', dir: 'asc' } as never], 42, new Map([[0, 'text']]));
+
+      expect(result).toHaveLength(2);
+      expect(raw).not.toHaveBeenCalled();
+    });
   });
 });

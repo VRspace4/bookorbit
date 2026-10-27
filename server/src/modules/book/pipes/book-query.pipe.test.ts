@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 
-import { BookQueryPipe } from './book-query.pipe';
+import { BookQueryPipe, JumpBucketsQueryPipe } from './book-query.pipe';
 
 describe('BookQueryPipe', () => {
   let pipe: BookQueryPipe;
@@ -50,6 +50,32 @@ describe('BookQueryPipe', () => {
     expect(result.filter).toBeDefined();
   });
 
+  it('accepts ISO timestamps supported by date filter rules', () => {
+    const result = pipe.transform({
+      filter: {
+        type: 'group',
+        join: 'AND',
+        rules: [{ type: 'rule', field: 'startedAt', operator: 'before', value: '2026-01-01T02:30:00.000Z' }],
+      },
+    });
+    expect(result.filter).toBeDefined();
+  });
+
+  it('accepts a shuffle seed', () => {
+    const result = pipe.transform({ sort: [{ field: 'random', dir: 'asc' }], randomSeed: 987654 });
+    expect(result.randomSeed).toBe(987654);
+  });
+
+  it('leaves the shuffle seed undefined when the caller omits it', () => {
+    expect(pipe.transform({ sort: [{ field: 'random', dir: 'asc' }] }).randomSeed).toBeUndefined();
+  });
+
+  it('throws BadRequestException for an out-of-range shuffle seed', () => {
+    expect(() => pipe.transform({ randomSeed: 2_147_483_648 })).toThrow(BadRequestException);
+    expect(() => pipe.transform({ randomSeed: -1 })).toThrow(BadRequestException);
+    expect(() => pipe.transform({ randomSeed: 1.5 })).toThrow(BadRequestException);
+  });
+
   it('throws BadRequestException for invalid sort field', () => {
     expect(() => pipe.transform({ sort: [{ field: 'unknownField', dir: 'asc' }] })).toThrow(BadRequestException);
   });
@@ -67,6 +93,18 @@ describe('BookQueryPipe', () => {
     const result = pipe.transform({ sort: [{ field: 'format', dir: 'desc' }] });
     expect(result.sort).toEqual([{ field: 'format', dir: 'desc' }]);
   });
+
+  it('accepts a custom metadata field reference as a sort field', () => {
+    const result = pipe.transform({ sort: [{ field: 'custom:12', dir: 'desc' }] });
+    expect(result.sort).toEqual([{ field: 'custom:12', dir: 'desc' }]);
+  });
+
+  it.each(['custom:', 'custom:0', 'custom:-1', 'custom:1.5', 'custom:1 OR 1=1', 'custom:1234567890'])(
+    'throws BadRequestException for malformed custom sort field %s',
+    (field) => {
+      expect(() => pipe.transform({ sort: [{ field, dir: 'asc' }] })).toThrow(BadRequestException);
+    },
+  );
 
   it('throws BadRequestException for more than 5 sort entries', () => {
     const sort = ['title', 'author', 'series', 'addedAt', 'publishedYear', 'pageCount'].map((field) => ({ field, dir: 'asc' }));
@@ -153,5 +191,23 @@ describe('BookQueryPipe', () => {
 
   it('rejects a pagination window that exceeds the raised offset cap', () => {
     expect(() => pipe.transform({ pagination: { page: 6000, size: 200 } })).toThrow(BadRequestException);
+  });
+});
+
+describe('JumpBucketsQueryPipe', () => {
+  const pipe = new JumpBucketsQueryPipe();
+
+  it('defaults to a bounded bucket count', () => {
+    expect(pipe.transform({}).maxBuckets).toBe(32);
+  });
+
+  it('accepts bucket counts within the supported range', () => {
+    expect(pipe.transform({ maxBuckets: 8 }).maxBuckets).toBe(8);
+    expect(pipe.transform({ maxBuckets: 64 }).maxBuckets).toBe(64);
+  });
+
+  it('rejects bucket counts outside the supported range', () => {
+    expect(() => pipe.transform({ maxBuckets: 7 })).toThrow(BadRequestException);
+    expect(() => pipe.transform({ maxBuckets: 65 })).toThrow(BadRequestException);
   });
 });

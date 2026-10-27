@@ -1,4 +1,9 @@
 <script setup lang="ts">
+import KoboReplacement from '@/features/delivery/components/KoboReplacement.vue'
+import ReadAloudDeliverySelect from '@/features/delivery/components/ReadAloudDeliverySelect.vue'
+import { useReadAloudDelivery } from '@/features/delivery/composables/useReadAloudDelivery'
+import type { ReadAloudDeliveryPreference } from '@bookorbit/types'
+import { Button } from '@/components/ui/button'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatDate } from '@/i18n/formatters'
@@ -6,7 +11,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Plus, Trash2, Copy, Check, Pencil, X, Tablet, RefreshCw, History, Download, Upload, Bookmark, Info } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
-import SettingsPageHeader from './SettingsPageHeader.vue'
+import SettingsTabs from './components/SettingsTabs.vue'
 import { copyToClipboard } from '@/lib/clipboard'
 import { useKoboDevices } from '@/features/kobo/composables/useKoboDevices'
 import { useKoboSettings } from '@/features/kobo/composables/useKoboSettings'
@@ -14,7 +19,11 @@ import { useKoboSyncHistory } from '@/features/kobo/composables/useKoboSyncHisto
 import type { KoboDevice, KoboSyncHistoryEntry } from '@bookorbit/types'
 
 const { t } = useI18n()
-const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+const { supported: deliverySupported } = useReadAloudDelivery()
+const readAloudDelivery = ref<ReadAloudDeliveryPreference>(null)
+const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+})
 
 const { devices, fetchDevices, createDevice, renameDevice, revokeDevice } = useKoboDevices()
 const { settings, fetchSettings, updateSettings } = useKoboSettings()
@@ -26,6 +35,7 @@ const error = ref<string | null>(null)
 // Create device
 const showCreateForm = ref(false)
 const newDeviceName = ref('')
+const firstDeviceDelivery = ref<ReadAloudDeliveryPreference>('audioless_epub')
 const creating = ref(false)
 const createError = ref<string | null>(null)
 
@@ -46,6 +56,8 @@ const forceEnableHyphenation = ref(false)
 const kepubConversionLimitMb = ref(100)
 const twoWayProgressSync = ref(false)
 const syncBookOrbitAnnotationsToKobo = ref(false)
+const storeSync = ref(false)
+const fullSizeCovers = ref(true)
 const savingSettings = ref(false)
 const settingsError = ref<string | null>(null)
 const refreshingHistory = ref(false)
@@ -64,6 +76,16 @@ type HistoryDisplayItem = {
 
 const progressGroupWindowMs = 5 * 60 * 1000
 const activeTab = ref<Tab>((route.query.tab as Tab) === 'activity' ? 'activity' : 'settings')
+const tabs = computed(() => [
+  {
+    id: 'settings' as const,
+    label: t('settings.reader.kobo.tabs.syncSettings'),
+  },
+  {
+    id: 'activity' as const,
+    label: t('settings.reader.kobo.tabs.activityLog'),
+  },
+])
 
 function selectTab(tab: Tab) {
   activeTab.value = tab
@@ -99,12 +121,24 @@ const latestFailureLabel = computed(() =>
   latestFailedActivity.value ? formatLastSeen(latestFailedActivity.value.createdAt) : t('settings.reader.kobo.activity.none'),
 )
 const recentFailureLabel = computed(() =>
-  t('settings.reader.kobo.activity.failureCount', { count: recentFailureCount.value }, recentFailureCount.value),
+  t('settings.reader.kobo.activity.failureCount', {
+    count: recentFailureCount.value,
+  }),
 )
 const historyHeaderDetail = computed(() => {
   if (!latestHistoryEntry.value) return t('settings.reader.kobo.activity.noActivityRecorded')
-  const parts = [syncHealthLabel.value, t('settings.reader.kobo.activity.lastSuccess', { time: latestSuccessLabel.value })]
-  if (latestFailedActivity.value) parts.push(t('settings.reader.kobo.activity.lastFailure', { time: latestFailureLabel.value }))
+  const parts = [
+    syncHealthLabel.value,
+    t('settings.reader.kobo.activity.lastSuccess', {
+      time: latestSuccessLabel.value,
+    }),
+  ]
+  if (latestFailedActivity.value)
+    parts.push(
+      t('settings.reader.kobo.activity.lastFailure', {
+        time: latestFailureLabel.value,
+      }),
+    )
   if (recentFailureCount.value > 0) parts.push(recentFailureLabel.value)
   return parts.join(' · ')
 })
@@ -120,6 +154,9 @@ function applySettingsToLocal() {
   kepubConversionLimitMb.value = settings.value.kepubConversionLimitMb
   twoWayProgressSync.value = settings.value.twoWayProgressSync
   syncBookOrbitAnnotationsToKobo.value = settings.value.syncBookOrbitAnnotationsToKobo
+  storeSync.value = settings.value.storeSync
+  fullSizeCovers.value = settings.value.fullSizeCovers
+  readAloudDelivery.value = settings.value.readAloudDelivery ?? null
 }
 
 function formatLastSeen(date: string | null): string {
@@ -138,7 +175,10 @@ function formatLastSeen(date: string | null): string {
 
 function formatDateTime(date: string | null | undefined): string {
   if (!date) return t('settings.reader.kobo.activity.unknown')
-  return formatDate(new Date(date), { dateStyle: 'medium', timeStyle: 'short' })
+  return formatDate(new Date(date), {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
 }
 
 function buildHistoryDisplayItems(entries: KoboSyncHistoryEntry[]): HistoryDisplayItem[] {
@@ -148,18 +188,30 @@ function buildHistoryDisplayItems(entries: KoboSyncHistoryEntry[]): HistoryDispl
   for (const entry of entries) {
     if (consumed.has(entry.id)) continue
     if (!canGroupProgressEntry(entry)) {
-      items.push({ key: `entry-${entry.id}`, primary: entry, entries: [entry] })
+      items.push({
+        key: `entry-${entry.id}`,
+        primary: entry,
+        entries: [entry],
+      })
       continue
     }
 
     const group = entries.filter((candidate) => (candidate.id === entry.id || !consumed.has(candidate.id)) && canMergeProgressEntry(entry, candidate))
     if (group.length <= 1) {
-      items.push({ key: `entry-${entry.id}`, primary: entry, entries: [entry] })
+      items.push({
+        key: `entry-${entry.id}`,
+        primary: entry,
+        entries: [entry],
+      })
       continue
     }
 
     for (const candidate of group) consumed.add(candidate.id)
-    items.push({ key: `progress-${entry.deviceId ?? 'removed'}-${historyBookKey(entry)}-${entry.id}`, primary: entry, entries: group })
+    items.push({
+      key: `progress-${entry.deviceId ?? 'removed'}-${historyBookKey(entry)}-${entry.id}`,
+      primary: entry,
+      entries: group,
+    })
   }
 
   return items
@@ -288,7 +340,7 @@ function historyDetailChips(entry: KoboSyncHistoryEntry): string[] {
     }
     case 'book_download': {
       const count = historyCountNumber(entry, 'downloads') || 1
-      return [t('settings.reader.kobo.activity.chip.bookCount', { count }, count)]
+      return [t('settings.reader.kobo.activity.chip.bookCount', { count })]
     }
     case 'progress_update':
       return [progressSyncModeText(entry)]
@@ -312,7 +364,12 @@ function historyDetailChips(entry: KoboSyncHistoryEntry): string[] {
       if (created > 0) labels.push(t('settings.reader.kobo.activity.chip.created', { count: created }))
       if (updated > 0) labels.push(t('settings.reader.kobo.activity.chip.updated', { count: updated }))
       if (deleted > 0) labels.push(t('settings.reader.kobo.activity.chip.deleted', { count: deleted }))
-      if (unchanged > 0) labels.push(t('settings.reader.kobo.activity.chip.unchanged', { count: unchanged }))
+      if (unchanged > 0)
+        labels.push(
+          t('settings.reader.kobo.activity.chip.unchanged', {
+            count: unchanged,
+          }),
+        )
       return labels.length > 0 ? labels : [t('settings.reader.kobo.activity.outcome.noChanges')]
     }
   }
@@ -340,7 +397,9 @@ function historyItemTitle(item: HistoryDisplayItem): string {
 
 function historyItemOutcomeText(item: HistoryDisplayItem): string {
   return isGroupedHistoryItem(item)
-    ? t('settings.reader.kobo.activity.updateCount', { count: item.entries.length }, item.entries.length)
+    ? t('settings.reader.kobo.activity.updateCount', {
+        count: item.entries.length,
+      })
     : historyOutcomeText(item.primary)
 }
 
@@ -371,23 +430,31 @@ function historyItemSummary(item: HistoryDisplayItem): string {
     case 'library_sync': {
       const updates = historyCountNumber(entry, 'entitlements')
       if (updates === 0) return t('settings.reader.kobo.activity.summary.noLibraryUpdatesPending')
-      return t('settings.reader.kobo.activity.summary.libraryUpdatesPrepared', { count: updates }, updates)
+      return t('settings.reader.kobo.activity.summary.libraryUpdatesPrepared', {
+        count: updates,
+      })
     }
     case 'book_download':
-      if (title) return t('settings.reader.kobo.activity.summary.bookDownloadedBy', { title, device: historyDeviceName(entry) })
-      return t(
-        'settings.reader.kobo.activity.summary.booksDownloaded',
-        { count: historyCountNumber(entry, 'downloads') || 1 },
-        historyCountNumber(entry, 'downloads') || 1,
-      )
+      if (title)
+        return t('settings.reader.kobo.activity.summary.bookDownloadedBy', {
+          title,
+          device: historyDeviceName(entry),
+        })
+      return t('settings.reader.kobo.activity.summary.booksDownloaded', {
+        count: historyCountNumber(entry, 'downloads') || 1,
+      })
     case 'progress_update':
       if (isGroupedHistoryItem(item)) {
         return title
-          ? t('settings.reader.kobo.activity.summary.progressUpdatesSyncedFor', { count: item.entries.length, title }, item.entries.length)
-          : t('settings.reader.kobo.activity.summary.progressUpdatesSynced', { count: item.entries.length }, item.entries.length)
+          ? t('settings.reader.kobo.activity.summary.progressUpdatesSyncedFor', { count: item.entries.length, title })
+          : t('settings.reader.kobo.activity.summary.progressUpdatesSynced', {
+              count: item.entries.length,
+            })
       }
       return title
-        ? t('settings.reader.kobo.activity.summary.newReadingPositionFor', { title })
+        ? t('settings.reader.kobo.activity.summary.newReadingPositionFor', {
+            title,
+          })
         : t('settings.reader.kobo.activity.summary.newReadingPosition')
     case 'annotations_pull': {
       const served = historyCountNumber(entry, 'served')
@@ -396,8 +463,13 @@ function historyItemSummary(item: HistoryDisplayItem): string {
           ? t('settings.reader.kobo.activity.summary.noHighlightChangesNeededFor', { title })
           : t('settings.reader.kobo.activity.summary.noHighlightChangesNeeded')
       return title
-        ? t('settings.reader.kobo.activity.summary.highlightsSentToKoboFor', { count: served, title }, served)
-        : t('settings.reader.kobo.activity.summary.highlightsSentToKobo', { count: served }, served)
+        ? t('settings.reader.kobo.activity.summary.highlightsSentToKoboFor', {
+            count: served,
+            title,
+          })
+        : t('settings.reader.kobo.activity.summary.highlightsSentToKobo', {
+            count: served,
+          })
     }
     case 'annotations_push': {
       const changed = historyCountNumber(entry, 'created') + historyCountNumber(entry, 'updated') + historyCountNumber(entry, 'deleted')
@@ -406,8 +478,8 @@ function historyItemSummary(item: HistoryDisplayItem): string {
           ? t('settings.reader.kobo.activity.summary.noKoboHighlightChangesFor', { title })
           : t('settings.reader.kobo.activity.summary.noKoboHighlightChanges')
       return title
-        ? t('settings.reader.kobo.activity.summary.highlightsImportedFromKoboFor', { count: changed, title }, changed)
-        : t('settings.reader.kobo.activity.summary.highlightsImportedFromKobo', { count: changed }, changed)
+        ? t('settings.reader.kobo.activity.summary.highlightsImportedFromKoboFor', { count: changed, title })
+        : t('settings.reader.kobo.activity.summary.highlightsImportedFromKobo', { count: changed })
     }
   }
 }
@@ -434,7 +506,11 @@ function historyItemTimeTitle(item: HistoryDisplayItem): string {
 }
 
 function historyItemGroupedLabel(item: HistoryDisplayItem): string {
-  return isGroupedHistoryItem(item) ? t('settings.reader.kobo.activity.eventsGrouped', { count: item.entries.length }, item.entries.length) : ''
+  return isGroupedHistoryItem(item)
+    ? t('settings.reader.kobo.activity.eventsGrouped', {
+        count: item.entries.length,
+      })
+    : ''
 }
 
 function historyDeviceName(entry: KoboSyncHistoryEntry): string {
@@ -478,14 +554,6 @@ function showFailedHistory() {
   historyFilter.value = 'failures'
 }
 
-function handleSelectSettingsTab() {
-  selectTab('settings')
-}
-
-function handleSelectActivityTab() {
-  selectTab('activity')
-}
-
 async function loadMoreHistory() {
   if (loadingMore.value || historyLoading.value) return
   loadingMore.value = true
@@ -523,6 +591,10 @@ async function submitCreate() {
   creating.value = true
   createError.value = null
   try {
+    if (deliverySupported.value && devices.value.length === 0) {
+      await updateSettings({ readAloudDelivery: firstDeviceDelivery.value })
+      readAloudDelivery.value = firstDeviceDelivery.value
+    }
     const device = await createDevice(newDeviceName.value.trim())
     newDeviceToken.value = device.token
     newDeviceSyncUrl.value = `${window.location.origin}/api/v1/kobo/${device.token}`
@@ -621,6 +693,9 @@ async function saveSettings() {
       kepubConversionLimitMb: kepubConversionLimitMb.value,
       twoWayProgressSync: twoWayProgressSync.value,
       syncBookOrbitAnnotationsToKobo: syncBookOrbitAnnotationsToKobo.value,
+      storeSync: storeSync.value,
+      fullSizeCovers: fullSizeCovers.value,
+      ...(deliverySupported.value ? { readAloudDelivery: readAloudDelivery.value } : {}),
     })
     applySettingsToLocal()
     toast.success(t('settings.reader.kobo.settingsSaved'))
@@ -631,42 +706,19 @@ async function saveSettings() {
     savingSettings.value = false
   }
 }
+function beginCreate() {
+  firstDeviceDelivery.value = settings.value?.readAloudDelivery ?? 'audioless_epub'
+  showCreateForm.value = true
+}
 </script>
 
 <template>
-  <SettingsPageHeader v-if="!props.embedded" :title="t('settings.reader.kobo.title')" :subtitle="t('settings.reader.kobo.subtitle')" />
-
-  <div v-if="loading" class="text-sm text-muted-foreground">{{ t('common.loading') }}</div>
-  <div v-else-if="error" class="text-sm text-destructive">{{ error }}</div>
+  <div v-if="loading" class="settings-loading-state">
+    {{ t('common.loading') }}
+  </div>
+  <div v-else-if="error" class="settings-error-state">{{ error }}</div>
   <template v-else>
-    <!-- Tab switcher (not shown when embedded) -->
-    <div
-      v-if="!props.embedded"
-      class="flex gap-1 mb-5 md:mb-6 border-b border-border overflow-x-auto md:overflow-visible md:static sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 snap-x"
-    >
-      <button
-        class="px-3 py-3 md:py-2 text-sm font-medium shrink-0 border-b-2 -mb-px transition-colors snap-start"
-        :class="
-          activeTab === 'settings'
-            ? 'border-primary text-foreground'
-            : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-        "
-        @click="handleSelectSettingsTab"
-      >
-        {{ t('settings.reader.kobo.tabs.syncSettings') }}
-      </button>
-      <button
-        class="px-3 py-3 md:py-2 text-sm font-medium shrink-0 border-b-2 -mb-px transition-colors snap-start"
-        :class="
-          activeTab === 'activity'
-            ? 'border-primary text-foreground'
-            : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-        "
-        @click="handleSelectActivityTab"
-      >
-        {{ t('settings.reader.kobo.tabs.activityLog') }}
-      </button>
-    </div>
+    <SettingsTabs v-if="!props.embedded" :tabs="tabs" :active-tab="activeTab" @select="selectTab" />
 
     <div v-show="activeTab === 'settings' || props.embedded">
       <!-- New device token display -->
@@ -677,28 +729,31 @@ async function saveSettings() {
               <Check :size="13" stroke-width="3" />
             </div>
             <div>
-              <p class="settings-label leading-none mb-0.5">{{ t('settings.reader.kobo.devicePaired') }}</p>
-              <p class="settings-hint">{{ t('settings.reader.kobo.devicePairedHint') }}</p>
+              <p class="settings-label leading-none mb-0.5">
+                {{ t('settings.reader.kobo.devicePaired') }}
+              </p>
+              <p class="settings-hint">
+                {{ t('settings.reader.kobo.devicePairedHint') }}
+              </p>
             </div>
           </div>
-          <button @click="dismissToken()" class="text-muted-foreground hover:text-foreground transition-colors p-1 shrink-0">
+          <Button variant="ghost" size="icon-sm" @click="dismissToken" class="shrink-0">
             <X :size="18" />
-          </button>
+          </Button>
         </div>
 
         <div class="space-y-4">
           <div class="bg-background rounded-lg border border-border p-4">
-            <p class="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-2.5">{{ t('settings.reader.kobo.syncUrl') }}</p>
+            <p class="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-2.5">
+              {{ t('settings.reader.kobo.syncUrl') }}
+            </p>
             <div class="flex items-center gap-2 px-3 py-2.5 rounded-md border border-border bg-muted/30">
               <Tablet :size="14" class="text-muted-foreground shrink-0" />
               <span class="flex-1 text-sm text-foreground font-mono select-all truncate min-w-0">{{ newDeviceSyncUrl }}</span>
-              <button
-                class="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-border bg-background hover:bg-muted transition-colors shrink-0"
-                @click="copyToken()"
-              >
+              <Button variant="outline" size="sm" class="shrink-0" @click="copyToken">
                 <Copy :size="12" />
                 {{ t('settings.reader.kobo.copy') }}
-              </button>
+              </Button>
             </div>
           </div>
           <div
@@ -710,8 +765,12 @@ async function saveSettings() {
           <div class="flex items-start gap-2.5 rounded-md border border-border bg-background p-4 text-xs mt-4">
             <Info :size="16" class="text-primary shrink-0 mt-0.5" />
             <div class="space-y-1">
-              <p class="font-semibold text-foreground">{{ t('settings.reader.kobo.nextSteps.title') }}</p>
-              <p class="text-muted-foreground leading-normal">{{ t('settings.reader.kobo.nextSteps.step1') }}</p>
+              <p class="font-semibold text-foreground">
+                {{ t('settings.reader.kobo.nextSteps.title') }}
+              </p>
+              <p class="text-muted-foreground leading-normal">
+                {{ t('settings.reader.kobo.nextSteps.step1') }}
+              </p>
               <i18n-t keypath="settings.reader.kobo.nextSteps.step2" tag="p" class="text-muted-foreground leading-normal" scope="global">
                 <template #syncToKobo>
                   <strong class="text-foreground">{{ t('settings.reader.kobo.syncToKobo') }}</strong>
@@ -724,12 +783,14 @@ async function saveSettings() {
 
       <!-- Devices -->
       <div class="mb-8">
-        <div class="flex items-center justify-between mb-3">
-          <p class="settings-group-label mb-0">{{ t('settings.reader.kobo.registeredDevices') }}</p>
-          <button v-if="!showCreateForm" class="settings-btn-primary" @click="showCreateForm = true">
+        <div class="mb-2 flex items-center justify-between">
+          <p class="settings-group-label mb-0">
+            {{ t('settings.reader.kobo.registeredDevices') }}
+          </p>
+          <Button size="sm" v-if="!showCreateForm" @click="beginCreate" type="button">
             <Plus :size="12" />
             {{ t('settings.reader.kobo.addDevice') }}
-          </button>
+          </Button>
         </div>
 
         <!-- Create form -->
@@ -744,24 +805,36 @@ async function saveSettings() {
               class="input-field w-full"
             />
           </div>
-          <div v-if="createError" class="text-xs text-destructive">{{ createError }}</div>
+          <div v-if="deliverySupported && devices.length === 0" class="space-y-2">
+            <ReadAloudDeliverySelect v-model="firstDeviceDelivery" :disabled="creating" />
+            <p class="text-xs text-muted-foreground">{{ t('delivery.readAloud.koboHint') }}</p>
+          </div>
+          <div v-if="createError" class="text-xs text-destructive">
+            {{ createError }}
+          </div>
           <div class="flex items-center gap-2 pt-1">
-            <button class="settings-btn-primary" :disabled="creating || !newDeviceName.trim()" @click="submitCreate()">
+            <Button size="sm" :disabled="creating || !newDeviceName.trim()" @click="submitCreate" type="button">
               {{ creating ? t('settings.reader.kobo.creating') : t('settings.reader.kobo.createDevice') }}
-            </button>
-            <button class="settings-btn-outline" @click="cancelCreate()">{{ t('common.cancel') }}</button>
+            </Button>
+            <Button variant="outline" size="sm" @click="cancelCreate" type="button">
+              {{ t('common.cancel') }}
+            </Button>
           </div>
         </div>
 
         <div v-if="devices.length === 0 && !showCreateForm" class="border border-border rounded-lg px-5 py-10 bg-card text-center shadow-xs">
           <div class="w-10 h-10 rounded-full bg-muted flex items-center justify-center mx-auto mb-3">
-            <Tablet :size="18" class="text-muted-foreground/70" />
+            <Tablet :size="18" class="text-muted-foreground" />
           </div>
-          <p class="text-sm font-medium text-foreground">{{ t('settings.reader.kobo.noDevicesYet') }}</p>
-          <p class="text-xs text-muted-foreground mt-1 max-w-[240px] mx-auto">{{ t('settings.reader.kobo.noDevicesHint') }}</p>
+          <p class="text-sm font-medium text-foreground">
+            {{ t('settings.reader.kobo.noDevicesYet') }}
+          </p>
+          <p class="text-xs text-muted-foreground mt-1 max-w-[240px] mx-auto">
+            {{ t('settings.reader.kobo.noDevicesHint') }}
+          </p>
         </div>
 
-        <div v-else-if="devices.length > 0" class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
+        <div v-else-if="devices.length > 0" class="settings-card">
           <div v-for="device in devices" :key="device.id" class="px-5 py-4 bg-card transition-colors hover:bg-muted/30">
             <div v-if="renamingId === device.id" class="flex items-center gap-2">
               <input
@@ -771,36 +844,36 @@ async function saveSettings() {
                 @keydown.enter="submitRename(device)"
                 @keydown.esc="cancelRename()"
               />
-              <button class="settings-btn-primary" :disabled="renaming || !renameValue.trim()" @click="submitRename(device)">
+              <Button size="sm" :disabled="renaming || !renameValue.trim()" @click="submitRename(device)" type="button">
                 {{ t('common.save') }}
-              </button>
-              <button class="settings-btn-outline h-9 w-9 p-0 flex items-center justify-center" @click="cancelRename()">
+              </Button>
+              <Button variant="outline" size="icon-sm" class="flex" @click="cancelRename" type="button">
                 <X :size="14" />
-              </button>
+              </Button>
             </div>
             <div v-else class="flex items-center gap-3">
               <div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center text-muted-foreground shrink-0 border border-border">
                 <Tablet :size="16" />
               </div>
               <div class="flex-1 min-w-0">
-                <p class="settings-label truncate leading-none mb-1.5">{{ device.name }}</p>
-                <p class="settings-hint leading-none">{{ t('settings.reader.kobo.lastSync', { time: formatLastSeen(device.lastSeenAt) }) }}</p>
+                <p class="settings-label truncate leading-none mb-1.5">
+                  {{ device.name }}
+                </p>
+                <p class="settings-hint leading-none">
+                  {{
+                    t('settings.reader.kobo.lastSync', {
+                      time: formatLastSeen(device.lastSeenAt),
+                    })
+                  }}
+                </p>
               </div>
               <div class="flex items-center gap-1">
-                <button
-                  class="w-8 h-8 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                  @click="startRename(device)"
-                  :title="t('settings.reader.kobo.renameDevice')"
-                >
+                <Button variant="ghost" size="icon-sm" @click="startRename(device)" :title="t('settings.reader.kobo.renameDevice')">
                   <Pencil :size="14" />
-                </button>
-                <button
-                  class="w-8 h-8 rounded-md flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                  @click="revoke(device)"
-                  :title="t('settings.reader.kobo.revokeAccess')"
-                >
+                </Button>
+                <Button variant="destructive-ghost" size="icon-sm" @click="revoke(device)" :title="t('settings.reader.kobo.revokeAccess')">
                   <Trash2 :size="14" />
-                </button>
+                </Button>
               </div>
             </div>
           </div>
@@ -812,7 +885,9 @@ async function saveSettings() {
         <div class="flex items-start gap-3">
           <Info :size="18" class="text-primary shrink-0 mt-0.5" />
           <div class="space-y-1.5">
-            <p class="text-sm font-semibold text-foreground">{{ t('settings.reader.kobo.howBooksSynced.title') }}</p>
+            <p class="text-sm font-semibold text-foreground">
+              {{ t('settings.reader.kobo.howBooksSynced.title') }}
+            </p>
             <i18n-t keypath="settings.reader.kobo.howBooksSynced.body" tag="p" class="text-xs leading-relaxed text-muted-foreground" scope="global">
               <template #syncToKobo>
                 <strong class="text-foreground font-medium">{{ t('settings.reader.kobo.syncToKobo') }}</strong>
@@ -825,13 +900,17 @@ async function saveSettings() {
 
     <!-- Sync history -->
     <div v-show="activeTab === 'activity' && !props.embedded" class="mb-8">
-      <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div class="mb-2 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div class="min-w-0">
           <div class="flex min-w-0 items-center gap-2">
-            <p class="settings-group-label mb-0">{{ t('settings.reader.kobo.activity.recentActivity') }}</p>
+            <p class="settings-group-label mb-0">
+              {{ t('settings.reader.kobo.activity.recentActivity') }}
+            </p>
             <span v-if="latestHistoryEntry" class="h-2 w-2 shrink-0 rounded-full" :class="historyStatusDotClass(latestHistoryEntry)" />
           </div>
-          <p class="settings-hint mt-1 truncate" :title="historyHeaderDetail">{{ historyHeaderDetail }}</p>
+          <p class="settings-hint mt-1 truncate" :title="historyHeaderDetail">
+            {{ historyHeaderDetail }}
+          </p>
         </div>
         <div class="flex items-center gap-2">
           <div class="inline-flex h-8 rounded-md border border-border bg-muted p-0.5">
@@ -844,7 +923,7 @@ async function saveSettings() {
               <span
                 v-if="syncHistory.length > 0"
                 class="rounded-full bg-muted-foreground/15 px-1.5 py-0.5 text-[10px] font-semibold"
-                :class="historyFilter === 'all' ? 'text-foreground/80' : 'text-muted-foreground'"
+                :class="historyFilter === 'all' ? 'text-foreground' : 'text-muted-foreground'"
               >
                 {{ syncHistory.length }}
               </span>
@@ -860,14 +939,10 @@ async function saveSettings() {
               </span>
             </button>
           </div>
-          <button
-            class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="refreshingHistory || historyLoading"
-            @click="refreshHistory"
-          >
+          <Button variant="outline" size="sm" :disabled="refreshingHistory || historyLoading" @click="refreshHistory">
             <RefreshCw :size="12" :class="{ 'animate-spin': refreshingHistory || historyLoading }" />
             {{ t('settings.reader.kobo.activity.refresh') }}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -877,10 +952,14 @@ async function saveSettings() {
         </div>
         <div v-else-if="!hasSyncHistory" class="text-center py-4">
           <div class="w-10 h-10 rounded-lg bg-muted flex items-center justify-center mx-auto mb-3">
-            <History :size="18" class="text-muted-foreground/80" />
+            <History :size="18" class="text-muted-foreground" />
           </div>
-          <p class="text-sm font-medium text-foreground">{{ t('settings.reader.kobo.activity.noActivityYet') }}</p>
-          <p class="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">{{ t('settings.reader.kobo.activity.noActivityHint') }}</p>
+          <p class="text-sm font-medium text-foreground">
+            {{ t('settings.reader.kobo.activity.noActivityYet') }}
+          </p>
+          <p class="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+            {{ t('settings.reader.kobo.activity.noActivityHint') }}
+          </p>
         </div>
         <template v-else>
           <div v-if="filteredSyncHistory.length === 0" class="text-sm text-muted-foreground">
@@ -924,14 +1003,16 @@ async function saveSettings() {
                         {{ historyItemOutcomeText(item) }}
                       </span>
                     </div>
-                    <span class="text-xs text-muted-foreground/80" :title="historyItemTimeTitle(item)">
+                    <span class="text-xs text-muted-foreground" :title="historyItemTimeTitle(item)">
                       {{ formatLastSeen(item.primary.createdAt) }}
                     </span>
                   </div>
 
                   <!-- Messages / Details -->
                   <div class="min-w-0">
-                    <p class="text-sm text-foreground/80 leading-normal">{{ historyItemSummary(item) }}</p>
+                    <p class="text-sm text-foreground leading-normal">
+                      {{ historyItemSummary(item) }}
+                    </p>
                     <p v-if="historyItemSecondaryText(item)" class="mt-0.5 text-xs text-muted-foreground leading-normal">
                       {{ historyItemSecondaryText(item) }}
                     </p>
@@ -944,18 +1025,20 @@ async function saveSettings() {
                   >
                     <div class="flex flex-col gap-1 min-w-0">
                       <span class="font-semibold">{{ item.primary.errorClass ?? t('settings.reader.kobo.activity.error') }}</span>
-                      <p class="whitespace-pre-wrap break-all leading-normal text-destructive/90">{{ item.primary.error }}</p>
+                      <p class="whitespace-pre-wrap break-all leading-normal text-destructive">
+                        {{ item.primary.error }}
+                      </p>
                     </div>
                   </div>
 
                   <!-- Footer Metadata row -->
-                  <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground/60">
+                  <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
                     <div class="flex items-center gap-1">
-                      <Tablet :size="12" class="text-muted-foreground/40" />
+                      <Tablet :size="12" class="text-muted-foreground" />
                       <span>{{ historyDeviceName(item.primary) }}</span>
                     </div>
                     <div v-if="historyItemGroupedLabel(item)" class="flex items-center gap-1">
-                      <History :size="12" class="text-muted-foreground/40" />
+                      <History :size="12" class="text-muted-foreground" />
                       <span>{{ historyItemGroupedLabel(item) }}</span>
                     </div>
                   </div>
@@ -965,29 +1048,36 @@ async function saveSettings() {
 
             <!-- Load More -->
             <div v-if="syncHistory.length >= currentLimit && currentLimit < 100" class="mt-6 pl-10">
-              <button
-                class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50 shadow-xs"
-                :disabled="loadingMore || historyLoading"
-                @click="loadMoreHistory"
-              >
+              <Button variant="outline" size="sm" :disabled="loadingMore || historyLoading" @click="loadMoreHistory">
                 <RefreshCw v-if="loadingMore || historyLoading" :size="12" class="animate-spin" />
                 <span>{{
                   loadingMore || historyLoading ? t('settings.reader.kobo.activity.loading') : t('settings.reader.kobo.activity.loadMore')
                 }}</span>
-              </button>
+              </Button>
             </div>
           </div>
         </template>
       </div>
     </div>
 
+    <div v-if="deliverySupported && activeTab === 'settings'" class="rounded-xs border border-border bg-card p-5 space-y-3">
+      <ReadAloudDeliverySelect v-model="readAloudDelivery" :disabled="savingSettings" />
+      <p class="text-xs text-muted-foreground">{{ t('delivery.readAloud.koboHint') }}</p>
+    </div>
+
+    <KoboReplacement v-if="deliverySupported && activeTab === 'settings'" :devices="devices" />
+
     <!-- Sync settings -->
     <div v-show="activeTab === 'settings' || props.embedded" class="mb-8">
-      <p class="settings-group-label">{{ t('settings.reader.kobo.syncPreferences') }}</p>
-      <div class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
+      <p class="settings-group-label">
+        {{ t('settings.reader.kobo.syncPreferences') }}
+      </p>
+      <div class="settings-card">
         <div class="flex items-center justify-between px-5 py-4 bg-card">
           <div class="pr-8">
-            <p class="settings-label">{{ t('settings.reader.kobo.twoWaySync') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.kobo.twoWaySync') }}
+            </p>
             <p class="settings-hint">
               {{ t('settings.reader.kobo.twoWaySyncHint') }}
             </p>
@@ -997,7 +1087,9 @@ async function saveSettings() {
 
         <div class="flex items-center justify-between px-5 py-4 bg-card">
           <div class="pr-8">
-            <p class="settings-label">{{ t('settings.reader.kobo.syncHighlights') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.kobo.syncHighlights') }}
+            </p>
             <p class="settings-hint">
               {{ t('settings.reader.kobo.syncHighlightsHint') }}
             </p>
@@ -1007,7 +1099,21 @@ async function saveSettings() {
 
         <div class="flex items-center justify-between px-5 py-4 bg-card">
           <div class="pr-8">
-            <p class="settings-label">{{ t('settings.reader.kobo.convertKepub') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.kobo.storeSync') }}
+            </p>
+            <p class="settings-hint">
+              {{ t('settings.reader.kobo.storeSyncHint') }}
+            </p>
+          </div>
+          <ToggleSwitch v-model="storeSync" />
+        </div>
+
+        <div class="flex items-center justify-between px-5 py-4 bg-card">
+          <div class="pr-8">
+            <p class="settings-label">
+              {{ t('settings.reader.kobo.convertKepub') }}
+            </p>
             <p class="settings-hint">
               {{ t('settings.reader.kobo.convertKepubHint') }}
             </p>
@@ -1017,16 +1123,36 @@ async function saveSettings() {
 
         <div v-if="convertToKepub" class="flex items-center justify-between px-5 py-4 bg-card">
           <div class="pr-8">
-            <p class="settings-label">{{ t('settings.reader.kobo.forceHyphenation') }}</p>
-            <p class="settings-hint">{{ t('settings.reader.kobo.forceHyphenationHint') }}</p>
+            <p class="settings-label">
+              {{ t('settings.reader.kobo.forceHyphenation') }}
+            </p>
+            <p class="settings-hint">
+              {{ t('settings.reader.kobo.forceHyphenationHint') }}
+            </p>
           </div>
           <ToggleSwitch v-model="forceEnableHyphenation" />
         </div>
 
+        <div class="flex items-center justify-between px-5 py-4 bg-card">
+          <div class="pr-8">
+            <p class="settings-label">
+              {{ t('settings.reader.kobo.fullSizeCovers') }}
+            </p>
+            <p class="settings-hint">
+              {{ t('settings.reader.kobo.fullSizeCoversHint') }}
+            </p>
+          </div>
+          <ToggleSwitch v-model="fullSizeCovers" />
+        </div>
+
         <div class="px-5 py-5 bg-card space-y-5">
           <div>
-            <p class="settings-label mb-1">{{ t('settings.reader.kobo.progressThresholds') }}</p>
-            <p class="settings-hint">{{ t('settings.reader.kobo.progressThresholdsHint') }}</p>
+            <p class="settings-label mb-1">
+              {{ t('settings.reader.kobo.progressThresholds') }}
+            </p>
+            <p class="settings-hint">
+              {{ t('settings.reader.kobo.progressThresholdsHint') }}
+            </p>
           </div>
 
           <div class="grid sm:grid-cols-2 gap-6">
@@ -1038,7 +1164,9 @@ async function saveSettings() {
                 <span class="text-xs font-mono text-primary font-bold">{{ readingThreshold }}%</span>
               </div>
               <input v-model.number="readingThreshold" type="range" min="0.5" max="10" step="0.5" class="w-full accent-primary cursor-pointer" />
-              <p class="text-[12px] text-muted-foreground leading-tight">{{ t('settings.reader.kobo.markAsReadingHint') }}</p>
+              <p class="text-[12px] text-muted-foreground leading-tight">
+                {{ t('settings.reader.kobo.markAsReadingHint') }}
+              </p>
             </div>
             <div class="space-y-2">
               <div class="flex items-center justify-between">
@@ -1048,7 +1176,9 @@ async function saveSettings() {
                 <span class="text-xs font-mono text-primary font-bold">{{ finishedThreshold }}%</span>
               </div>
               <input v-model.number="finishedThreshold" type="range" min="75" max="100" step="1" class="w-full accent-primary cursor-pointer" />
-              <p class="text-[12px] text-muted-foreground leading-tight">{{ t('settings.reader.kobo.markAsFinishedHint') }}</p>
+              <p class="text-[12px] text-muted-foreground leading-tight">
+                {{ t('settings.reader.kobo.markAsFinishedHint') }}
+              </p>
             </div>
           </div>
 
@@ -1066,11 +1196,13 @@ async function saveSettings() {
 
         <div class="px-5 py-4 bg-muted/30 flex items-center justify-between">
           <div v-if="settingsError" class="text-xs text-destructive font-medium flex items-center gap-1.5"><X :size="14" /> {{ settingsError }}</div>
-          <div v-else class="text-[12px] text-muted-foreground italic">{{ t('settings.reader.kobo.changesMustBeSaved') }}</div>
+          <div v-else class="text-[12px] text-muted-foreground italic">
+            {{ t('settings.reader.kobo.changesMustBeSaved') }}
+          </div>
 
-          <button class="settings-btn-primary" :disabled="savingSettings" @click="saveSettings()">
+          <Button size="sm" :disabled="savingSettings" @click="saveSettings" type="button">
             {{ savingSettings ? t('settings.reader.kobo.saving') : t('settings.reader.kobo.saveSyncSettings') }}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

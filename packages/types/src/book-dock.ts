@@ -1,7 +1,21 @@
 import type { AudiobookChapter } from "./audiobook";
+import type { ComicMetadataFields, MetadataProviderKey, MetadataSeriesMembership } from "./metadata-fetch";
+import type { SeriesIndex } from "./series-index";
 
 export type BookDockFileStatus = "pending" | "extracting" | "fetching" | "ready" | "error";
 export type BookDockAutoFinalizeMetadataMode = "safe_merge" | "fetched_only" | "embedded_only";
+
+export interface BookDockSettings {
+  bookDockPath: string;
+  autoFetchMetadata: boolean;
+  autoFinalizeEnabled: boolean;
+  autoFinalizeThreshold: number;
+  autoFinalizeLibraryId: number | null;
+  autoFinalizeFolderId: number | null;
+  autoFinalizeMetadataMode: BookDockAutoFinalizeMetadataMode;
+}
+
+export type UpdateBookDockSettingsRequest = Omit<BookDockSettings, "bookDockPath">;
 
 export function resolveBookDockSearchTitle(fileName: string, metadataTitle?: string | null): string | undefined {
   const normalizedMetadataTitle = metadataTitle?.trim();
@@ -16,24 +30,51 @@ export function resolveBookDockSearchTitle(fileName: string, metadataTitle?: str
 }
 
 export interface BookDockMetadata {
-  title?: string;
-  subtitle?: string;
+  title?: string | null;
+  subtitle?: string | null;
   authors?: string[];
   narrators?: string[];
-  description?: string;
-  publisher?: string;
-  publishedDate?: string;
-  publishedYear?: number;
-  language?: string;
-  pageCount?: number;
-  isbn10?: string;
-  isbn13?: string;
-  seriesName?: string;
-  seriesIndex?: number;
+  description?: string | null;
+  publisher?: string | null;
+  publishedDate?: string | null;
+  publishedYear?: number | null;
+  language?: string | null;
+  pageCount?: number | null;
+  isbn10?: string | null;
+  isbn13?: string | null;
+  seriesName?: string | null;
+  seriesIndex?: SeriesIndex | null;
+  seriesMemberships?: MetadataSeriesMembership[] | null;
   genres?: string[];
-  coverUrl?: string;
-  durationSeconds?: number;
-  chapters?: AudiobookChapter[];
+  coverUrl?: string | null;
+  durationSeconds?: number | null;
+  abridged?: boolean | null;
+  chapters?: AudiobookChapter[] | null;
+  communityRatings?: Array<{ provider: MetadataProviderKey; rating: number; ratingCount?: number | null }> | null;
+  googleBooksId?: string | null;
+  goodreadsId?: string | null;
+  amazonId?: string | null;
+  hardcoverId?: string | null;
+  hardcoverEditionId?: string | null;
+  openLibraryId?: string | null;
+  itunesId?: string | null;
+  audibleId?: string | null;
+  librofmId?: string | null;
+  koboId?: string | null;
+  comicvineId?: string | null;
+  ranobedbId?: string | null;
+  lubimyczytacId?: string | null;
+  aladinId?: string | null;
+  comicMetadata?: ComicMetadataFields | null;
+}
+
+/** One file of a multi-file dock unit. Read-only in the UI: a unit is finalized whole. */
+export interface BookDockUnitFile {
+  fileName: string;
+  fileSize: number | null;
+  format: string | null;
+  role: "content" | "cover" | "metadata" | "supplement";
+  sortOrder: number | null;
 }
 
 export interface BookDockFile {
@@ -53,6 +94,16 @@ export interface BookDockFile {
   metadataEditedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The files this entry is made of, in playback or format order. Empty for the ordinary loose
+   * single file, which is what `fileName` and `fileSize` already describe.
+   */
+  unitFiles: BookDockUnitFile[];
+  /**
+   * Whether this EPUB carries synced narration. Only a single file's read that asks for it with
+   * `readAlong=true` answers it, since it means opening the file; every other response leaves it out.
+   */
+  readAlong?: boolean;
 }
 
 export interface BookDockFilesPage {
@@ -63,9 +114,16 @@ export interface BookDockFilesPage {
 }
 
 export interface BookDockSummary {
+  /** Everything not yet settled, including files still extracting or fetching. */
   pending: number;
+  /** The in-flight subset of `pending`: extracting plus fetching. */
+  working: number;
   ready: number;
   error: number;
+  /** Ready files with no destination or a match too weak to trust. */
+  needsReview: number;
+  /** Ready files finalize would accept right now: destination resolved. */
+  readyToFile: number;
   total: number;
   paused: boolean;
 }
@@ -74,7 +132,6 @@ export interface BookDockFinalizeOverride {
   fileId: number;
   libraryId?: number;
   folderId?: number;
-  skipDuplicateCheck?: boolean;
   targetFileName?: string;
 }
 
@@ -108,7 +165,16 @@ export interface BookDockFinalizeResult {
 }
 
 export type BookDockFinalizePreviewStatus =
-  "ready" | "duplicate" | "destination_conflict" | "missing_destination" | "invalid_target" | "access_denied" | "invalid_format" | "error";
+  | "ready"
+  | "duplicate"
+  | "destination_conflict"
+  | "missing_destination"
+  | "invalid_target"
+  | "access_denied"
+  | "invalid_format"
+  /** A multi-file unit the target library's organization mode cannot represent. */
+  | "unsupported_layout"
+  | "error";
 
 export interface BookDockFinalizePreviewItem {
   fileId: number;

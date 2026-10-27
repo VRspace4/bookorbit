@@ -6,6 +6,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
   return {
     id: 1,
     status: 'present',
+    coverAspectRatio: '2/3',
     title: 'Test Book',
     authors: ['Author One'],
     seriesName: null,
@@ -20,6 +21,7 @@ function makeBook(overrides: Partial<BookCard> = {}): BookCard {
     readStatus: null,
     addedAt: '2025-01-01T00:00:00.000Z',
     updatedAt: null,
+    coverVersion: 'legacy:2025-01-01T00:00:00.000Z',
     metadataScore: null,
     hasCover: false,
     hasMetadataLocks: false,

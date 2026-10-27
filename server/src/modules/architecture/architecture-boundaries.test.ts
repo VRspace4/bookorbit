@@ -17,11 +17,7 @@ describe('Architecture boundaries', () => {
   const modulesRoot = join(process.cwd(), 'src/modules');
 
   it('prevents controllers from importing repositories directly', async () => {
-    const allowlist = [
-      'src/modules/authors/authors.controller.ts',
-      'src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts',
-      'src/modules/book-dock/book-dock.controller.ts',
-    ].sort();
+    const allowlist = ['src/modules/authors/authors.controller.ts', 'src/modules/book-metadata-fetch/book-metadata-fetch.controller.ts'].sort();
 
     const allFiles = await listFilesRecursive(modulesRoot);
     const controllerFiles = allFiles.filter((file) => file.endsWith('.controller.ts'));
@@ -44,16 +40,14 @@ describe('Architecture boundaries', () => {
       'src/modules/auth/oidc/oidc-group-mapping.service.ts',
       'src/modules/auth/oidc/oidc-state.service.ts',
       'src/modules/authors/author-enrichment-config.service.ts',
+      'src/modules/authors/author-metadata-preferences.service.ts',
       'src/modules/book/book-query-builder.service.ts',
       'src/modules/book-metadata-fetch/book-metadata-fetch-config.service.ts',
-      'src/modules/catalog/catalog.service.ts',
-      'src/modules/cover/cover.service.ts',
       'src/modules/entity-manager/duplicate-compute.service.ts',
       'src/modules/kobo/services/kobo-analytics-resolver.service.ts',
       'src/modules/kobo/services/kobo-book-access.service.ts',
       'src/modules/kobo/services/kobo-book-identity.service.ts',
       'src/modules/kobo/services/kobo-device.service.ts',
-      'src/modules/kobo/services/kobo-download.service.ts',
       'src/modules/kobo/services/kobo-reading-state.service.ts',
       'src/modules/kobo/services/kobo-settings.service.ts',
       'src/modules/kobo/services/kobo-sync-history.service.ts',
@@ -76,6 +70,10 @@ describe('Architecture boundaries', () => {
       'src/modules/upload/upload.service.ts',
       'src/modules/app-settings/oidc-group-mapping-admin.service.ts',
       'src/modules/auth/oidc/oidc-cleanup.service.ts',
+      // Local fork services that still query directly; move them behind repositories.
+      'src/modules/epub-tts/epub-tts-config.service.ts',
+      'src/modules/zlib/zlib-credentials.service.ts',
+      'src/modules/zlib/zlib-queue.service.ts',
     ].sort();
 
     const allFiles = await listFilesRecursive(modulesRoot);

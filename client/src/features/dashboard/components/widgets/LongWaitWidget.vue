@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Clock, Play } from '@lucide/vue'
 import { useRouter } from 'vue-router'
-import { FORMAT_TO_GROUP } from '@bookorbit/types'
+import { isComicFormat } from '@bookorbit/types'
 
 import { useCoverVersions } from '@/features/book/composables/useCoverVersions'
 import BookCoverArtwork from '@/features/book/components/BookCoverArtwork.vue'
@@ -17,7 +17,7 @@ const { coverUrl } = useCoverVersions()
 
 const isComic = computed(() => {
   const format = data.value?.fileFormat
-  return format != null && FORMAT_TO_GROUP[format] === 'cbx'
+  return format != null && isComicFormat(format)
 })
 
 function goToBook() {
@@ -42,14 +42,14 @@ function startReading() {
 <template>
   <div class="flex h-full flex-col p-3">
     <div class="mb-3 flex items-center gap-2 self-start">
-      <Clock :size="16" class="text-primary/90" />
+      <Clock :size="16" class="text-primary" />
       <span class="text-[15px] font-semibold text-foreground">{{ t('dashboard.widgets.longWait.title') }}</span>
     </div>
 
     <!-- Loading -->
     <div v-if="loading" class="flex flex-1 flex-col items-center justify-center gap-3">
-      <div class="h-16 w-12 animate-pulse rounded bg-muted" />
-      <div class="h-3 w-20 animate-pulse rounded bg-muted" />
+      <div class="h-16 w-12 animate-pulse rounded-xs bg-muted" />
+      <div class="h-3 w-20 animate-pulse rounded-xs bg-muted" />
     </div>
 
     <!-- Error -->
@@ -60,7 +60,7 @@ function startReading() {
     <!-- Empty -->
     <div v-else-if="!data" class="flex flex-1 flex-col items-center justify-center gap-2">
       <div class="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-        <Clock :size="16" class="text-muted-foreground/60" />
+        <Clock :size="16" class="text-muted-foreground" />
       </div>
       <p class="text-center text-xs text-muted-foreground">{{ t('dashboard.widgets.longWait.empty') }}</p>
     </div>
@@ -72,7 +72,7 @@ function startReading() {
           tag="button"
           type="button"
           size="mini"
-          class="book-cover-surface--spine-fitted h-24 w-18 shrink-0 cursor-pointer overflow-hidden rounded transition-opacity hover:opacity-80"
+          class="book-cover-surface--spine-fitted h-24 w-18 shrink-0 cursor-pointer overflow-hidden rounded-xs transition-opacity hover:opacity-80"
           :is-comic="isComic"
           @click="goToBook"
         >
@@ -97,7 +97,7 @@ function startReading() {
           <p class="text-[11px] text-muted-foreground">{{ t('dashboard.widgets.longWait.daysWaiting') }}</p>
 
           <div class="mt-2 flex min-w-0 items-center gap-1 text-[10px] text-muted-foreground">
-            <span v-if="data.pageCount" class="shrink-0">{{ t('dashboard.widgets.longWait.pages', { count: data.pageCount }, data.pageCount) }}</span>
+            <span v-if="data.pageCount" class="shrink-0">{{ t('dashboard.widgets.longWait.pages', { count: data.pageCount }) }}</span>
             <span v-if="data.pageCount && data.genre" class="shrink-0">&middot;</span>
             <span v-if="data.genre" class="truncate">{{ data.genre }}</span>
           </div>

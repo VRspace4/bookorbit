@@ -1,31 +1,47 @@
 <script setup lang="ts">
 import { computed, ref, useAttrs } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { breakpointsTailwind, useBreakpoints } from '@vueuse/core'
 import { Aperture, BookMarked, BookmarkPlus, ChevronLeft, ChevronRight, Headphones, ListOrdered, RefreshCw, Shuffle, Sparkles } from '@lucide/vue'
 
-import { isAudioFormat, type BookCard, type CoverAspectRatio, type ScrollerType } from '@bookorbit/types'
+import type { BookCard, BookScrollerType } from '@bookorbit/types'
 import BookCoverCard from '@/features/book/components/BookCoverCard.vue'
 import BookQuickView from '@/features/book/components/BookQuickView.vue'
 import AddToCollectionSheet from '@/features/collection/components/AddToCollectionSheet.vue'
 import DeleteBookDialog from '@/features/book/components/DeleteBookDialog.vue'
 import { useDashboardScroller } from '../composables/useDashboardScroller'
 import { useDeleteBook } from '@/features/book/composables/useDeleteBook'
+import { MIN_SHELF_ROWS, chunkIntoBands, effectiveShelfRows, shelfBookLimit } from '../lib/shelf-rows'
 
 defineOptions({
   inheritAttrs: false,
 })
 
 const props = defineProps<{
-  type: ScrollerType
+  type: BookScrollerType
   title: string
   limit?: number
+  rows?: number
   smartScopeId?: number
 }>()
 
 const attrs = useAttrs()
 const { t } = useI18n()
 
-const { books, loading, error, refresh } = useDashboardScroller(props.type, props.limit, props.smartScopeId)
+const DEFAULT_BOOKS_PER_ROW = 20
+
+const { sm } = useBreakpoints(breakpointsTailwind)
+const shelfRows = computed(() => effectiveShelfRows(props.rows ?? MIN_SHELF_ROWS, !sm.value))
+
+// Snapshotted at setup so resizing across the breakpoint re-flows the books
+// already fetched instead of firing another batch request.
+const { books, loading, error, refresh } = useDashboardScroller(
+  props.type,
+  shelfBookLimit(props.limit ?? DEFAULT_BOOKS_PER_ROW, shelfRows.value),
+  props.smartScopeId,
+)
+
+const bands = computed(() => chunkIntoBands(books.value, shelfRows.value))
 
 const scrollEl = ref<HTMLElement | null>(null)
 
@@ -43,11 +59,14 @@ const typeIcon = computed(() => {
   return Shuffle
 })
 
-const SKELETONS = Array.from({ length: 8 })
-const DEFAULT_COVER_WIDTH_CLASS = 'w-[120px]'
-const SQUARE_AUDIOBOOK_COVER_WIDTH_CLASS = 'w-[150px]'
+const SKELETONS_PER_BAND = 8
+const skeletonBands = computed(() => Array.from({ length: shelfRows.value }, () => Array.from({ length: SKELETONS_PER_BAND })))
+const PORTRAIT_COVER_WIDTH_CLASS = 'w-[120px]'
+const SQUARE_COVER_WIDTH_CLASS = 'w-[150px]'
 
-type BookActionType = 'quick-view' | 'edit-metadata' | 'add-to-collection' | 'delete'
+// 'move-to-library' is part of the shared card contract; this view does not
+// opt in, so it never fires here.
+type BookActionType = 'quick-view' | 'edit-metadata' | 'add-to-collection' | 'move-to-library' | 'delete'
 
 const quickViewBookId = ref<number | null>(null)
 const quickViewOpen = ref(false)
@@ -81,16 +100,12 @@ function handleBookAction(book: BookCard, action: BookActionType) {
   }
 }
 
-function isAudiobookCard(book: BookCard): boolean {
-  return book.files.some((file) => (file.format ? isAudioFormat(file.format) : false))
-}
-
 function coverWidthClass(book: BookCard): string {
-  return isAudiobookCard(book) ? SQUARE_AUDIOBOOK_COVER_WIDTH_CLASS : DEFAULT_COVER_WIDTH_CLASS
+  return book.coverAspectRatio === '1/1' ? SQUARE_COVER_WIDTH_CLASS : PORTRAIT_COVER_WIDTH_CLASS
 }
 
-function coverAspectRatio(book: BookCard): CoverAspectRatio {
-  return isAudiobookCard(book) ? '1/1' : '2/3'
+function coverAnimationDelay(index: number): string {
+  return `${index * 35}ms`
 }
 </script>
 
@@ -127,9 +142,11 @@ function coverAspectRatio(book: BookCard): CoverAspectRatio {
     </div>
 
     <!-- Skeleton -->
-    <div v-if="loading" class="flex gap-3 overflow-hidden px-5 pb-5">
-      <div v-for="(_, n) in SKELETONS" :key="n" class="w-[120px] shrink-0">
-        <div class="w-full animate-pulse rounded-lg bg-muted" style="aspect-ratio: 2/3" />
+    <div v-if="loading" class="flex flex-col gap-5 overflow-hidden px-5 pb-5">
+      <div v-for="(skeletonBand, bandIndex) in skeletonBands" :key="bandIndex" class="flex gap-3">
+        <div v-for="(_, n) in skeletonBand" :key="n" class="w-[120px] shrink-0">
+          <div class="w-full animate-pulse rounded-lg bg-muted" style="aspect-ratio: 2/3" />
+        </div>
       </div>
     </div>
 
@@ -145,7 +162,7 @@ function coverAspectRatio(book: BookCard): CoverAspectRatio {
     <!-- Empty -->
     <div v-else-if="books.length === 0" class="flex flex-col items-center justify-center py-10 gap-3 text-center animate-fade-up">
       <div class="h-12 w-12 rounded-full bg-muted flex items-center justify-center animate-scale-in">
-        <component :is="typeIcon" :size="20" class="text-muted-foreground/60" />
+        <component :is="typeIcon" :size="20" class="text-muted-foreground" />
       </div>
       <p class="text-sm text-muted-foreground">
         <template v-if="type === 'continue-reading'">{{ t('dashboard.scroller.empty.continueReading') }}</template>
@@ -158,17 +175,21 @@ function coverAspectRatio(book: BookCard): CoverAspectRatio {
       </p>
     </div>
 
-    <!-- Books row -->
-    <div v-else ref="scrollEl" class="flex items-end gap-5 overflow-x-auto px-5 pb-5 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-      <div
-        v-for="(book, index) in books"
-        :key="book.id"
-        class="shrink-0"
-        :class="coverWidthClass(book)"
-        style="animation: dashboardFadeUp 0.35s ease both"
-        :style="{ animationDelay: `${index * 35}ms` }"
-      >
-        <BookCoverCard :book="book" :cover-aspect-ratio="coverAspectRatio(book)" @action="handleBookAction(book, $event)" />
+    <!-- Books rows -->
+    <div v-else ref="scrollEl" class="overflow-x-auto px-5 pb-5 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div class="flex w-max flex-col gap-5">
+        <div v-for="(band, bandIndex) in bands" :key="bandIndex" data-testid="shelf-band" class="flex items-end gap-5">
+          <div
+            v-for="(book, index) in band"
+            :key="book.id"
+            class="shrink-0"
+            :class="coverWidthClass(book)"
+            style="animation: dashboardFadeUp 0.35s ease both"
+            :style="{ animationDelay: coverAnimationDelay(index) }"
+          >
+            <BookCoverCard :book="book" :cover-aspect-ratio="book.coverAspectRatio" @action="handleBookAction(book, $event)" />
+          </div>
+        </div>
       </div>
     </div>
   </section>

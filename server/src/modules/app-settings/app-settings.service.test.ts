@@ -20,6 +20,7 @@ function makeRepo(): jest.Mocked<AppSettingsRepository> {
     findExistingLibraryIds: vi.fn().mockResolvedValue([]),
     updateByKey: vi.fn().mockResolvedValue(null),
     upsert: vi.fn().mockResolvedValue(undefined),
+    upsertMany: vi.fn().mockResolvedValue(undefined),
   } as unknown as jest.Mocked<AppSettingsRepository>;
 }
 
@@ -41,7 +42,7 @@ describe('AppSettingsService', () => {
   beforeEach(() => {
     repo = makeRepo();
     config = makeConfig();
-    service = new AppSettingsService(repo, config);
+    service = new AppSettingsService(repo, config, { appDataPath: '/data', bookDockPath: '/data/book-dock', libraryBrowseRoot: '/' });
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     vi.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
@@ -91,6 +92,19 @@ describe('AppSettingsService', () => {
       repo.updateByKey.mockResolvedValue(null);
       await expect(service.update('nonexistent_key', 'value')).rejects.toThrow(NotFoundException);
     });
+
+    it.each([
+      'book_dock_paused',
+      'book_dock_auto_fetch_metadata',
+      'book_dock_auto_finalize_enabled',
+      'book_dock_auto_finalize_threshold',
+      'book_dock_auto_finalize_library_id',
+      'book_dock_auto_finalize_folder_id',
+      'book_dock_auto_finalize_metadata_mode',
+    ])('rejects %s so it cannot bypass the Book Dock validation', async (key) => {
+      await expect(service.update(key, 'anything')).rejects.toThrow(BadRequestException);
+      expect(repo.updateByKey).not.toHaveBeenCalled();
+    });
   });
 
   describe('isBookDockAutoFetchEnabled', () => {
@@ -127,33 +141,6 @@ describe('AppSettingsService', () => {
 
       await service.setBookDockPaused(false);
       expect(repo.upsert).toHaveBeenCalledWith('book_dock_paused', 'false');
-    });
-  });
-
-  describe('author settings', () => {
-    it('getAuthorsAutoEnrichmentWriteMode defaults to missing_only', async () => {
-      repo.findByKey.mockResolvedValue(undefined);
-      expect(await service.getAuthorsAutoEnrichmentWriteMode()).toBe('missing_only');
-    });
-
-    it('getAuthorsAutoEnrichmentWriteMode accepts always_refetch', async () => {
-      repo.findByKey.mockResolvedValue({ key: 'authors_auto_enrichment_write_mode', value: 'always_refetch' } as never);
-      expect(await service.getAuthorsAutoEnrichmentWriteMode()).toBe('always_refetch');
-    });
-
-    it('getAuthorsAutoEnrichmentWriteMode falls back to missing_only for unknown value', async () => {
-      repo.findByKey.mockResolvedValue({ key: 'authors_auto_enrichment_write_mode', value: 'unknown' } as never);
-      expect(await service.getAuthorsAutoEnrichmentWriteMode()).toBe('missing_only');
-    });
-
-    it('isAuthorsProviderAudnexusEnabled defaults to true', async () => {
-      repo.findByKey.mockResolvedValue(undefined);
-      expect(await service.isAuthorsProviderAudnexusEnabled()).toBe(true);
-    });
-
-    it('isAuthorsProviderAudnexusEnabled returns false when stored', async () => {
-      repo.findByKey.mockResolvedValue({ key: 'authors_provider_audnexus_enabled', value: 'false' } as never);
-      expect(await service.isAuthorsProviderAudnexusEnabled()).toBe(false);
     });
   });
 
@@ -350,7 +337,11 @@ describe('AppSettingsService', () => {
     });
 
     it('passes allowLocal: false when nodeEnv is production', async () => {
-      const prodService = new AppSettingsService(repo, makeConfig('production'));
+      const prodService = new AppSettingsService(repo, makeConfig('production'), {
+        appDataPath: '/data',
+        bookDockPath: '/data/book-dock',
+        libraryBrowseRoot: '/',
+      });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await prodService.testOidcConnection('https://kc.example.com/realms/main');
       expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: false, allowPrivate: false });
@@ -358,7 +349,11 @@ describe('AppSettingsService', () => {
     });
 
     it('passes allowLocal: true when production override is enabled', async () => {
-      const prodService = new AppSettingsService(repo, makeConfig('production', true));
+      const prodService = new AppSettingsService(repo, makeConfig('production', true), {
+        appDataPath: '/data',
+        bookDockPath: '/data/book-dock',
+        libraryBrowseRoot: '/',
+      });
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(discoveryDoc) }));
       await prodService.testOidcConnection('https://kc.example.com/realms/main');
       expect(vi.mocked(ensureSafeUrl)).toHaveBeenCalledWith('https://kc.example.com/realms/main', { allowLocal: true, allowPrivate: true });
@@ -419,6 +414,73 @@ describe('AppSettingsService', () => {
 
       const result = await service.getAutoFinalizeSettings();
       expect(result.metadataMode).toBe('embedded_only');
+    });
+  });
+
+  describe('Book Dock settings', () => {
+    it('returns the protected configuration with safe defaults', async () => {
+      repo.findMany.mockResolvedValue([
+        { key: 'book_dock_auto_fetch_metadata', value: 'invalid' },
+        { key: 'book_dock_auto_finalize_enabled', value: 'invalid' },
+        { key: 'book_dock_auto_finalize_threshold', value: '101' },
+        { key: 'book_dock_auto_finalize_library_id', value: '-1' },
+        { key: 'book_dock_auto_finalize_folder_id', value: 'abc' },
+        { key: 'book_dock_auto_finalize_metadata_mode', value: 'invalid' },
+      ] as never);
+
+      await expect(service.getBookDockSettings()).resolves.toEqual({
+        bookDockPath: '/data/book-dock',
+        autoFetchMetadata: true,
+        autoFinalizeEnabled: false,
+        autoFinalizeThreshold: 85,
+        autoFinalizeLibraryId: null,
+        autoFinalizeFolderId: null,
+        autoFinalizeMetadataMode: 'safe_merge',
+      });
+    });
+
+    it('parses stored configuration values', async () => {
+      repo.findMany.mockResolvedValue([
+        { key: 'book_dock_auto_fetch_metadata', value: 'false' },
+        { key: 'book_dock_auto_finalize_enabled', value: 'true' },
+        { key: 'book_dock_auto_finalize_threshold', value: '95' },
+        { key: 'book_dock_auto_finalize_library_id', value: '7' },
+        { key: 'book_dock_auto_finalize_folder_id', value: '11' },
+        { key: 'book_dock_auto_finalize_metadata_mode', value: 'embedded_only' },
+      ] as never);
+
+      await expect(service.getBookDockSettings()).resolves.toMatchObject({
+        autoFetchMetadata: false,
+        autoFinalizeEnabled: true,
+        autoFinalizeThreshold: 95,
+        autoFinalizeLibraryId: 7,
+        autoFinalizeFolderId: 11,
+        autoFinalizeMetadataMode: 'embedded_only',
+      });
+    });
+
+    it('updates the complete configuration together and returns the refreshed settings', async () => {
+      repo.findMany.mockResolvedValue([]);
+      const request = {
+        autoFetchMetadata: false,
+        autoFinalizeEnabled: true,
+        autoFinalizeThreshold: 90,
+        autoFinalizeLibraryId: 4,
+        autoFinalizeFolderId: null,
+        autoFinalizeMetadataMode: 'fetched_only' as const,
+      };
+
+      await service.updateBookDockSettings(request);
+
+      expect(repo.upsertMany).toHaveBeenCalledWith([
+        { key: 'book_dock_auto_fetch_metadata', value: 'false' },
+        { key: 'book_dock_auto_finalize_enabled', value: 'true' },
+        { key: 'book_dock_auto_finalize_threshold', value: '90' },
+        { key: 'book_dock_auto_finalize_library_id', value: '4' },
+        { key: 'book_dock_auto_finalize_folder_id', value: '' },
+        { key: 'book_dock_auto_finalize_metadata_mode', value: 'fetched_only' },
+      ]);
+      expect(repo.findMany).toHaveBeenCalledAfter(repo.upsertMany);
     });
   });
 
@@ -488,6 +550,21 @@ describe('AppSettingsService', () => {
       expect(await service.isCrossPlatformPathSanitizationEnabled()).toBe(false);
     });
 
+    it('caches cross-platform path sanitization reads and invalidates after updates', async () => {
+      repo.findByKey
+        .mockResolvedValueOnce({ key: 'cross_platform_path_sanitization_enabled', value: 'true' } as never)
+        .mockResolvedValueOnce({ key: 'cross_platform_path_sanitization_enabled', value: 'false' } as never);
+
+      await expect(service.isCrossPlatformPathSanitizationEnabled()).resolves.toBe(true);
+      await expect(service.isCrossPlatformPathSanitizationEnabled()).resolves.toBe(true);
+      expect(repo.findByKey).toHaveBeenCalledTimes(1);
+
+      await service.setCrossPlatformPathSanitizationEnabled(false);
+
+      await expect(service.isCrossPlatformPathSanitizationEnabled()).resolves.toBe(false);
+      expect(repo.findByKey).toHaveBeenCalledTimes(2);
+    });
+
     it('upserts false when setCrossPlatformPathSanitizationEnabled is called with false', async () => {
       await service.setCrossPlatformPathSanitizationEnabled(false);
       expect(repo.upsert).toHaveBeenCalledWith('cross_platform_path_sanitization_enabled', 'false');
@@ -543,9 +620,9 @@ describe('AppSettingsService', () => {
   });
 
   describe('getMaxUploadSizeMb', () => {
-    it('returns 500 by default when setting is absent', async () => {
+    it('returns 4096 by default when setting is absent', async () => {
       repo.findByKey.mockResolvedValue(undefined);
-      expect(await service.getMaxUploadSizeMb()).toBe(500);
+      expect(await service.getMaxUploadSizeMb()).toBe(4096);
     });
 
     it('returns parsed integer value when valid', async () => {
@@ -553,9 +630,14 @@ describe('AppSettingsService', () => {
       expect(await service.getMaxUploadSizeMb()).toBe(1024);
     });
 
-    it('returns 500 when value is invalid or <= 0', async () => {
-      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '-50' } as never);
+    it('preserves an existing 500 MB limit', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '500' } as never);
       expect(await service.getMaxUploadSizeMb()).toBe(500);
+    });
+
+    it('returns 4096 when value is invalid or <= 0', async () => {
+      repo.findByKey.mockResolvedValue({ key: 'max_upload_size_mb', value: '-50' } as never);
+      expect(await service.getMaxUploadSizeMb()).toBe(4096);
     });
   });
 
@@ -572,6 +654,21 @@ describe('AppSettingsService', () => {
       await expect(service.update('max_upload_size_mb', 'invalid')).rejects.toThrow(BadRequestException);
       await expect(service.update('max_upload_size_mb', '-10')).rejects.toThrow(BadRequestException);
       await expect(service.update('max_upload_size_mb', '0')).rejects.toThrow(BadRequestException);
+      expect(repo.updateByKey).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('update audit_retention_days validation', () => {
+    it('stores a whole number of days', async () => {
+      repo.updateByKey.mockResolvedValue({ key: 'audit_retention_days', value: '365' } as never);
+      await service.update('audit_retention_days', ' 365 ');
+      expect(repo.updateByKey).toHaveBeenCalledWith('audit_retention_days', '365');
+    });
+
+    it('rejects anything that is not between 1 and 3650 days', async () => {
+      for (const value of ['0', '-1', '3651', '12.5', '90 days', 'forever']) {
+        await expect(service.update('audit_retention_days', value)).rejects.toThrow(BadRequestException);
+      }
       expect(repo.updateByKey).not.toHaveBeenCalled();
     });
   });

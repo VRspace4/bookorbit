@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Res, UseGuards } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -6,6 +6,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import type { RequestUser } from '../../common/types/request-user';
 import { KoreaderAuthGuard } from './koreader-auth.guard';
 import { KoreaderAnnotationExchangeService } from './koreader-annotation-exchange.service';
+import { KoreaderBookmarkExchangeService } from './koreader-bookmark-exchange.service';
 import { KoreaderPackageService } from './koreader-package.service';
 import { KoreaderPluginAnnotationService } from './koreader-plugin-annotation.service';
 import { KoreaderPluginService } from './koreader-plugin.service';
@@ -13,8 +14,11 @@ import { KoreaderStatsService } from './koreader-stats.service';
 import {
   AnnotationExchangeAckDto,
   AnnotationExchangeDto,
+  AnnotationPendingDto,
   AnnotationsUploadDto,
   BookStatesUploadDto,
+  BookmarkExchangeAckDto,
+  BookmarkExchangeDto,
   BulkProgressDto,
   MatchCheckDto,
   PageStatsUploadDto,
@@ -30,6 +34,7 @@ export class KoreaderPluginController {
     private readonly statsService: KoreaderStatsService,
     private readonly annotationService: KoreaderPluginAnnotationService,
     private readonly annotationExchangeService: KoreaderAnnotationExchangeService,
+    private readonly bookmarkExchangeService: KoreaderBookmarkExchangeService,
     private readonly packageService: KoreaderPackageService,
   ) {}
 
@@ -54,9 +59,24 @@ export class KoreaderPluginController {
     return this.annotationExchangeService.exchange(user, dto);
   }
 
+  @Post('annotations/pending')
+  pendingAnnotationBooks(@CurrentUser() user: RequestUser, @Body() dto: AnnotationPendingDto) {
+    return this.annotationExchangeService.pendingBooks(user, dto);
+  }
+
   @Post('annotations/exchange-ack')
   exchangeAnnotationsAck(@CurrentUser() user: RequestUser, @Body() dto: AnnotationExchangeAckDto) {
     return this.annotationExchangeService.exchangeAck(user, dto);
+  }
+
+  @Post('bookmarks/exchange')
+  exchangeBookmarks(@CurrentUser() user: RequestUser, @Body() dto: BookmarkExchangeDto) {
+    return this.bookmarkExchangeService.exchange(user, dto);
+  }
+
+  @Post('bookmarks/exchange-ack')
+  exchangeBookmarksAck(@CurrentUser() user: RequestUser, @Body() dto: BookmarkExchangeAckDto) {
+    return this.bookmarkExchangeService.exchangeAck(user, dto);
   }
 
   @Post('book-states')
@@ -75,8 +95,12 @@ export class KoreaderPluginController {
   }
 
   @Get('version')
-  getVersion() {
-    return this.packageService.getVersionInfo();
+  getVersion(
+    @CurrentUser() user: RequestUser,
+    @Headers('x-bookorbit-device-id') deviceId?: string,
+    @Headers('x-bookorbit-plugin-version') pluginVersion?: string,
+  ) {
+    return this.packageService.getVersionInfoForSelfUpdate(user.id, { deviceId, pluginVersion });
   }
 
   @Get('package')

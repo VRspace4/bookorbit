@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { bigserial, index, integer, jsonb, pgTable, text, timestamp, varchar } from 'drizzle-orm/pg-core';
 
 import { users } from './auth';
@@ -11,6 +12,8 @@ export const auditLog = pgTable(
     action: varchar('action', { length: 100 }).notNull(),
     resource: varchar('resource', { length: 100 }),
     resourceId: integer('resource_id'),
+    /** The target's name when the event was written, so a deleted target can still be named. */
+    resourceLabel: varchar('resource_label', { length: 255 }),
     description: text('description').notNull(),
     ip: varchar('ip', { length: 45 }),
     meta: jsonb('meta'),
@@ -18,8 +21,16 @@ export const auditLog = pgTable(
   },
   (t) => [
     index('idx_audit_user_id').on(t.userId),
+    index('idx_audit_actor_username').on(t.actorUsername),
+    index('idx_audit_actor_username_trgm').using('gin', t.actorUsername.op('gin_trgm_ops')),
     index('idx_audit_resource').on(t.resource, t.resourceId),
+    index('idx_audit_resource_id').on(t.resourceId),
+    index('idx_audit_resource_trgm').using('gin', t.resource.op('gin_trgm_ops')),
     index('idx_audit_action').on(t.action),
+    index('idx_audit_action_trgm').using('gin', t.action.op('gin_trgm_ops')),
+    index('idx_audit_description_trgm').using('gin', t.description.op('gin_trgm_ops')),
+    index('idx_audit_resource_label_trgm').using('gin', t.resourceLabel.op('gin_trgm_ops')),
+    index('idx_audit_meta_text_trgm').using('gin', sql`(${t.meta}::text) gin_trgm_ops`),
     index('idx_audit_ip').on(t.ip),
     index('idx_audit_created_at').on(t.createdAt),
     index('idx_audit_reading_insights_access').on(t.resource, t.resourceId, t.action, t.createdAt),

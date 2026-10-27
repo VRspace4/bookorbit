@@ -172,11 +172,7 @@ export function findWordIndexAtPoint(root: HTMLElement, entries: WordEntry[], cl
   return null
 }
 
-function isRectVisibleInReadingViewport(
-  rect: DOMRect,
-  root: HTMLElement,
-  foliate?: FoliateScrollRenderer | null,
-): boolean {
+function isRectVisibleInReadingViewport(rect: DOMRect, root: HTMLElement, foliate?: FoliateScrollRenderer | null): boolean {
   if (rect.width <= 0 || rect.height <= 0) return false
 
   const hasFoliateViewport = Boolean(foliate && typeof foliate.size === 'number' && foliate.size > 0)
@@ -190,12 +186,7 @@ function isRectVisibleInReadingViewport(
 }
 
 /** True when the given word index intersects the currently visible page/viewport. */
-export function isWordIndexVisible(
-  root: HTMLElement,
-  entries: WordEntry[],
-  wordIndex: number,
-  foliate?: FoliateScrollRenderer | null,
-): boolean {
+export function isWordIndexVisible(root: HTMLElement, entries: WordEntry[], wordIndex: number, foliate?: FoliateScrollRenderer | null): boolean {
   const entry = entries[wordIndex]
   if (!entry) return false
   const range = makeRangeForWord(root, entry)
@@ -209,11 +200,7 @@ export function isWordIndexVisible(
  * When a Foliate renderer is provided, uses paginated/scrolled metrics so
  * mid-chapter pages start from the visible page rather than the section top.
  */
-export function findFirstVisibleWordIndex(
-  root: HTMLElement,
-  entries: WordEntry[],
-  foliate?: FoliateScrollRenderer | null,
-): number {
+export function findFirstVisibleWordIndex(root: HTMLElement, entries: WordEntry[], foliate?: FoliateScrollRenderer | null): number {
   for (let i = 0; i < entries.length; i++) {
     const range = makeRangeForWord(root, entries[i]!)
     const rect = range?.getBoundingClientRect()
@@ -229,10 +216,7 @@ export function findFirstVisibleWordIndex(
  * on the snapped page). Required after content-height changes: page-snap alone
  * leaves the anchor word mid-page once columns reflow.
  */
-export async function pinWordRangeAsViewportLead(
-  range: Range,
-  foliate?: FoliateScrollRenderer | null,
-): Promise<boolean> {
+export async function pinWordRangeAsViewportLead(range: Range, foliate?: FoliateScrollRenderer | null): Promise<boolean> {
   if (!foliate || typeof foliate.scrollToAnchor !== 'function') return false
 
   try {
@@ -483,10 +467,6 @@ function computeScrollDelta(activeEl: HTMLElement, foliate: FoliateScrollRendere
   return center - viewportSize * targetRatio
 }
 
-function computeCenterDelta(activeEl: HTMLElement, foliate: FoliateScrollRenderer): number {
-  return computeScrollDelta(activeEl, foliate, 0.5)
-}
-
 function isPaginatedFoliate(foliate: FoliateScrollRenderer): boolean {
   return foliate.scrolled !== true
 }
@@ -524,12 +504,7 @@ function cancelFoliateScrollAnimation(foliate: FoliateScrollRenderer) {
   }
 }
 
-async function applyFoliateScroll(
-  activeEl: HTMLElement,
-  foliate: FoliateScrollRenderer,
-  behavior: ScrollBehavior,
-  targetRatio: number,
-) {
+async function applyFoliateScroll(activeEl: HTMLElement, foliate: FoliateScrollRenderer, behavior: ScrollBehavior, targetRatio: number) {
   // Paginated: only snap to the page that contains the word. Never fractional scrollBy —
   // that freezes the reader between two pages.
   if (isPaginatedFoliate(foliate)) {
@@ -574,8 +549,7 @@ export function scrollActiveWordIntoView(
     if (typeof foliate.scrollBy !== 'function') return
 
     // Scrolled layout: page turns / large jumps instant; small keep-in-view adjusts can be smooth.
-    const effectiveBehavior: ScrollBehavior =
-      mode === 'keep-in-view' && needsAnchorScroll(activeEl, foliate, targetRatio) ? 'instant' : behavior
+    const effectiveBehavior: ScrollBehavior = mode === 'keep-in-view' && needsAnchorScroll(activeEl, foliate, targetRatio) ? 'instant' : behavior
     void applyFoliateScroll(activeEl, foliate, effectiveBehavior, targetRatio)
     return
   }

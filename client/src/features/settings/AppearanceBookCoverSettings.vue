@@ -1,19 +1,123 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
 import { Image } from '@lucide/vue'
+import { COVER_SEARCH_DEFAULT_PROVIDERS, type CoverSearchDefaultProvider } from '@bookorbit/types'
 import ToggleSwitch from '@/components/ui/ToggleSwitch.vue'
 import {
   useDisplaySettings,
   type BookCoverDisplayMode,
+  type BookDetailCoverTint,
   type BookShadowStrength,
   type BookSpineOverlay,
   type CardOverlayKey,
+  type PlaceholderCoverStyle,
 } from '@/composables/useDisplaySettings'
+import BookCoverPlaceholder from '@/features/book/components/BookCoverPlaceholder.vue'
+import { useCoverSearchPreferences } from '@/features/book/composables/useCoverSearchPreferences'
 
 const { t } = useI18n()
 
-const { cardOverlays, bookSpineOverlay, showSpineOnComics, bookShadowStrength, bookCoverDisplayMode } = useDisplaySettings()
+const { cardOverlays, bookSpineOverlay, showSpineOnComics, bookShadowStrength, bookCoverDisplayMode, bookDetailCoverTint, placeholderCoverStyle } =
+  useDisplaySettings()
+const {
+  defaultProvider: defaultCoverSearchProvider,
+  isLoading: isCoverSearchPreferenceLoading,
+  isSaving: isCoverSearchPreferenceSaving,
+  load: loadCoverSearchPreferences,
+  update: updateCoverSearchPreferences,
+} = useCoverSearchPreferences()
+
+// Bibliographic sample data, so it stays untranslated like any other book in the library. The set
+// spans short and long titles, a series, and several genres, since each style colours by genre.
+interface PlaceholderSample {
+  title: string
+  subtitle: string | null
+  authors: string[]
+  seriesName: string | null
+  seriesIndex: string | null
+  genres: string[]
+  seed: string
+}
+
+const PLACEHOLDER_SAMPLES: PlaceholderSample[] = [
+  {
+    title: 'Emma',
+    subtitle: null,
+    authors: ['Jane Austen'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Romance', 'Classics'],
+    seed: 'sample-emma',
+  },
+  {
+    title: 'The Hound of the Baskervilles',
+    subtitle: null,
+    authors: ['Arthur Conan Doyle'],
+    seriesName: 'Sherlock Holmes',
+    seriesIndex: '3',
+    genres: ['Mystery'],
+    seed: 'sample-hound',
+  },
+  {
+    title: 'Frankenstein',
+    subtitle: 'The Modern Prometheus',
+    authors: ['Mary Shelley'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Horror', 'Classics'],
+    seed: 'sample-frankenstein',
+  },
+  {
+    title: 'Twenty Thousand Leagues Under the Seas',
+    subtitle: null,
+    authors: ['Jules Verne'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Science Fiction'],
+    seed: 'sample-leagues',
+  },
+  {
+    title: "Alice's Adventures in Wonderland",
+    subtitle: null,
+    authors: ['Lewis Carroll'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Fantasy'],
+    seed: 'sample-alice',
+  },
+  {
+    title: 'Meditations',
+    subtitle: null,
+    authors: ['Marcus Aurelius'],
+    seriesName: null,
+    seriesIndex: null,
+    genres: ['Philosophy'],
+    seed: 'sample-meditations',
+  },
+]
+
+const hoveredPlaceholderStyle = ref<PlaceholderCoverStyle | null>(null)
+const shownPlaceholderStyle = computed(() => hoveredPlaceholderStyle.value ?? placeholderCoverStyle.value)
+
+const placeholderStyleOptions = computed<{ id: PlaceholderCoverStyle; label: string }[]>(() => [
+  { id: 'bauhaus', label: t('settings.appearance.bookCovers.placeholderStyle.options.bauhaus') },
+  { id: 'constructivist', label: t('settings.appearance.bookCovers.placeholderStyle.options.constructivist') },
+  { id: 'memphis', label: t('settings.appearance.bookCovers.placeholderStyle.options.memphis') },
+  { id: 'clothbound', label: t('settings.appearance.bookCovers.placeholderStyle.options.clothbound') },
+  { id: 'poster', label: t('settings.appearance.bookCovers.placeholderStyle.options.poster') },
+  { id: 'aurora', label: t('settings.appearance.bookCovers.placeholderStyle.options.aurora') },
+  { id: 'vista', label: t('settings.appearance.bookCovers.placeholderStyle.options.vista') },
+  { id: 'marbled', label: t('settings.appearance.bookCovers.placeholderStyle.options.marbled') },
+  { id: 'paperback', label: t('settings.appearance.bookCovers.placeholderStyle.options.paperback') },
+])
+
+const coverSearchProviderOptions = computed<{ id: CoverSearchDefaultProvider; label: string }[]>(() => [
+  { id: 'duckduckgo', label: 'DuckDuckGo' },
+  { id: 'itunes', label: 'iTunes' },
+  { id: 'all', label: t('book.detail.coverSearch.allSources') },
+])
 
 const overlayOptions = computed<{ key: CardOverlayKey; label: string; hint: string }[]>(() => [
   {
@@ -21,8 +125,16 @@ const overlayOptions = computed<{ key: CardOverlayKey; label: string; hint: stri
     label: t('settings.appearance.bookCovers.overlays.progressBar.label'),
     hint: t('settings.appearance.bookCovers.overlays.progressBar.hint'),
   },
-  { key: 'format', label: t('settings.appearance.bookCovers.overlays.format.label'), hint: t('settings.appearance.bookCovers.overlays.format.hint') },
-  { key: 'rating', label: t('settings.appearance.bookCovers.overlays.rating.label'), hint: t('settings.appearance.bookCovers.overlays.rating.hint') },
+  {
+    key: 'format',
+    label: t('settings.appearance.bookCovers.overlays.format.label'),
+    hint: t('settings.appearance.bookCovers.overlays.format.hint'),
+  },
+  {
+    key: 'rating',
+    label: t('settings.appearance.bookCovers.overlays.rating.label'),
+    hint: t('settings.appearance.bookCovers.overlays.rating.hint'),
+  },
   {
     key: 'read-status',
     label: t('settings.appearance.bookCovers.overlays.readStatus.label'),
@@ -41,14 +153,34 @@ const overlayOptions = computed<{ key: CardOverlayKey; label: string; hint: stri
 ])
 
 const bookSpineOptions = computed<{ id: BookSpineOverlay; label: string; hint: string }[]>(() => [
-  { id: 'off', label: t('settings.appearance.bookCovers.spine.off.label'), hint: t('settings.appearance.bookCovers.spine.off.hint') },
-  { id: 'subtle', label: t('settings.appearance.bookCovers.spine.subtle.label'), hint: t('settings.appearance.bookCovers.spine.subtle.hint') },
-  { id: 'strong', label: t('settings.appearance.bookCovers.spine.strong.label'), hint: t('settings.appearance.bookCovers.spine.strong.hint') },
+  {
+    id: 'off',
+    label: t('settings.appearance.bookCovers.spine.off.label'),
+    hint: t('settings.appearance.bookCovers.spine.off.hint'),
+  },
+  {
+    id: 'subtle',
+    label: t('settings.appearance.bookCovers.spine.subtle.label'),
+    hint: t('settings.appearance.bookCovers.spine.subtle.hint'),
+  },
+  {
+    id: 'strong',
+    label: t('settings.appearance.bookCovers.spine.strong.label'),
+    hint: t('settings.appearance.bookCovers.spine.strong.hint'),
+  },
 ])
 
 const bookShadowOptions = computed<{ id: BookShadowStrength; label: string; hint: string }[]>(() => [
-  { id: 'default', label: t('settings.appearance.bookCovers.shadow.default.label'), hint: t('settings.appearance.bookCovers.shadow.default.hint') },
-  { id: 'strong', label: t('settings.appearance.bookCovers.shadow.strong.label'), hint: t('settings.appearance.bookCovers.shadow.strong.hint') },
+  {
+    id: 'default',
+    label: t('settings.appearance.bookCovers.shadow.default.label'),
+    hint: t('settings.appearance.bookCovers.shadow.default.hint'),
+  },
+  {
+    id: 'strong',
+    label: t('settings.appearance.bookCovers.shadow.strong.label'),
+    hint: t('settings.appearance.bookCovers.shadow.strong.hint'),
+  },
 ])
 
 const bookCoverDisplayOptions = computed<{ id: BookCoverDisplayMode; label: string; hint: string }[]>(() => [
@@ -69,6 +201,24 @@ const bookCoverDisplayOptions = computed<{ id: BookCoverDisplayMode; label: stri
   },
 ])
 
+const bookDetailCoverTintOptions = computed<{ id: BookDetailCoverTint; label: string; hint: string }[]>(() => [
+  {
+    id: 'off',
+    label: t('settings.appearance.bookCovers.detailCoverTint.off.label'),
+    hint: t('settings.appearance.bookCovers.detailCoverTint.off.hint'),
+  },
+  {
+    id: 'single',
+    label: t('settings.appearance.bookCovers.detailCoverTint.single.label'),
+    hint: t('settings.appearance.bookCovers.detailCoverTint.single.hint'),
+  },
+  {
+    id: 'duotone',
+    label: t('settings.appearance.bookCovers.detailCoverTint.duotone.label'),
+    hint: t('settings.appearance.bookCovers.detailCoverTint.duotone.hint'),
+  },
+])
+
 function toggleOverlay(key: CardOverlayKey) {
   const idx = cardOverlays.value.indexOf(key)
   if (idx === -1) cardOverlays.value = [...cardOverlays.value, key]
@@ -83,19 +233,120 @@ function setBookShadowStrength(mode: BookShadowStrength) {
   bookShadowStrength.value = mode
 }
 
+function setPlaceholderCoverStyle(style: PlaceholderCoverStyle) {
+  placeholderCoverStyle.value = style
+}
+
+function previewPlaceholderStyle(style: PlaceholderCoverStyle) {
+  hoveredPlaceholderStyle.value = style
+}
+
+function endPlaceholderPreview() {
+  hoveredPlaceholderStyle.value = null
+}
+
 function setBookCoverDisplayMode(mode: BookCoverDisplayMode) {
   bookCoverDisplayMode.value = mode
 }
+
+function setBookDetailCoverTint(mode: BookDetailCoverTint) {
+  bookDetailCoverTint.value = mode
+}
+
+async function handleDefaultCoverSearchProviderChange(event: Event) {
+  const value = (event.currentTarget as HTMLSelectElement).value
+  if (!COVER_SEARCH_DEFAULT_PROVIDERS.includes(value as CoverSearchDefaultProvider)) return
+
+  const saved = await updateCoverSearchPreferences(value as CoverSearchDefaultProvider)
+  if (!saved) toast.error(t('settings.appearance.bookCovers.coverSearch.saveError'))
+}
+
+onMounted(async () => {
+  const loaded = await loadCoverSearchPreferences()
+  if (!loaded) toast.error(t('settings.appearance.bookCovers.coverSearch.loadError'))
+})
 </script>
 
 <template>
   <div>
-    <p class="settings-group-label">{{ t('settings.appearance.bookCovers.title') }}</p>
-    <div class="border border-border rounded-lg overflow-hidden divide-y divide-border mb-4 shadow-xs">
+    <p class="settings-group-label">
+      {{ t('settings.appearance.bookCovers.title') }}
+    </p>
+    <div class="settings-card mb-4">
+      <div class="settings-row">
+        <div>
+          <label for="default-cover-search-provider" class="settings-label">
+            {{ t('settings.appearance.bookCovers.coverSearch.label') }}
+          </label>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.coverSearch.hint') }}
+          </p>
+        </div>
+        <select
+          id="default-cover-search-provider"
+          :value="defaultCoverSearchProvider"
+          class="h-9 min-w-40 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          :disabled="isCoverSearchPreferenceLoading || isCoverSearchPreferenceSaving"
+          @change="handleDefaultCoverSearchProviderChange"
+        >
+          <option v-for="provider in coverSearchProviderOptions" :key="provider.id" :value="provider.id">
+            {{ provider.label }}
+          </option>
+        </select>
+      </div>
       <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
         <div>
-          <p class="settings-label">{{ t('settings.appearance.bookCovers.displayMode.title') }}</p>
-          <p class="settings-hint">{{ t('settings.appearance.bookCovers.displayMode.hint') }}</p>
+          <p id="placeholder-style-label" class="settings-label">
+            {{ t('settings.appearance.bookCovers.placeholderStyle.title') }}
+          </p>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.placeholderStyle.hint') }}
+          </p>
+        </div>
+        <div
+          class="mt-3 inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg border border-border bg-muted/50 p-1"
+          role="group"
+          aria-labelledby="placeholder-style-label"
+          @mouseleave="endPlaceholderPreview"
+          @focusout="endPlaceholderPreview"
+        >
+          <button
+            v-for="opt in placeholderStyleOptions"
+            :key="opt.id"
+            type="button"
+            class="rounded-md px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            :class="placeholderCoverStyle === opt.id ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+            :aria-pressed="placeholderCoverStyle === opt.id"
+            @click="setPlaceholderCoverStyle(opt.id)"
+            @mouseenter="previewPlaceholderStyle(opt.id)"
+            @focus="previewPlaceholderStyle(opt.id)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+        <div class="mt-4 grid grid-cols-3 gap-3 sm:grid-cols-6" data-testid="placeholder-style-preview">
+          <span v-for="sample in PLACEHOLDER_SAMPLES" :key="sample.seed" class="relative block aspect-[2/3] overflow-hidden rounded-sm shadow-sm">
+            <BookCoverPlaceholder
+              :title="sample.title"
+              :subtitle="sample.subtitle"
+              :authors="sample.authors"
+              :series-name="sample.seriesName"
+              :series-index="sample.seriesIndex"
+              :genres="sample.genres"
+              :seed="sample.seed"
+              :variant="shownPlaceholderStyle"
+            />
+          </span>
+        </div>
+      </div>
+      <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div>
+          <p class="settings-label">
+            {{ t('settings.appearance.bookCovers.displayMode.title') }}
+          </p>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.displayMode.hint') }}
+          </p>
         </div>
         <div class="mt-3 grid gap-2 md:grid-cols-3">
           <button
@@ -119,8 +370,12 @@ function setBookCoverDisplayMode(mode: BookCoverDisplayMode) {
       </div>
       <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
         <div>
-          <p class="settings-label">{{ t('settings.appearance.bookCovers.spine.title') }}</p>
-          <p class="settings-hint">{{ t('settings.appearance.bookCovers.spine.hint') }}</p>
+          <p class="settings-label">
+            {{ t('settings.appearance.bookCovers.spine.title') }}
+          </p>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.spine.hint') }}
+          </p>
         </div>
         <div class="mt-3 grid gap-2 sm:grid-cols-3">
           <button
@@ -135,13 +390,17 @@ function setBookCoverDisplayMode(mode: BookCoverDisplayMode) {
             @click="setBookSpineOverlay(opt.id)"
           >
             <p class="text-xs font-semibold">{{ opt.label }}</p>
-            <p class="mt-0.5 text-[11px] leading-snug opacity-80">{{ opt.hint }}</p>
+            <p class="mt-0.5 text-[11px] leading-snug opacity-80">
+              {{ opt.hint }}
+            </p>
           </button>
         </div>
       </div>
       <div class="flex items-center justify-between gap-3 px-4 py-3.5 md:px-5 md:py-4 bg-card">
         <div class="min-w-0">
-          <p class="settings-label">{{ t('settings.appearance.bookCovers.showSpineOnComics.label') }}</p>
+          <p class="settings-label">
+            {{ t('settings.appearance.bookCovers.showSpineOnComics.label') }}
+          </p>
           <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
             {{ t('settings.appearance.bookCovers.showSpineOnComics.hint') }}
           </p>
@@ -150,8 +409,40 @@ function setBookCoverDisplayMode(mode: BookCoverDisplayMode) {
       </div>
       <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
         <div>
-          <p class="settings-label">{{ t('settings.appearance.bookCovers.shadow.title') }}</p>
-          <p class="settings-hint">{{ t('settings.appearance.bookCovers.shadow.hint') }}</p>
+          <p class="settings-label">
+            {{ t('settings.appearance.bookCovers.detailCoverTint.title') }}
+          </p>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.detailCoverTint.hint') }}
+          </p>
+        </div>
+        <div class="mt-3 grid gap-2 sm:grid-cols-3">
+          <button
+            v-for="opt in bookDetailCoverTintOptions"
+            :key="opt.id"
+            class="rounded-md border px-3 py-2 text-left transition-colors"
+            :class="
+              bookDetailCoverTint === opt.id
+                ? 'border-primary bg-primary/8 text-primary'
+                : 'border-border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground'
+            "
+            @click="setBookDetailCoverTint(opt.id)"
+          >
+            <p class="text-xs font-semibold">{{ opt.label }}</p>
+            <p class="mt-0.5 text-[11px] leading-snug opacity-80">
+              {{ opt.hint }}
+            </p>
+          </button>
+        </div>
+      </div>
+      <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
+        <div>
+          <p class="settings-label">
+            {{ t('settings.appearance.bookCovers.shadow.title') }}
+          </p>
+          <p class="settings-hint">
+            {{ t('settings.appearance.bookCovers.shadow.hint') }}
+          </p>
         </div>
         <div class="mt-3 flex items-center gap-1 p-1 rounded-lg border border-border bg-muted/50 self-start">
           <button
@@ -167,15 +458,21 @@ function setBookCoverDisplayMode(mode: BookCoverDisplayMode) {
       </div>
     </div>
 
-    <div class="border border-border rounded-lg overflow-hidden divide-y divide-border shadow-xs">
+    <div class="settings-card">
       <div class="px-4 py-3.5 md:px-5 md:py-4 bg-card">
-        <p class="settings-label">{{ t('settings.appearance.bookCovers.overlays.title') }}</p>
-        <p class="settings-hint">{{ t('settings.appearance.bookCovers.overlays.hint') }}</p>
+        <p class="settings-label">
+          {{ t('settings.appearance.bookCovers.overlays.title') }}
+        </p>
+        <p class="settings-hint">
+          {{ t('settings.appearance.bookCovers.overlays.hint') }}
+        </p>
       </div>
       <div v-for="opt in overlayOptions" :key="opt.key" class="flex items-center justify-between gap-3 px-4 py-3 md:px-5 md:py-3.5 bg-card">
         <div class="min-w-0">
           <p class="settings-label">{{ opt.label }}</p>
-          <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">{{ opt.hint }}</p>
+          <p class="settings-hint overflow-hidden text-ellipsis whitespace-nowrap md:whitespace-normal md:overflow-visible">
+            {{ opt.hint }}
+          </p>
         </div>
         <ToggleSwitch :model-value="cardOverlays.includes(opt.key)" @update:model-value="toggleOverlay(opt.key)" />
       </div>

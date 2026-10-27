@@ -10,7 +10,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseBoolPipe,
   ParseIntPipe,
   Patch,
   Post,
@@ -31,8 +30,10 @@ import type { MultipartRequest } from '../../common/types/multipart-request';
 import type { RequestUser } from '../../common/types/request-user';
 import { CreateUserDto } from './dto/create-user.dto';
 import { CreateSharedUserDto } from './dto/create-shared-user.dto';
+import { ListUsersDto } from './dto/list-users.dto';
 import { SetLibrariesDto } from './dto/set-libraries.dto';
 import { SetPermissionsDto } from './dto/set-permissions.dto';
+import { SetSuperuserDto } from './dto/set-superuser.dto';
 import { SetContentFiltersDto } from './dto/set-content-filters.dto';
 import { UpdateMeDto } from './dto/update-me.dto';
 import { UpdateMeSettingsDto } from './dto/update-me-settings.dto';
@@ -53,15 +54,23 @@ export class UserController {
 
   @Get()
   @RequirePermission(Permission.ManageUsers)
-  findAll(
-    @Query('page', new ParseIntPipe({ optional: true })) page?: number,
-    @Query('pageSize', new ParseIntPipe({ optional: true })) pageSize?: number,
-    @Query('provisioningMethod') provisioningMethod?: string,
-  ) {
-    return this.userService.findAll(page, pageSize, provisioningMethod);
+  findAll(@Query() query: ListUsersDto) {
+    return this.userService.findAll(query);
   }
 
   // Must be before :id routes to avoid named segments being parsed as ints
+  @Get('summary')
+  @RequirePermission(Permission.ManageUsers)
+  summary() {
+    return this.userService.summary();
+  }
+
+  @Get('attention')
+  @RequirePermission(Permission.ManageUsers)
+  findNeedingAttention() {
+    return this.userService.findNeedingAttention();
+  }
+
   @Get('assignable')
   @RequirePermission(Permission.ManageLibraries)
   findAssignable() {
@@ -82,7 +91,7 @@ export class UserController {
 
   @Patch('me/settings')
   updateMySettings(@CurrentUser() user: RequestUser, @Body() dto: UpdateMeSettingsDto) {
-    return this.userService.updateMySettings(user.id, dto);
+    return this.userService.updateMySettings(user, dto);
   }
 
   @Patch('me/reader-storage-mode')
@@ -249,7 +258,7 @@ export class UserController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @RequirePermission(Permission.ManageUsers)
   @Auditable({
-    action: AuditAction.UserSuperuserEnable,
+    action: (req) => ((req.body as SetSuperuserDto).isSuperuser ? AuditAction.UserSuperuserEnable : AuditAction.UserSuperuserDisable),
     resource: AuditResource.User,
     getResourceId: (req) => parseInt(req.params['id'] as string, 10),
     description: (req) => {
@@ -258,12 +267,8 @@ export class UserController {
       return `${action} superuser for user #${req.params['id']}`;
     },
   })
-  setSuperuser(
-    @Param('id', ParseIntPipe) id: number,
-    @Body('isSuperuser', ParseBoolPipe) isSuperuser: boolean,
-    @CurrentUser() requestingUser: RequestUser,
-  ) {
-    return this.userService.setSuperuser(id, isSuperuser, requestingUser);
+  setSuperuser(@Param('id', ParseIntPipe) id: number, @Body() dto: SetSuperuserDto, @CurrentUser() requestingUser: RequestUser) {
+    return this.userService.setSuperuser(id, dto.isSuperuser, requestingUser);
   }
 
   @Get(':id/libraries')
@@ -295,6 +300,18 @@ export class UserController {
   })
   adminResetPassword(@Param('id', ParseIntPipe) id: number, @CurrentUser() requestingUser: RequestUser) {
     return this.userService.adminResetPassword(id, requestingUser);
+  }
+
+  @Post(':id/unlock')
+  @RequirePermission(Permission.ManageUsers)
+  @Auditable({
+    action: AuditAction.UserUnlock,
+    resource: AuditResource.User,
+    getResourceId: (req) => parseInt(req.params['id'] as string, 10),
+    description: (req) => `Cleared login lockout for user #${req.params['id']}`,
+  })
+  unlockUser(@Param('id', ParseIntPipe) id: number, @CurrentUser() requestingUser: RequestUser) {
+    return this.userService.unlockUser(id, requestingUser);
   }
 
   @Get('me/content-filters')

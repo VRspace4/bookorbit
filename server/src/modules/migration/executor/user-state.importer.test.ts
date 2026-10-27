@@ -1,3 +1,4 @@
+import { ReadingAttemptEventsService } from '../../user-book-status/reading-attempt-events.service';
 import { UserStateImporter } from './user-state.importer';
 
 function makeImporter() {
@@ -10,9 +11,12 @@ function makeImporter() {
       primaryFilesByBookId: new Map([[200, 500]]),
       audiobookPrimaryFilesByBookId: new Map([[200, 500]]),
     }),
-    fetchTargetBookFiles: vi.fn().mockResolvedValue(new Map([[200, [{ id: 500, hash: null, absolutePath: '/target/book.epub', format: 'epub' }]]])),
-    clearUserBookStatuses: vi.fn().mockResolvedValue(undefined),
-    batchUpsertUserBookStatuses: vi.fn().mockResolvedValue(undefined),
+    fetchTargetBookFiles: vi
+      .fn()
+      .mockResolvedValue(
+        new Map([[200, [{ id: 500, hash: null, absolutePath: '/target/book.epub', format: 'epub', sortOrder: 0, durationSeconds: null }]]]),
+      ),
+    batchMergeUserBookStatuses: vi.fn().mockResolvedValue(undefined),
     clearUserBookRatings: vi.fn().mockResolvedValue(undefined),
     batchUpsertUserBookRatings: vi.fn().mockResolvedValue(undefined),
     clearReadingProgress: vi.fn().mockResolvedValue(undefined),
@@ -30,8 +34,9 @@ function makeImporter() {
     batchInsertCollectionBooks: vi.fn().mockResolvedValue(undefined),
   };
 
-  const importer = new UserStateImporter(repo as never, importRepo as never);
-  return { importer, repo, importRepo };
+  const events = new ReadingAttemptEventsService();
+  const importer = new UserStateImporter(repo as never, importRepo as never, events);
+  return { importer, repo, importRepo, events };
 }
 
 describe('UserStateImporter', () => {
@@ -90,7 +95,7 @@ describe('UserStateImporter', () => {
           ],
           readingSessions: [
             {
-              sourceSessionId: 'session-1',
+              sourceSessionId: 'session-'.repeat(20),
               sourceUserId: 'u1',
               sourceBookId: 'b-source',
               bookType: 'EPUB',
@@ -137,12 +142,13 @@ describe('UserStateImporter', () => {
     const ensureRunning = vi.fn().mockResolvedValue(undefined);
     await importer.import(300, planned as never, ensureRunning);
 
-    expect(importRepo.batchUpsertUserBookStatuses).toHaveBeenCalledWith([
+    expect(importRepo.batchMergeUserBookStatuses).toHaveBeenCalledWith([
       expect.objectContaining({
         userId: 10,
         bookId: 200,
         status: 'read',
         source: 'manual',
+        sourceUpdatedAt: new Date('2026-01-02T00:00:00.000Z'),
       }),
     ]);
     expect(importRepo.batchUpsertUserBookRatings).toHaveBeenCalledWith([
@@ -157,23 +163,20 @@ describe('UserStateImporter', () => {
         bookFileId: 500,
         userId: 10,
         percentage: 100,
+        // Imported history must keep its own last-read time; defaulting to now would make every
+        // migrated book look like it was just read.
+        updatedAt: new Date('2026-01-03T00:00:00.000Z'),
+        lastReadAt: new Date('2026-01-03T00:00:00.000Z'),
       }),
     ]);
-    expect(importRepo.batchUpsertAudiobookProgress).toHaveBeenCalledWith([
-      expect.objectContaining({
-        userId: 10,
-        bookId: 200,
-        currentFileId: 500,
-        positionSeconds: 30,
-      }),
-    ]);
+    expect(importRepo.batchUpsertAudiobookProgress).toHaveBeenCalledWith([]);
     expect(importRepo.syncImportedReadingSessions).toHaveBeenCalledWith({
       items: [
         expect.objectContaining({
           userId: 10,
           bookId: 200,
           bookFileId: 500,
-          sessionId: 'booklore:rs:session-1',
+          sessionId: expect.stringMatching(/^booklore:rs:[A-Za-z0-9_-]{43}$/),
           durationSeconds: 1800,
           progressDelta: 12.35,
           endProgress: 100,
@@ -370,8 +373,80 @@ describe('UserStateImporter', () => {
     );
 
     expect(repo.setRunMetric).toHaveBeenCalledWith(301, 'user_state', 'user_book_status', expect.objectContaining({ unresolved: 1 }));
-    expect(repo.setRunMetric).toHaveBeenCalledWith(301, 'user_state', 'reading_progress', expect.objectContaining({ unresolved: 2 }));
+    expect(repo.setRunMetric).toHaveBeenCalledWith(301, 'user_state', 'audiobook_progress', expect.objectContaining({ unresolved: 2 }));
     expect(repo.setRunMetric).toHaveBeenCalledWith(301, 'user_state', 'collections', expect.objectContaining({ unresolved: 4 }));
+  });
+
+  it('sorts collection memberships by valid source position and preserves fallback input order', async () => {
+    const { importer, importRepo } = makeImporter();
+    importRepo.insertCollection.mockResolvedValueOnce({ id: 701 }).mockResolvedValueOnce({ id: 702 });
+    const planned = {
+      plan: {
+        userMappings: [{ sourceUserId: 'u1', targetUserId: 10 }],
+        pathMappings: [],
+      },
+      execution: {
+        matchedBooks: Array.from({ length: 8 }, (_, index) => ({
+          sourceBookId: `b${index + 1}`,
+          targetBookId: 201 + index,
+        })),
+        sourceData: {
+          availableDomains: {
+            userBookStatuses: false,
+            readingProgress: false,
+            readingSessions: false,
+            bookmarks: false,
+            annotations: false,
+            shelves: true,
+          },
+          books: [],
+          userBookStatuses: [],
+          userFileProgress: [],
+          readingSessions: [],
+          bookmarks: [],
+          annotations: [],
+          shelves: [
+            { sourceShelfId: 's1', sourceUserId: 'u1', name: 'Ordered' },
+            { sourceShelfId: 's2', sourceUserId: 'u1', name: 'Fallback' },
+          ],
+          shelfBooks: [
+            { sourceShelfId: 's1', sourceUserId: 'u1', sourceBookId: 'b1' },
+            { sourceShelfId: 's2', sourceUserId: 'u1', sourceBookId: 'b7' },
+            { sourceShelfId: 's1', sourceUserId: 'u1', sourceBookId: 'b2', position: 2 },
+            { sourceShelfId: 's1', sourceUserId: 'u1', sourceBookId: 'b3', position: 1 },
+            { sourceShelfId: 's1', sourceUserId: 'u1', sourceBookId: 'b4', position: 1 },
+            { sourceShelfId: 's1', sourceUserId: 'u1', sourceBookId: 'b5', position: -1 },
+            { sourceShelfId: 's1', sourceUserId: 'u1', sourceBookId: 'b6', position: Number.NaN },
+            { sourceShelfId: 's2', sourceUserId: 'u1', sourceBookId: 'b8' },
+          ],
+        },
+      },
+    };
+
+    await importer.import(306, planned as never, vi.fn().mockResolvedValue(undefined));
+
+    expect(importRepo.batchInsertCollectionBooks).toHaveBeenCalledWith([
+      { collectionId: 701, bookId: 203 },
+      { collectionId: 701, bookId: 204 },
+      { collectionId: 701, bookId: 202 },
+      { collectionId: 701, bookId: 201 },
+      { collectionId: 701, bookId: 205 },
+      { collectionId: 701, bookId: 206 },
+      { collectionId: 702, bookId: 207 },
+      { collectionId: 702, bookId: 208 },
+    ]);
+
+    const firstBatch = importRepo.batchInsertCollectionBooks.mock.calls[0]?.[0];
+    importRepo.fetchExistingCollections.mockResolvedValue([
+      { id: 701, userId: 10, name: 'Ordered', description: 'Imported from Booklore migration shelf: s1' },
+      { id: 702, userId: 10, name: 'Fallback', description: 'Imported from Booklore migration shelf: s2' },
+    ]);
+    importRepo.batchInsertCollectionBooks.mockClear();
+
+    await importer.import(307, planned as never, vi.fn().mockResolvedValue(undefined));
+
+    expect(importRepo.batchInsertCollectionBooks).toHaveBeenCalledWith(firstBatch);
+    expect(importRepo.insertCollection).toHaveBeenCalledTimes(2);
   });
 
   it('skips all user-state domains when source adapter marks them unavailable', async () => {
@@ -404,7 +479,7 @@ describe('UserStateImporter', () => {
 
     await importer.import(302, planned as never, vi.fn().mockResolvedValue(undefined));
 
-    expect(importRepo.batchUpsertUserBookStatuses).not.toHaveBeenCalled();
+    expect(importRepo.batchMergeUserBookStatuses).not.toHaveBeenCalled();
     expect(importRepo.batchUpsertUserBookRatings).not.toHaveBeenCalled();
     expect(importRepo.batchUpsertReadingProgress).not.toHaveBeenCalled();
     expect(importRepo.batchUpsertAudiobookProgress).not.toHaveBeenCalled();
@@ -515,7 +590,7 @@ describe('UserStateImporter', () => {
     expect(importRepo.batchUpsertReadingProgress).toHaveBeenCalledWith([]);
     expect(importRepo.batchUpsertAudiobookProgress).toHaveBeenCalledWith([]);
     expect(repo.setRunMetric).toHaveBeenCalledWith(304, 'user_state', 'reading_progress', expect.objectContaining({ processed: 1, skipped: 1 }));
-    expect(repo.setRunMetric).toHaveBeenCalledWith(304, 'user_state', 'audiobook_progress', expect.objectContaining({ processed: 1, skipped: 1 }));
+    expect(repo.setRunMetric).toHaveBeenCalledWith(304, 'user_state', 'audiobook_progress', expect.objectContaining({ processed: 0, skipped: 0 }));
   });
 
   it('keeps zero-percent progress rows when a locator exists', async () => {
@@ -573,6 +648,251 @@ describe('UserStateImporter', () => {
         cfi: '/6/2',
         pageNumber: 0,
       }),
+    ]);
+  });
+
+  it('imports mixed-format progress independently and resolves an ordered later audio track when EPUB is primary', async () => {
+    const { importer, importRepo } = makeImporter();
+    importRepo.fetchTargetBookPrimaryFiles.mockResolvedValue({
+      primaryFilesByBookId: new Map([[200, 500]]),
+      audiobookPrimaryFilesByBookId: new Map(),
+    });
+    importRepo.fetchTargetBookFiles.mockResolvedValue(
+      new Map([
+        [
+          200,
+          [
+            { id: 500, hash: 'epub-hash', absolutePath: '/target/book.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+            { id: 501, hash: null, absolutePath: '/target/01.mp3', format: 'mp3', sortOrder: 0, durationSeconds: 60 },
+            { id: 502, hash: null, absolutePath: '/target/02.mp3', format: 'mp3', sortOrder: 1, durationSeconds: 90 },
+          ],
+        ],
+      ]),
+    );
+
+    const planned = {
+      plan: {
+        userMappings: [{ sourceUserId: 'u1', targetUserId: 10 }],
+        pathMappings: [],
+      },
+      execution: {
+        matchedBooks: [{ sourceBookId: 'mixed', targetBookId: 200 }],
+        sourceData: {
+          availableDomains: {
+            userBookStatuses: false,
+            readingProgress: true,
+            readingSessions: false,
+            bookmarks: false,
+            annotations: false,
+            shelves: false,
+          },
+          books: [
+            {
+              sourceBookId: 'mixed',
+              files: [
+                {
+                  sourceFileId: 'ebook',
+                  sourceBookId: 'mixed',
+                  filePath: null,
+                  fileHash: 'epub-hash',
+                  fileName: 'book.epub',
+                  fileSubPath: null,
+                  durationSeconds: null,
+                  format: 'epub',
+                  sortOrder: 0,
+                },
+                {
+                  sourceFileId: 'audio-1',
+                  sourceBookId: 'mixed',
+                  filePath: null,
+                  fileHash: null,
+                  fileName: '01.mp3',
+                  fileSubPath: null,
+                  durationSeconds: 60,
+                  format: 'mp3',
+                  sortOrder: 0,
+                },
+                {
+                  sourceFileId: 'audio-2',
+                  sourceBookId: 'mixed',
+                  filePath: null,
+                  fileHash: null,
+                  fileName: '02.mp3',
+                  fileSubPath: null,
+                  durationSeconds: 90,
+                  format: 'mp3',
+                  sortOrder: 1,
+                },
+              ],
+            },
+          ],
+          userBookStatuses: [],
+          userFileProgress: [
+            {
+              sourceUserId: 'u1',
+              sourceBookId: 'mixed',
+              sourceFileId: 'ebook',
+              percentage: 37.5,
+              cfi: 'epubcfi(/6/2)',
+              pageNumber: null,
+              positionSeconds: null,
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              sourceUserId: 'u1',
+              sourceBookId: 'mixed',
+              sourceFileId: 'audio-2',
+              percentage: 50,
+              cfi: null,
+              pageNumber: null,
+              positionSeconds: 15,
+              updatedAt: '2026-01-02T00:00:00.000Z',
+            },
+          ],
+          readingSessions: [],
+          bookmarks: [],
+          annotations: [],
+          shelves: [],
+          shelfBooks: [],
+        },
+      },
+    };
+
+    await importer.import(307, planned as never, vi.fn().mockResolvedValue(undefined));
+
+    expect(importRepo.batchUpsertReadingProgress).toHaveBeenCalledWith([
+      expect.objectContaining({ bookFileId: 500, userId: 10, percentage: 37.5, cfi: 'epubcfi(/6/2)' }),
+    ]);
+    expect(importRepo.batchUpsertAudiobookProgress).toHaveBeenCalledWith([
+      expect.objectContaining({ bookId: 200, currentFileId: 502, userId: 10, percentage: 50, positionSeconds: 15 }),
+    ]);
+    expect(importRepo.clearReadingProgress).toHaveBeenCalledWith([10], [500, 501, 502]);
+    expect(importRepo.clearAudiobookProgress).toHaveBeenCalledWith([10], [200]);
+  });
+
+  it('rejects a later audio track when compatible file counts make ordinal fallback unsafe', async () => {
+    const { importer, repo, importRepo } = makeImporter();
+    importRepo.fetchTargetBookPrimaryFiles.mockResolvedValue({
+      primaryFilesByBookId: new Map([[200, 500]]),
+      audiobookPrimaryFilesByBookId: new Map(),
+    });
+    importRepo.fetchTargetBookFiles.mockResolvedValue(
+      new Map([
+        [
+          200,
+          [
+            { id: 500, hash: null, absolutePath: '/target/book.epub', format: 'epub', sortOrder: 0, durationSeconds: null },
+            { id: 501, hash: null, absolutePath: '/target/only.mp3', format: 'mp3', sortOrder: 0, durationSeconds: 150 },
+          ],
+        ],
+      ]),
+    );
+    const sourceAudioFile = (sourceFileId: string, sortOrder: number) => ({
+      sourceFileId,
+      sourceBookId: 'mixed',
+      filePath: null,
+      fileHash: null,
+      fileName: `${sortOrder + 1}.mp3`,
+      fileSubPath: null,
+      durationSeconds: 60,
+      format: 'mp3',
+      sortOrder,
+    });
+    const planned = {
+      plan: { userMappings: [{ sourceUserId: 'u1', targetUserId: 10 }], pathMappings: [] },
+      execution: {
+        matchedBooks: [{ sourceBookId: 'mixed', targetBookId: 200 }],
+        sourceData: {
+          availableDomains: { readingProgress: true },
+          books: [{ sourceBookId: 'mixed', files: [sourceAudioFile('audio-1', 0), sourceAudioFile('audio-2', 1)] }],
+          userBookStatuses: [],
+          userFileProgress: [
+            {
+              sourceUserId: 'u1',
+              sourceBookId: 'mixed',
+              sourceFileId: 'audio-2',
+              percentage: 50,
+              cfi: null,
+              pageNumber: null,
+              positionSeconds: 15,
+              updatedAt: null,
+            },
+          ],
+          readingSessions: [],
+          bookmarks: [],
+          annotations: [],
+          shelves: [],
+          shelfBooks: [],
+        },
+      },
+    };
+
+    await importer.import(308, planned as never, vi.fn().mockResolvedValue(undefined));
+
+    expect(importRepo.batchUpsertReadingProgress).toHaveBeenCalledWith([]);
+    expect(importRepo.batchUpsertAudiobookProgress).toHaveBeenCalledWith([]);
+    expect(repo.setRunMetric).toHaveBeenCalledWith(308, 'user_state', 'audiobook_progress', expect.objectContaining({ processed: 1, unresolved: 1 }));
+  });
+
+  it('keeps a mapped source file whose target row has no recorded format', async () => {
+    const { importer, importRepo } = makeImporter();
+    importRepo.fetchTargetBookPrimaryFiles.mockResolvedValue({
+      primaryFilesByBookId: new Map([[200, 500]]),
+      audiobookPrimaryFilesByBookId: new Map(),
+    });
+    importRepo.fetchTargetBookFiles.mockResolvedValue(
+      new Map([[200, [{ id: 500, hash: 'shared-hash', absolutePath: '/target/book.epub', format: null, sortOrder: 0, durationSeconds: null }]]]),
+    );
+    const planned = {
+      plan: { userMappings: [{ sourceUserId: 'u1', targetUserId: 10 }], pathMappings: [] },
+      execution: {
+        matchedBooks: [{ sourceBookId: 'b1', targetBookId: 200 }],
+        sourceData: {
+          availableDomains: { readingProgress: true },
+          books: [
+            {
+              sourceBookId: 'b1',
+              files: [
+                {
+                  sourceFileId: 'epub-1',
+                  sourceBookId: 'b1',
+                  filePath: '/source/book.epub',
+                  fileHash: 'shared-hash',
+                  fileName: 'book.epub',
+                  fileSubPath: null,
+                  durationSeconds: null,
+                  format: 'epub',
+                  sortOrder: 0,
+                },
+              ],
+            },
+          ],
+          userBookStatuses: [],
+          userFileProgress: [
+            {
+              sourceUserId: 'u1',
+              sourceBookId: 'b1',
+              sourceFileId: 'epub-1',
+              percentage: 40,
+              cfi: 'epubcfi(/6/2)',
+              pageNumber: null,
+              positionSeconds: null,
+              updatedAt: null,
+            },
+          ],
+          readingSessions: [],
+          bookmarks: [],
+          annotations: [],
+          shelves: [],
+          shelfBooks: [],
+        },
+      },
+    };
+
+    await importer.import(309, planned as never, vi.fn().mockResolvedValue(undefined));
+
+    expect(importRepo.batchUpsertReadingProgress).toHaveBeenCalledWith([
+      expect.objectContaining({ bookFileId: 500, userId: 10, percentage: 40, cfi: 'epubcfi(/6/2)' }),
     ]);
   });
 
@@ -657,18 +977,18 @@ describe('UserStateImporter', () => {
 
     await importer.import(306, planned as never, vi.fn().mockResolvedValue(undefined));
 
-    const statusBatch = importRepo.batchUpsertUserBookStatuses.mock.calls[0]?.[0] as Array<{
+    const statusBatch = importRepo.batchMergeUserBookStatuses.mock.calls[0]?.[0] as Array<{
       userId: number;
       bookId: number;
       status: string;
-      updatedAt: Date;
+      sourceUpdatedAt: Date;
     }>;
     expect(statusBatch).toHaveLength(1);
     expect(statusBatch[0]).toMatchObject({
       userId: 10,
       bookId: 200,
       status: 'read',
-      updatedAt: new Date(newerStatusUpdatedAt),
+      sourceUpdatedAt: new Date(newerStatusUpdatedAt),
     });
 
     const ratingBatch = importRepo.batchUpsertUserBookRatings.mock.calls[0]?.[0] as Array<{
@@ -705,12 +1025,163 @@ describe('UserStateImporter', () => {
       currentFileId: number;
       positionSeconds: number;
     }>;
-    expect(audioBatch).toHaveLength(1);
-    expect(audioBatch[0]).toMatchObject({
-      userId: 10,
-      bookId: 200,
-      currentFileId: 500,
-      positionSeconds: 5,
+    expect(audioBatch).toEqual([]);
+  });
+});
+
+describe('UserStateImporter cache invalidation', () => {
+  function plan() {
+    return {
+      execution: {
+        sourceData: {
+          userBookStatuses: [
+            { sourceUserId: 'reader', sourceBookId: 'a', status: 'read' },
+            { sourceUserId: 'reader', sourceBookId: 'b', status: 'read' },
+          ],
+        },
+      },
+    };
+  }
+
+  it('invalidates each affected reader once after the status transaction commits', async () => {
+    const { importer, importRepo, events } = makeImporter();
+    const notify = vi.spyOn(events, 'notifyChanged');
+    importRepo.withTransaction.mockImplementation(async (callback) => {
+      await callback(importRepo);
+      expect(notify).not.toHaveBeenCalled();
     });
+    await (importer as any).importUserBookStatuses(
+      1,
+      plan(),
+      new Map([['reader', 7]]),
+      new Map([
+        ['a', 10],
+        ['b', 11],
+      ]),
+      async () => {},
+    );
+    expect(notify).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
+  it('keeps caches when the status transaction rolls back', async () => {
+    const { importer, importRepo, events } = makeImporter();
+    const notify = vi.spyOn(events, 'notifyChanged');
+    importRepo.withTransaction.mockRejectedValueOnce(new Error('Rollback'));
+    await expect(
+      (importer as any).importUserBookStatuses(
+        1,
+        plan(),
+        new Map([['reader', 7]]),
+        new Map([
+          ['a', 10],
+          ['b', 11],
+        ]),
+        async () => {},
+      ),
+    ).rejects.toThrow('Rollback');
+    expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('UserStateImporter reading dates', () => {
+  type WrittenStatus = { userId: number; bookId: number; status: string; startedAt: Date | null; finishedAt: Date | null };
+
+  async function importStatuses(rows: Array<Record<string, unknown>>) {
+    const { importer, repo, importRepo } = makeImporter();
+    const bookMap = new Map(rows.map((row, index) => [row.sourceBookId as string, 100 + index]));
+    await (importer as any).importUserBookStatuses(
+      40,
+      { execution: { sourceData: { userBookStatuses: rows } } },
+      new Map([['abs-user', 7]]),
+      bookMap,
+      async () => {},
+    );
+    expect(importRepo.batchMergeUserBookStatuses).toHaveBeenCalledTimes(1);
+    const written = importRepo.batchMergeUserBookStatuses.mock.calls[0][0] as WrittenStatus[];
+    return { repo, written, bookMap };
+  }
+
+  it('imports every status when one book was finished before Audiobookshelf says it was started', async () => {
+    // The shape of issue 1678: a finish date sent by a client lands before the progress row's
+    // creation time, which Audiobookshelf reports as the start. One such row used to fail the
+    // whole batch, so none of the reader's statuses arrived.
+    const { repo, written, bookMap } = await importStatuses([
+      {
+        sourceUserId: 'abs-user',
+        sourceBookId: 'backfilled',
+        status: 'read',
+        percentage: 100,
+        startedAt: '2026-10-12T05:23:33.044Z',
+        finishedAt: '2025-09-07T05:23:32.000Z',
+        updatedAt: '2026-10-12T05:23:33.044Z',
+      },
+      {
+        sourceUserId: 'abs-user',
+        sourceBookId: 'marked-finished',
+        status: 'read',
+        percentage: 100,
+        startedAt: '2026-10-12T05:20:33.137Z',
+        finishedAt: '2026-10-12T05:20:33.137Z',
+        updatedAt: '2026-10-12T05:20:33.138Z',
+      },
+      {
+        sourceUserId: 'abs-user',
+        sourceBookId: 'listening',
+        status: 'reading',
+        percentage: 33.3,
+        startedAt: '2026-10-12T05:20:33.172Z',
+        finishedAt: null,
+        updatedAt: '2026-10-12T05:20:33.172Z',
+      },
+    ]);
+
+    expect(written).toEqual([
+      expect.objectContaining({
+        bookId: bookMap.get('backfilled'),
+        status: 'read',
+        startedAt: null,
+        finishedAt: new Date('2025-09-07T05:23:32.000Z'),
+      }),
+      expect.objectContaining({
+        bookId: bookMap.get('marked-finished'),
+        status: 'read',
+        startedAt: new Date('2026-10-12T05:20:33.137Z'),
+        finishedAt: new Date('2026-10-12T05:20:33.137Z'),
+      }),
+      expect.objectContaining({
+        bookId: bookMap.get('listening'),
+        status: 'reading',
+        startedAt: new Date('2026-10-12T05:20:33.172Z'),
+        finishedAt: null,
+      }),
+    ]);
+    expect(repo.setRunMetric).toHaveBeenCalledWith(40, 'user_state', 'user_book_status', expect.objectContaining({ processed: 3, imported: 3 }));
+  });
+
+  it('never writes a row the finished-after-started check would reject, and never loses a finish date', async () => {
+    const candidates = [null, '2024-05-01T00:00:00.000Z', '2024-05-01T00:00:00.001Z', '2025-06-01T12:00:00+02:00', 'not-a-date'];
+    const rows = candidates.flatMap((startedAt, startIndex) =>
+      candidates.map((finishedAt, finishIndex) => ({
+        sourceUserId: 'abs-user',
+        sourceBookId: `book-${startIndex}-${finishIndex}`,
+        status: 'read',
+        percentage: 100,
+        startedAt,
+        finishedAt,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })),
+    );
+
+    const { written } = await importStatuses(rows);
+
+    expect(written).toHaveLength(rows.length);
+    for (const [index, row] of rows.entries()) {
+      const out = written[index];
+      const finish = row.finishedAt ? new Date(row.finishedAt) : null;
+      const expectedFinish = finish && Number.isFinite(finish.getTime()) ? finish : null;
+      // Mirrors user_book_status_finished_after_started_chk.
+      if (out.startedAt && out.finishedAt) expect(out.finishedAt.getTime()).toBeGreaterThanOrEqual(out.startedAt.getTime());
+      expect(out.finishedAt).toEqual(expectedFinish);
+    }
   });
 });

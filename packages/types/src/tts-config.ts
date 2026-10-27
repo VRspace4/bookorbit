@@ -18,7 +18,7 @@ export interface TtsProviderConfigurations {
   kokoro: TtsProviderConfigEntry;
 }
 
-export interface TtsProviderStatus {
+export interface EpubTtsProviderStatus {
   key: TtsProviderConfigKey;
   label: string;
   configured: boolean;
