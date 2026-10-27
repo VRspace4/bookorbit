@@ -238,8 +238,6 @@ function hasOpenPanel(): boolean {
   return showTapZones.value || showSearch.value || unpinnedSidebar || showSettings.value || readAloud.hasOpenPanel()
 }
 
-useReaderBackClosesPanel(hasOpenPanel, () => closeOpenPanel(true))
-
 const { showHelpModal } = useReaderKeyboardShortcuts({
   toggleSidebar: () => {
     showSidebar.value = !showSidebar.value
@@ -985,6 +983,8 @@ const readAloud = useEpubReadAloud({
   readerShellRef,
   ttsToolbarRef,
 })
+// Reads the panels at once, so it must come after readAloud exists.
+useReaderBackClosesPanel(hasOpenPanel, () => closeOpenPanel(true))
 const {
   tts,
   ttsStatus,
