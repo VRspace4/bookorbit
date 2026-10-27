@@ -1,6 +1,6 @@
 import { onScopeDispose, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { setReaderBackHandler } from '../lib/reader-navigation'
+import { setReaderBackHandler, setReaderPopHandler } from '../lib/reader-navigation'
 
 const PANEL_ENTRY_KEY = 'readerPanel'
 // A history traversal normally lands within a frame; the timeout only guards a browser that drops it.
@@ -12,8 +12,8 @@ function isPanelEntry(state: unknown): boolean {
 
 /**
  * Back closes the topmost reader panel: an open panel owns a history entry on the reader's URL, and
- * Back pops it. Those pops are kept from the router, which reads a pop between two entries of the same
- * book as a duplicate reader entry and exits the book.
+ * Back pops it. Those pops are kept from the router (see installReaderPanelPopFilter), which reads a pop
+ * between two entries of the same book as a duplicate reader entry and exits the book.
  */
 export function useReaderBackClosesPanel(isPanelOpen: () => boolean, closeOpenPanel: () => boolean) {
   let entryPushed = false
@@ -44,29 +44,27 @@ export function useReaderBackClosesPanel(isPanelOpen: () => boolean, closeOpenPa
     void releaseEntry()
   }
 
-  // Capture runs before the router's own popstate listener on window.
-  function handlePopState(event: PopStateEvent) {
+  /** True for the pops this reader's panels own, which the router must not see. */
+  function claimPop(event: PopStateEvent): boolean {
     if (finishRelease) {
-      event.stopImmediatePropagation()
       finishRelease()
     } else if (isPanelEntry(event.state)) {
       // Forward landed back on a panel entry whose panel is gone.
-      event.stopImmediatePropagation()
       stepOffPanelEntry()
     } else if (entryPushed) {
-      event.stopImmediatePropagation()
       entryPushed = false
       closeOpenPanel()
       if (isPanelOpen()) pushEntry()
+    } else {
+      return false
     }
+    return true
   }
 
-  window.addEventListener('popstate', handlePopState, { capture: true })
-  const unregisterBackButton = setReaderBackHandler(closeOpenPanel)
-
   // A reload while a panel was open leaves the reader sitting on that panel's entry.
-  if (isPanelEntry(window.history.state)) stepOffPanelEntry()
+  const startsOnPanelEntry = isPanelEntry(window.history.state)
 
+  // Watch first: if reading the panels throws during setup, nothing global is left registered.
   watch(
     isPanelOpen,
     (open) => {
@@ -76,10 +74,14 @@ export function useReaderBackClosesPanel(isPanelOpen: () => boolean, closeOpenPa
     { immediate: true },
   )
 
+  const unregisterPops = setReaderPopHandler(claimPop)
+  const unregisterBackButton = setReaderBackHandler(closeOpenPanel)
+  if (startsOnPanelEntry) stepOffPanelEntry()
+
   onBeforeRouteLeave(() => releaseEntry())
 
   onScopeDispose(() => {
-    window.removeEventListener('popstate', handlePopState, { capture: true })
+    unregisterPops()
     unregisterBackButton()
   })
 }

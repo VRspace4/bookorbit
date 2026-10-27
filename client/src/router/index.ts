@@ -18,7 +18,7 @@ import { registerPwaRoutePersistence } from '@/features/pwa/lib/native-app'
 import { normalizeIntegrationTab, type IntegrationTab } from '@/features/settings/lib/integration-tabs'
 import { i18n } from '@/i18n'
 import { registerAuthGuard } from './guards/auth.guard'
-import { registerReaderReturnRoute } from '@/features/reader/shared/lib/reader-navigation'
+import { installReaderPanelPopFilter, registerReaderReturnRoute } from '@/features/reader/shared/lib/reader-navigation'
 import { registerRouteTitleHook } from './title-resolver'
 
 const t = i18n.global.t
@@ -835,6 +835,8 @@ export const routes: RouteRecordRaw[] = [
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
+
+installReaderPanelPopFilter()
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),

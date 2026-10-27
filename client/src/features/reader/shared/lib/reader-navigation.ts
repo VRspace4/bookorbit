@@ -99,6 +99,32 @@ function pathsMatch(left: string, right: string): boolean {
 }
 
 let closeOpenReaderPanel: (() => boolean) | null = null
+let readerPopHandler: ((event: PopStateEvent) => boolean) | null = null
+let readerPopFilterInstalled = false
+
+/**
+ * Must run before the router creates its history: listeners on window fire in registration order,
+ * so this one sees every pop first and can keep reader panel history steps from the router.
+ */
+export function installReaderPanelPopFilter(): void {
+  if (readerPopFilterInstalled || typeof window === 'undefined') return
+  readerPopFilterInstalled = true
+  window.addEventListener(
+    'popstate',
+    (event) => {
+      if (readerPopHandler?.(event)) event.stopImmediatePropagation()
+    },
+    { capture: true },
+  )
+}
+
+/** The open reader claims the pops that belong to its panels; the handler returns true for those. */
+export function setReaderPopHandler(handler: (event: PopStateEvent) => boolean): () => void {
+  readerPopHandler = handler
+  return () => {
+    if (readerPopHandler === handler) readerPopHandler = null
+  }
+}
 
 /** The open reader lets the Android back button close its topmost panel before leaving the book. */
 export function setReaderBackHandler(closeOpenPanel: () => boolean): () => void {

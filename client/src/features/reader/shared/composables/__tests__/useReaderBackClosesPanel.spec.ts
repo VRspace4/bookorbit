@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick, ref, type EffectScope } from 'vue'
-import { closeReaderPanelOnBack } from '../../lib/reader-navigation'
+import { closeReaderPanelOnBack, installReaderPanelPopFilter } from '../../lib/reader-navigation'
 import { useReaderBackClosesPanel } from '../useReaderBackClosesPanel'
 
 const leaveGuards = vi.hoisted(() => [] as Array<() => unknown>)
@@ -9,12 +9,16 @@ vi.mock('vue-router', () => ({
   onBeforeRouteLeave: (guard: () => unknown) => leaveGuards.push(guard),
 }))
 
+let pops: Array<() => void> = []
+// Registered ahead of the filter so the test sees every pop, including the ones kept from the router.
+window.addEventListener('popstate', () => pops.shift()?.(), { capture: true })
+// The app installs the filter before the router exists, so it runs ahead of routerPop below.
+installReaderPanelPopFilter()
+
 describe('useReaderBackClosesPanel', () => {
   let scope: EffectScope
-  let pops: Array<() => void>
   // Stands in for the router: it must only ever see real navigation.
   const routerPop = vi.fn<() => void>()
-  const watchPops = () => pops.shift()?.()
 
   function nextPop() {
     return new Promise<void>((resolve) => pops.push(resolve))
@@ -48,13 +52,11 @@ describe('useReaderBackClosesPanel', () => {
     leaveGuards.length = 0
     routerPop.mockClear()
     history.replaceState({ position: 1 }, '', '/read/1/2')
-    window.addEventListener('popstate', watchPops, { capture: true })
     window.addEventListener('popstate', routerPop)
   })
 
   afterEach(() => {
     scope.stop()
-    window.removeEventListener('popstate', watchPops, { capture: true })
     window.removeEventListener('popstate', routerPop)
   })
 
