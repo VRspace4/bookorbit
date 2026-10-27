@@ -99,9 +99,8 @@ function pathsMatch(left: string, right: string): boolean {
 }
 
 let closeOpenReaderPanel: (() => boolean) | null = null
-let historyExitRunning = false
 
-/** The open reader lets the back key close its topmost panel before leaving the book. */
+/** The open reader lets the Android back button close its topmost panel before leaving the book. */
 export function setReaderBackHandler(closeOpenPanel: () => boolean): () => void {
   closeOpenReaderPanel = closeOpenPanel
   return () => {
@@ -109,23 +108,12 @@ export function setReaderBackHandler(closeOpenPanel: () => boolean): () => void 
   }
 }
 
-/** True when the back key closed a reader panel, so it must not leave the book as well. */
+/** True when the back button closed a reader panel, so it must not leave the book as well. */
 export function closeReaderPanelOnBack(): boolean {
-  // Leaving walks history back, which must not be mistaken for the back key.
-  if (historyExitRunning) return false
   return closeOpenReaderPanel?.() ?? false
 }
 
 export async function exitReader(router: Router): Promise<void> {
-  historyExitRunning = true
-  try {
-    await exitReaderNow(router)
-  } finally {
-    historyExitRunning = false
-  }
-}
-
-async function exitReaderNow(router: Router): Promise<void> {
   if (!isReaderPath(currentPath(router))) {
     return
   }

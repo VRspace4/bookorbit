@@ -571,6 +571,10 @@ export function useEpubReadAloud(options: EpubReadAloudOptions) {
     if (tts.isActive.value) tts.evaluateScrollFollow()
   }
 
+  function hasOpenPanel(): boolean {
+    return showTtsSettings.value || ttsColorPickerTarget.value !== null
+  }
+
   /** Closes the topmost read-aloud panel; false when none was open. */
   function closePanel(): boolean {
     if (showTtsSettings.value) {
@@ -639,6 +643,7 @@ export function useEpubReadAloud(options: EpubReadAloudOptions) {
     refreshHighlightIfActive,
     onRelocate,
     closePanel,
+    hasOpenPanel,
     markLeaving,
     toggleTts,
     startTtsPlayback,

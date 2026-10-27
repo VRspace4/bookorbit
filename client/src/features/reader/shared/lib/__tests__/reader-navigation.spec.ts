@@ -152,26 +152,6 @@ describe('reader navigation', () => {
     unregister()
     expect(closeReaderPanelOnBack()).toBe(false)
   })
-
-  it('leaves panels alone while the reader is exiting through history', async () => {
-    window.history.replaceState({ back: '/book/1?tab=details' }, '', '/read/1/2?format=epub')
-    const closePanel = vi.fn<() => boolean>(() => true)
-    const unregister = setReaderBackHandler(closePanel)
-    const router = makeRouter()
-    const back = router.back
-    let closedDuringExit: boolean | undefined
-    router.back = vi.fn<() => Promise<void>>(async () => {
-      closedDuringExit = closeReaderPanelOnBack()
-      await back()
-    })
-
-    await exitReader(router)
-
-    expect(closedDuringExit).toBe(false)
-    expect(closePanel).not.toHaveBeenCalled()
-    expect(closeReaderPanelOnBack()).toBe(true)
-    unregister()
-  })
 })
 
 describe('registerReaderReturnRoute', () => {

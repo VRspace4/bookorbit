@@ -233,7 +233,12 @@ function closeAnyPanel() {
   if (!closeOpenPanel()) handleMiddleTap()
 }
 
-useReaderBackClosesPanel(() => closeOpenPanel(true))
+function hasOpenPanel(): boolean {
+  const unpinnedSidebar = showSidebar.value && !isSidebarPinned.value
+  return showTapZones.value || showSearch.value || unpinnedSidebar || showSettings.value || readAloud.hasOpenPanel()
+}
+
+useReaderBackClosesPanel(hasOpenPanel, () => closeOpenPanel(true))
 
 const { showHelpModal } = useReaderKeyboardShortcuts({
   toggleSidebar: () => {
