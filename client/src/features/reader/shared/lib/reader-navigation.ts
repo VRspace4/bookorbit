@@ -98,13 +98,22 @@ function pathsMatch(left: string, right: string): boolean {
   return left === right || left.split(/[?#]/, 1)[0] === right.split(/[?#]/, 1)[0]
 }
 
-let closeOpenReaderPanel: (() => boolean) | null = null
-let readerPopHandler: ((event: PopStateEvent) => boolean) | null = null
+/** How the open reader's panels share the browser history (see useReaderBackClosesPanel). */
+export interface ReaderPanelHistory {
+  /** Closes the topmost panel; false when none was open. */
+  closeOpenPanel: () => boolean
+  /** True for a pop that belongs to a panel, which the router must not see. */
+  claimPop: (event: PopStateEvent) => boolean
+  /** Drops the open panel's history entry, so leaving walks back from the reader's own entry. */
+  releaseEntry: () => Promise<void>
+}
+
+let readerPanelHistory: ReaderPanelHistory | null = null
 let readerPopFilterInstalled = false
 
 /**
- * Must run before the router creates its history: listeners on window fire in registration order,
- * so this one sees every pop first and can keep reader panel history steps from the router.
+ * Must run before the router creates its history. Older browsers fire window listeners in
+ * registration order even for capture, so only an earlier listener is sure to see every pop first.
  */
 export function installReaderPanelPopFilter(): void {
   if (readerPopFilterInstalled || typeof window === 'undefined') return
@@ -112,31 +121,22 @@ export function installReaderPanelPopFilter(): void {
   window.addEventListener(
     'popstate',
     (event) => {
-      if (readerPopHandler?.(event)) event.stopImmediatePropagation()
+      if (readerPanelHistory?.claimPop(event)) event.stopImmediatePropagation()
     },
     { capture: true },
   )
 }
 
-/** The open reader claims the pops that belong to its panels; the handler returns true for those. */
-export function setReaderPopHandler(handler: (event: PopStateEvent) => boolean): () => void {
-  readerPopHandler = handler
+export function registerReaderPanelHistory(panelHistory: ReaderPanelHistory): () => void {
+  readerPanelHistory = panelHistory
   return () => {
-    if (readerPopHandler === handler) readerPopHandler = null
+    if (readerPanelHistory === panelHistory) readerPanelHistory = null
   }
 }
 
-/** The open reader lets the Android back button close its topmost panel before leaving the book. */
-export function setReaderBackHandler(closeOpenPanel: () => boolean): () => void {
-  closeOpenReaderPanel = closeOpenPanel
-  return () => {
-    if (closeOpenReaderPanel === closeOpenPanel) closeOpenReaderPanel = null
-  }
-}
-
-/** True when the back button closed a reader panel, so it must not leave the book as well. */
+/** True when the Android back button closed a reader panel, so it must not leave the book as well. */
 export function closeReaderPanelOnBack(): boolean {
-  return closeOpenReaderPanel?.() ?? false
+  return readerPanelHistory?.closeOpenPanel() ?? false
 }
 
 export async function exitReader(router: Router): Promise<void> {
@@ -197,6 +197,7 @@ export async function leaveReader(
     } catch {
       // Still leave when progress could not be saved.
     }
+    await readerPanelHistory?.releaseEntry()
     await exitReader(router)
   } finally {
     readerExitInProgress = false

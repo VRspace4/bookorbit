@@ -1,6 +1,6 @@
 import { onScopeDispose, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { setReaderBackHandler, setReaderPopHandler } from '../lib/reader-navigation'
+import { registerReaderPanelHistory } from '../lib/reader-navigation'
 
 const PANEL_ENTRY_KEY = 'readerPanel'
 // A history traversal normally lands within a frame; the timeout only guards a browser that drops it.
@@ -74,14 +74,10 @@ export function useReaderBackClosesPanel(isPanelOpen: () => boolean, closeOpenPa
     { immediate: true },
   )
 
-  const unregisterPops = setReaderPopHandler(claimPop)
-  const unregisterBackButton = setReaderBackHandler(closeOpenPanel)
+  const unregister = registerReaderPanelHistory({ closeOpenPanel, claimPop, releaseEntry })
   if (startsOnPanelEntry) stepOffPanelEntry()
 
   onBeforeRouteLeave(() => releaseEntry())
 
-  onScopeDispose(() => {
-    unregisterPops()
-    unregisterBackButton()
-  })
+  onScopeDispose(unregister)
 }

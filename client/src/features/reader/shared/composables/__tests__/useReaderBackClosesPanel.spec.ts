@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, nextTick, ref, type EffectScope } from 'vue'
-import { closeReaderPanelOnBack, installReaderPanelPopFilter } from '../../lib/reader-navigation'
+import type { Router } from 'vue-router'
+import { closeReaderPanelOnBack, installReaderPanelPopFilter, leaveReader } from '../../lib/reader-navigation'
 import { useReaderBackClosesPanel } from '../useReaderBackClosesPanel'
 
 const leaveGuards = vi.hoisted(() => [] as Array<() => unknown>)
@@ -135,6 +136,26 @@ describe('useReaderBackClosesPanel', () => {
     await leaveGuard()
 
     expect(history.state).toEqual({ position: 1 })
+    expect(routerPop).not.toHaveBeenCalled()
+  })
+
+  it('drops the panel entry before the header Go back leaves the book', async () => {
+    const { panels } = mount()
+    panels.value = 1
+    await settle()
+    const stateWhenLeaving: unknown[] = []
+    const router = {
+      currentRoute: { value: { path: '/read/1/2', fullPath: '/read/1/2' } },
+      back: vi.fn<() => void>(),
+      isReady: () => Promise.resolve(),
+      replace: vi.fn<() => Promise<void>>(async () => {
+        stateWhenLeaving.push(history.state)
+      }),
+    } as unknown as Router
+
+    await leaveReader(router)
+
+    expect(stateWhenLeaving).toEqual([{ position: 1 }])
     expect(routerPop).not.toHaveBeenCalled()
   })
 

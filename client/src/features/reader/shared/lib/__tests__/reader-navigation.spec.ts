@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Router } from 'vue-router'
-import { closeReaderPanelOnBack, exitReader, isReaderPath, registerReaderReturnRoute, setReaderBackHandler } from '../reader-navigation'
+import {
+  closeReaderPanelOnBack,
+  exitReader,
+  isReaderPath,
+  leaveReader,
+  registerReaderPanelHistory,
+  registerReaderReturnRoute,
+} from '../reader-navigation'
 
 function setHistoryLength(length: number) {
   Object.defineProperty(window.history, 'length', { value: length, configurable: true })
@@ -146,13 +153,45 @@ describe('reader navigation', () => {
   })
 
   it('lets the open reader close a panel on back, until it unregisters', () => {
-    const unregister = setReaderBackHandler(() => true)
+    const unregister = registerReaderPanelHistory(panelHistory({ closeOpenPanel: () => true }))
 
     expect(closeReaderPanelOnBack()).toBe(true)
     unregister()
     expect(closeReaderPanelOnBack()).toBe(false)
   })
+
+  it('releases the open panel history entry before leaving through history', async () => {
+    window.history.replaceState({ back: '/book/1?tab=details' }, '', '/read/1/2?format=epub')
+    const calls: string[] = []
+    const unregister = registerReaderPanelHistory(
+      panelHistory({
+        releaseEntry: async () => {
+          calls.push('release')
+        },
+      }),
+    )
+    const router = makeRouter()
+    const back = router.back
+    router.back = vi.fn<() => Promise<void>>(async () => {
+      calls.push('back')
+      await back()
+    })
+
+    await leaveReader(router)
+
+    expect(calls).toEqual(['release', 'back'])
+    unregister()
+  })
 })
+
+function panelHistory(overrides: Partial<Parameters<typeof registerReaderPanelHistory>[0]> = {}) {
+  return {
+    closeOpenPanel: () => false,
+    claimPop: () => false,
+    releaseEntry: () => Promise.resolve(),
+    ...overrides,
+  }
+}
 
 describe('registerReaderReturnRoute', () => {
   function makeHarness() {
