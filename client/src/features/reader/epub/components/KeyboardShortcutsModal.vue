@@ -24,7 +24,7 @@ const shortcutGroups = computed(() => [
   {
     title: t('reader.shortcuts.groups.reading'),
     shortcuts: [
-      { key: '← →', description: t('reader.shortcuts.prevNextPage') },
+      { key: '← → ↑ ↓', description: t('reader.shortcuts.prevNextPage') },
       { key: 'Home', description: t('reader.shortcuts.goToStart') },
       { key: 'End', description: t('reader.shortcuts.goToEnd') },
     ],

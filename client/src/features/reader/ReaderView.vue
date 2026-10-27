@@ -11,6 +11,7 @@ import { leaveReader } from './shared/lib/reader-navigation'
 import { useReaderPageTitle } from './shared/composables/useReaderPageTitle'
 import { useReaderState } from './epub/composables/useReaderState'
 import { useReaderSettings } from './shared/composables/useReaderSettings'
+import { useReaderBackClosesPanel } from './shared/composables/useReaderBackClosesPanel'
 import { useCustomFonts } from './epub/composables/useCustomFonts'
 import { useVisibility } from './shared/composables/useVisibility'
 import { useWakeLock } from './shared/composables/useWakeLock'
@@ -213,19 +214,26 @@ function handleToggleBookmark() {
   void toggleBookmark()
 }
 
-function closeAnyPanel() {
+function closeOpenPanel(keepPinnedSidebar = false): boolean {
   if (showTapZones.value) {
     showTapZones.value = false
   } else if (showSearch.value) {
     closeSearch()
-  } else if (showSidebar.value) {
+  } else if (showSidebar.value && !(keepPinnedSidebar && isSidebarPinned.value)) {
     showSidebar.value = false
   } else if (showSettings.value) {
     showSettings.value = false
-  } else if (!readAloud.closePanel()) {
-    handleMiddleTap()
+  } else {
+    return readAloud.closePanel()
   }
+  return true
 }
+
+function closeAnyPanel() {
+  if (!closeOpenPanel()) handleMiddleTap()
+}
+
+useReaderBackClosesPanel(() => closeOpenPanel(true))
 
 const { showHelpModal } = useReaderKeyboardShortcuts({
   toggleSidebar: () => {

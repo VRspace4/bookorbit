@@ -268,24 +268,25 @@ export function useFoliateInput(
       if (isNavigating) return
 
       const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0
+      // In scrolled flow the finger already pages, so every touch tap toggles the chrome.
+      const hasPageZones = !isMobile || !isScrolledFlow()
       const y = e.data.clientY
       const height = window.innerHeight
 
       if (!isMobile && (y < 64 || y > height - 64)) {
         onMiddleTap?.()
-      } else if (currentZone === 'left' && !isMobile) {
+      } else if (currentZone === 'left' && hasPageZones) {
         if (!canProceedNavigation()) return
         isNavigating = true
         navigateLeft()
         setTimeout(() => (isNavigating = false), 300)
-      } else if (currentZone === 'right' && !isMobile) {
+      } else if (currentZone === 'right' && hasPageZones) {
         if (!canProceedNavigation()) return
         isNavigating = true
         navigateRight()
         setTimeout(() => (isNavigating = false), 300)
       } else if (isMobile) {
-        // Touch has no page zones: any tap that is not a double tap toggles the chrome. On a
-        // pointer device the middle zone is deliberately inert, so it must not fall through here.
+        // On a pointer device the middle zone is deliberately inert, so it must not fall through here.
         onMiddleTap?.()
       }
     }, DOUBLE_CLICK_MS)
@@ -348,6 +349,8 @@ export function useFoliateInput(
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // A control that already used the key (the sheet grabber resizes on arrows) keeps it.
+    if (e.defaultPrevented) return
     const target = (e.composedPath?.()[0] || e.target) as HTMLElement | null
     if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable) return
     const view = getViewEl()
@@ -360,11 +363,11 @@ export function useFoliateInput(
       e.preventDefault()
       if (!canProceedNavigation()) return
       navigateRight()
-    } else if (e.key === 'PageUp') {
+    } else if (e.key === 'PageUp' || e.key === 'ArrowUp') {
       e.preventDefault()
       if (!canProceedNavigation()) return
       navigatePrev()
-    } else if (e.key === 'PageDown') {
+    } else if (e.key === 'PageDown' || e.key === 'ArrowDown') {
       e.preventDefault()
       if (!canProceedNavigation()) return
       navigateNext()

@@ -1,5 +1,5 @@
 import type { Router } from 'vue-router'
-import { exitReader, isReaderPath } from '@/features/reader/shared/lib/reader-navigation'
+import { closeReaderPanelOnBack, exitReader, isReaderPath } from '@/features/reader/shared/lib/reader-navigation'
 import { isCapacitorNative } from './native-app'
 
 export function registerNativeBackButton(router: Router): void {
@@ -9,6 +9,7 @@ export function registerNativeBackButton(router: Router): void {
     .then(({ App }) =>
       App.addListener('backButton', () => {
         if (isReaderPath(router.currentRoute.value.path)) {
+          if (closeReaderPanelOnBack()) return
           void exitReader(router)
           return
         }

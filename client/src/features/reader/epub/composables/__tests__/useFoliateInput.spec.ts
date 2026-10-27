@@ -499,6 +499,103 @@ describe('useFoliateInput', () => {
     }
   })
 
+  it('pages with the up and down arrows in both flows', () => {
+    for (const flow of ['paginated', 'scrolled']) {
+      const prev = vi.fn<() => void>()
+      const next = vi.fn<() => void>()
+      const view: ViewLike = {
+        prev,
+        next,
+        getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+        renderer: { getAttribute: (name) => (name === 'flow' ? flow : null) },
+      }
+      const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>())
+
+      const down = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
+      document.dispatchEvent(down)
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }))
+
+      expect(next).toHaveBeenCalledTimes(1)
+      expect(prev).toHaveBeenCalledTimes(1)
+      expect(down.defaultPrevented).toBe(true)
+
+      input.cleanup()
+    }
+  })
+
+  it('leaves keys that another control already handled', () => {
+    const next = vi.fn<() => void>()
+    const view: ViewLike = { prev: vi.fn<() => void>(), next, getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect }
+    const input = useFoliateInput(() => view, undefined, vi.fn<() => void>(), vi.fn<() => void>())
+    const grabber = document.createElement('button')
+    grabber.addEventListener('keydown', (e) => e.preventDefault())
+    document.body.appendChild(grabber)
+
+    grabber.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+
+    expect(next).not.toHaveBeenCalled()
+
+    grabber.remove()
+    input.cleanup()
+  })
+
+  describe('on a touch screen', () => {
+    let originalMaxTouchPoints: PropertyDescriptor | undefined
+
+    function tapAt(doc: DocTarget, clientX: number) {
+      doc.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      window.dispatchEvent(new MessageEvent('message', { data: { type: 'foliate-click', clientX, clientY: 50 }, origin: window.location.origin }))
+      vi.advanceTimersByTime(600)
+    }
+
+    function setup(flow: string) {
+      vi.useFakeTimers()
+      originalMaxTouchPoints = Object.getOwnPropertyDescriptor(navigator, 'maxTouchPoints')
+      Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, get: () => 5 })
+      const view: ViewLike = {
+        prev: vi.fn<() => void>(),
+        next: vi.fn<() => void>(),
+        getBoundingClientRect: () => ({ left: 0, width: 100 }) as DOMRect,
+        renderer: { getAttribute: (name) => (name === 'flow' ? flow : null) },
+      }
+      const onMiddleTap = vi.fn<() => void>()
+      const input = useFoliateInput(() => view, onMiddleTap, vi.fn<() => void>(), vi.fn<() => void>())
+      const doc = makeDocTarget()
+      input.attachIframeClicks(doc)
+      return { view, onMiddleTap, input, doc }
+    }
+
+    afterEach(() => {
+      if (originalMaxTouchPoints) Object.defineProperty(navigator, 'maxTouchPoints', originalMaxTouchPoints)
+      else Reflect.deleteProperty(navigator, 'maxTouchPoints')
+    })
+
+    it('turns the page from the edge zones and toggles the chrome from the middle', () => {
+      const { view, onMiddleTap, input, doc } = setup('paginated')
+
+      tapAt(doc, 5)
+      tapAt(doc, 95)
+      tapAt(doc, 50)
+
+      expect(view.prev).toHaveBeenCalledTimes(1)
+      expect(view.next).toHaveBeenCalledTimes(1)
+      expect(onMiddleTap).toHaveBeenCalledTimes(1)
+
+      input.cleanup()
+    })
+
+    it('keeps every tap toggling the chrome in scrolled flow, where the finger does the paging', () => {
+      const { view, onMiddleTap, input, doc } = setup('scrolled')
+
+      tapAt(doc, 95)
+
+      expect(view.next).not.toHaveBeenCalled()
+      expect(onMiddleTap).toHaveBeenCalledTimes(1)
+
+      input.cleanup()
+    })
+  })
+
   it('routes click-zone window messages through physical left and right helpers when available', () => {
     vi.useFakeTimers()
 
