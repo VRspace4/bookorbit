@@ -46,15 +46,15 @@ describe('UsersPage', () => {
     })
   })
 
-  it('shows create user CTA when embedded on users tab', async () => {
+  it('shows a single create user CTA when embedded on users tab', async () => {
     const wrapper = shallowMount(UsersPage, { props: { embedded: true } })
     await flushPromises()
 
-    const createButton = wrapper.findAll('button').find((button) => button.text().includes('Create user'))
-    expect(createButton).toBeDefined()
+    const createButtons = wrapper.findAll('button').filter((button) => button.text().includes('Create user'))
+    expect(createButtons).toHaveLength(1)
     expect(wrapper.find('user-form-drawer-stub').exists()).toBe(false)
 
-    await createButton?.trigger('click')
+    await createButtons[0]?.trigger('click')
 
     expect(wrapper.find('user-form-drawer-stub').exists()).toBe(true)
   })

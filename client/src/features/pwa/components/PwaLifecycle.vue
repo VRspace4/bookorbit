@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Download, RefreshCcw, Smartphone, X } from 'lucide-vue-next'
+import { Download, RefreshCcw, Smartphone, X } from '@lucide/vue'
 import { useInstallPrompt } from '../composables/useInstallPrompt'
 import { usePwaServiceWorker } from '../composables/usePwaServiceWorker'
 

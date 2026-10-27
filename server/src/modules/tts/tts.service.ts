@@ -13,6 +13,11 @@ const KOKORO_MODEL = 'hexgrad/kokoro-82m';
 const XAI_TTS_MODEL = 'x-ai/grok-voice-tts-1.0';
 const GPT_4O_MINI_TTS_MODEL = 'openai/gpt-4o-mini-tts-2025-12-15';
 const REQUEST_TIMEOUT_MS = 120_000;
+/** Official xAI TTS speaking-rate range (see docs.x.ai text-to-speech). */
+const XAI_TTS_SPEED_MIN = 0.7;
+const XAI_TTS_SPEED_MAX = 1.5;
+const OPENROUTER_TTS_SPEED_MIN = 0.5;
+const OPENROUTER_TTS_SPEED_MAX = 2;
 
 interface AudioProxyResult {
   buffer: Buffer;
@@ -33,6 +38,8 @@ export class TtsService {
       text: dto.text,
       voice: dto.voice || 'Eve',
       speed: dto.speed,
+      speedMin: XAI_TTS_SPEED_MIN,
+      speedMax: XAI_TTS_SPEED_MAX,
     });
   }
 
@@ -98,9 +105,18 @@ export class TtsService {
   private async synthesizeOpenRouter(
     provider: string,
     apiKey: string,
-    dto: { model: string; text: string; voice: string; speed?: number },
+    dto: {
+      model: string;
+      text: string;
+      voice: string;
+      speed?: number;
+      speedMin?: number;
+      speedMax?: number;
+    },
   ): Promise<AudioProxyResult> {
-    const speed = dto.speed === undefined ? 1 : Math.min(2, Math.max(0.5, dto.speed));
+    const min = dto.speedMin ?? OPENROUTER_TTS_SPEED_MIN;
+    const max = dto.speedMax ?? OPENROUTER_TTS_SPEED_MAX;
+    const speed = dto.speed === undefined ? 1 : Math.min(max, Math.max(min, dto.speed));
     const response = await this.fetchWithTimeout(OPENROUTER_TTS_ENDPOINT, {
       method: 'POST',
       headers: {

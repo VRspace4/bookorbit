@@ -206,6 +206,41 @@ export const usesNegativePageScroll = (vertical, pageProgressionRtl) => pageProg
 export const getPageScrollOffset = (page, size, vertical, pageProgressionRtl) =>
   size * (usesNegativePageScroll(vertical, pageProgressionRtl) ? -page : page)
 
+/**
+ * Page index (including Foliate's leading blank page) for a rect in paginated mode.
+ * Uses a trailing-edge bias so glyphs that straddle the previous column do not
+ * restore one page early (floor(left/size)+1 alone does).
+ */
+export const getPaginatedAnchorPage = (left, right, size, negativeScroll = false) => {
+  if (!(size > 0)) return negativeScroll ? -1 : 1
+  const span = Math.max(0, right - left)
+  const offset = span > 0 ? right - Math.min(span * 0.25, 1) : left
+  return Math.floor(offset / size) + (negativeScroll ? -1 : 1)
+}
+
+/**
+ * Choose which client rect to use when anchoring a multi-rect range.
+ * The first rect is often a previous-column leftover or the start of a block that
+ * began on the prior page; the median rect sits mid-page for a full visible range.
+ */
+export const pickAnchorClientRect = (rects, vertical = false) => {
+  const list = Array.from(rects ?? []).filter((r) => r && r.width > 0 && r.height > 0)
+  if (!list.length) return Array.from(rects ?? [])[0] ?? null
+  if (list.length === 1) return list[0]
+  const axis = vertical ? (r) => r.top + r.height / 2 : (r) => r.left + r.width / 2
+  const sorted = list.slice().sort((a, b) => axis(a) - axis(b))
+  return sorted[Math.floor(sorted.length / 2)]
+}
+
+/**
+ * Content page index (0-based, excluding blank padding) for a section fraction anchor.
+ */
+export const getPaginatedFractionPage = (anchor, textPages) => {
+  const pages = Math.max(1, textPages)
+  const fraction = typeof anchor === 'number' && Number.isFinite(anchor) ? anchor : 0
+  return Math.min(pages - 1, Math.max(0, Math.floor(fraction * pages + 1e-9)))
+}
+
 export const normalizeStylesheetForReader = (data, width = innerWidth, height = innerHeight) =>
   data
     // unprefix as most of the props are (only) supported unprefixed
@@ -908,8 +943,14 @@ export class Paginator extends HTMLElement {
       const offset = this.#getRectMapper()(rect).left - this.#margin
       return this.#scrollTo(offset, reason)
     }
-    const offset = this.#getRectMapper()(rect).left
-    return this.#scrollToPage(Math.floor(offset / this.size) + (usesNegativePageScroll(this.#vertical, this.#rtl) ? -1 : 1), reason)
+    const mapped = this.#getRectMapper()(rect)
+    const page = getPaginatedAnchorPage(
+      mapped.left,
+      mapped.right,
+      this.size,
+      usesNegativePageScroll(this.#vertical, this.#rtl),
+    )
+    return this.#scrollToPage(page, reason)
   }
   async #scrollTo(offset, reason, smooth) {
     const element = this.#container
@@ -944,9 +985,10 @@ export class Paginator extends HTMLElement {
     const rects = uncollapse(anchor)?.getClientRects?.()
     // if anchor is an element or a range
     if (rects) {
-      // when the start of the range is immediately after a hyphen in the
-      // previous column, there is an extra zero width rect in that column
-      const rect = Array.from(rects).find((r) => r.width > 0 && r.height > 0) || rects[0]
+      // Prefer the mid-range rect, not the first box. First boxes are often
+      // previous-column leftovers (hyphenation) or the start of a block that began
+      // on the prior page — both restore one visual page early.
+      const rect = pickAnchorClientRect(rects, this.#vertical)
       if (!rect) return
       await this.#scrollToRect(rect, reason)
       return
@@ -958,8 +1000,8 @@ export class Paginator extends HTMLElement {
     }
     const { pages } = this
     if (!pages) return
-    const textPages = pages - 2
-    const newPage = Math.round(anchor * (textPages - 1))
+    const textPages = Math.max(1, pages - 2)
+    const newPage = getPaginatedFractionPage(anchor, textPages)
     await this.#scrollToPage(newPage + 1, reason)
   }
   #getVisibleRange() {
@@ -1014,7 +1056,18 @@ export class Paginator extends HTMLElement {
       )
       this.#view = view
     }
-    await this.scrollToAnchor((typeof anchor === 'function' ? anchor(this.#view.document) : anchor) ?? 0, select)
+    // CFI → Range can throw when the saved path no longer matches the document
+    // (e.g. TTS highlight DOM was present when CFI was written). Keep the section
+    // open at its start rather than failing the whole navigation.
+    let resolvedAnchor = 0
+    try {
+      resolvedAnchor = (typeof anchor === 'function' ? anchor(this.#view.document) : anchor) ?? 0
+    } catch (e) {
+      console.warn(e)
+      console.warn('Anchor resolve failed; opening section without precise position')
+      resolvedAnchor = 0
+    }
+    await this.scrollToAnchor(resolvedAnchor, select)
     if (hasFocus) this.focusView()
   }
   #canGoToIndex(index) {

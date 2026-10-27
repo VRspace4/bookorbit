@@ -108,6 +108,27 @@ describe('useFoliate.open', () => {
     expect(mockGoToFraction).not.toHaveBeenCalled()
   })
 
+  it('re-applies CFI after layout settles so mid-chapter page/scroll is restored', async () => {
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 1, 'epub', 'epubcfi(/6/18!/4/2,/8/1:261)', 0.04)
+
+    // First navigation opens the section; second locks exact page (paginated) or scroll offset (scrolled).
+    expect(mockGoTo.mock.calls.filter((call) => call[0] === 'epubcfi(/6/18!/4/2,/8/1:261)')).toHaveLength(2)
+    expect(mockGoToFraction).not.toHaveBeenCalled()
+  })
+
+  it('re-applies fraction after layout settles for fixed-layout EPUBs', async () => {
+    const book = { type: 'book', rendition: { layout: 'pre-paginated', spread: 'auto' } }
+    ;(window as unknown as { makeStreamingBook: ReturnType<typeof vi.fn> }).makeStreamingBook.mockResolvedValueOnce(book)
+    const foliate = useFoliate(() => container)
+
+    await foliate.open(1, 2, 'epub', 'epubcfi(/6/14)', 0.69)
+
+    expect(mockGoToFraction.mock.calls.filter((call) => call[0] === 0.69)).toHaveLength(2)
+    expect(mockGoTo).not.toHaveBeenCalledWith('epubcfi(/6/14)')
+  })
+
   it('passes the authenticated api fetcher to the streaming book loader', async () => {
     const foliate = useFoliate(() => container)
 
@@ -192,7 +213,8 @@ describe('useFoliate.open', () => {
     await foliate.open(1, 1, 'epub', null, 0.42)
 
     expect(mockGoTo).not.toHaveBeenCalled()
-    expect(mockGoToFraction).toHaveBeenCalledWith(0.42)
+    // Initial navigation + post-layout re-apply for exact scroll/page within the section.
+    expect(mockGoToFraction.mock.calls.filter((call) => call[0] === 0.42)).toHaveLength(2)
   })
 
   it('falls back to position 0 when fallback fraction navigation is unavailable', async () => {

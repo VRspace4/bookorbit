@@ -80,6 +80,18 @@ function getKeepaliveAudio(): HTMLAudioElement {
   return keepaliveAudio
 }
 
+function safePlay(audio: HTMLAudioElement): Promise<void> {
+  try {
+    const result = audio.play()
+    if (result && typeof (result as Promise<void>).then === 'function') {
+      return Promise.resolve(result).then(() => undefined)
+    }
+  } catch {
+    // ignore autoplay / missing media failures
+  }
+  return Promise.resolve()
+}
+
 function startKeepalive() {
   // Native Android uses the Capacitor media-session plugin for OS controls.
   // A looping <audio> element would register a second media session in WebView
@@ -90,8 +102,7 @@ function startKeepalive() {
   if (!audio.paused) return
   keepaliveSyncDepth++
   lastKeepaliveSyncAt = Date.now()
-  void audio
-    .play()
+  void safePlay(audio)
     .catch(() => {
       // Autoplay may be blocked until primed by a user gesture.
     })
@@ -117,27 +128,19 @@ function stopKeepalive() {
 function primeOnFirstGesture() {
   let primed = false
 
-  function onGesture(event: Event) {
+  function onGesture(_event: Event) {
     if (primed) return
-    const target = event.target
-    if (
-      target instanceof Element &&
-      target.closest('[aria-label*="TTS"], .tts-toolbar-play, .tts-toolbar-btn, .tts-toolbar-chip, .tts-toolbar-speed')
-    ) {
-      primed = true
-      document.removeEventListener('click', onGesture, true)
-      document.removeEventListener('touchstart', onGesture, true)
-      return
-    }
     primed = true
     document.removeEventListener('click', onGesture, true)
     document.removeEventListener('touchstart', onGesture, true)
 
+    // Always unlock HTML audio on the first user gesture — including TTS toolbar
+    // taps. Skipping those taps left Web Audio suspended on Opera Android because
+    // AudioContext.resume() never settles without a prior media unlock.
     const audio = getKeepaliveAudio()
     keepaliveSyncDepth++
     lastKeepaliveSyncAt = Date.now()
-    void audio
-      .play()
+    void safePlay(audio)
       .then(() => {
         keepaliveSyncDepth++
         lastKeepaliveSyncAt = Date.now()
@@ -224,9 +227,17 @@ async function registerActionHandlers() {
     ['seekto', noop],
   ]
 
+  // Native Android (@jofr/capacitor-media-session) only resolves setActionHandler when that
+  // media action is first invoked (RETURN_CALLBACK + keepAlive). Awaiting each call would
+  // register only "play" and leave pause/skip handlers unregistered — so headset pause does nothing.
+  // Fire-and-forget registration so every action is wired immediately.
   for (const [action, handler] of actions) {
     try {
-      await MediaSession.setActionHandler({ action }, handler)
+      void Promise.resolve(MediaSession.setActionHandler({ action }, handler)).catch((err: unknown) => {
+        if (err instanceof Error && err.name !== 'NotSupportedError') {
+          console.warn(`[tts-media-session] setActionHandler(${action}) failed:`, err)
+        }
+      })
     } catch (err) {
       if (err instanceof Error && err.name !== 'NotSupportedError') {
         console.warn(`[tts-media-session] setActionHandler(${action}) failed:`, err)
@@ -267,6 +278,9 @@ async function applyMediaSessionState(status: TtsMediaPlaybackStatus, chapterTit
       })
       await MediaSession.setPlaybackState({ playbackState: 'playing' })
       await MediaSession.setPositionState(getPositionState())
+      // Start keepalive during load so mobile browsers unlock media early and
+      // AudioContext.resume does not remain pending indefinitely.
+      startKeepalive()
       break
     case 'speaking':
       await MediaSession.setMetadata({
@@ -325,8 +339,8 @@ export function syncTtsMediaSession() {
 export function suppressTtsMediaSession() {
   mediaSessionSuppressed = true
   stopKeepalive()
-  void MediaSession.setPlaybackState({ playbackState: 'none' }).catch(() => {})
-  void MediaSession.setMetadata({ title: '', artist: '', album: '' }).catch(() => {})
+  void Promise.resolve(MediaSession.setPlaybackState({ playbackState: 'none' })).catch(() => {})
+  void Promise.resolve(MediaSession.setMetadata({ title: '', artist: '', album: '' })).catch(() => {})
 }
 
 export function unsuppressTtsMediaSession() {

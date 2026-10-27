@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, ref, type ComputedRef, type InjectionKey } from 'vue'
 import type { EpubReaderSettings } from '@bookorbit/types'
 import { themes } from '../constants/themes'
 import type { Theme, ThemeMode } from '../constants/themes'
@@ -19,6 +19,14 @@ export interface ReaderState {
   flow: 'paginated' | 'scrolled'
   fixedLayoutSpread: EpubReaderSettings['fixedLayoutSpread']
 }
+
+/** Injected into reader chrome (e.g. settings panel) so it can apply updates without prop lag. */
+export interface EpubReaderUiContext {
+  state: ComputedRef<ReaderState>
+  applyUpdate: (partial: Partial<ReaderState>) => void | Promise<void>
+}
+
+export const epubReaderUiKey: InjectionKey<EpubReaderUiContext> = Symbol('epubReaderUi')
 
 export interface ApplyReaderStateOptions {
   flow?: ReaderState['flow']

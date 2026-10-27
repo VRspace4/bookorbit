@@ -237,6 +237,25 @@ describe('AuthService', () => {
         user: { id: 7, username: 'owner', email: 'owner@example.com' },
       });
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalled();
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({
+        lastLoginAt: expect.any(Date),
+        lastAuthenticatedAt: expect.any(Date),
+      });
+    });
+  });
+
+  describe('issueTokensForUser', () => {
+    it('records login activity when issuing tokens for OIDC/magic-link style auth', async () => {
+      const { service, db, userService } = makeService();
+      const reply = makeReply();
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser({ id: 9 }));
+
+      await service.issueTokensForUser(9, reply);
+
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({
+        lastLoginAt: expect.any(Date),
+        lastAuthenticatedAt: expect.any(Date),
+      });
     });
   });
 
@@ -385,8 +404,37 @@ describe('AuthService', () => {
 
       await service.login({ username: 'jdoe', password: 'pass' }, reply);
 
-      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({ failedLoginAttempts: 0, lockedUntil: null });
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: expect.any(Date),
+          lastAuthenticatedAt: expect.any(Date),
+        }),
+      );
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalled();
+    });
+
+    it('records last login and last authenticated timestamps on successful login', async () => {
+      const { service, db, userService } = makeService();
+      const reply = makeReply();
+      userService.findByUsername.mockResolvedValue({
+        id: 1,
+        username: 'jdoe',
+        active: true,
+        passwordHash: 'mock-hash:pass',
+        tokenVersion: 1,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+      });
+      userService.findByIdWithPermissions.mockResolvedValue(makeFullUser());
+
+      await service.login({ username: 'jdoe', password: 'pass' }, reply);
+
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({
+        lastLoginAt: expect.any(Date),
+        lastAuthenticatedAt: expect.any(Date),
+      });
     });
 
     it('sets auth cookies with automatic Secure mode', async () => {
@@ -536,6 +584,7 @@ describe('AuthService', () => {
       const result = await service.refresh(makeRequest({ refresh_token: 'revoked-token' }), reply);
       expect(result).toEqual({ accessToken: 'signed-jwt' });
       expect(db.delete).not.toHaveBeenCalled();
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({ lastAuthenticatedAt: expect.any(Date) });
     });
 
     it('throws UnauthorizedException when token is expired', async () => {
@@ -580,6 +629,7 @@ describe('AuthService', () => {
       const result = await service.refresh(makeRequest({ refresh_token: 'ok-token' }), reply);
       expect(result).toEqual({ accessToken: 'signed-jwt' });
       expect(db.update).toHaveBeenCalled();
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({ lastAuthenticatedAt: expect.any(Date) });
       expect(oidcSessionRepo.touchActiveByUserId).toHaveBeenCalledWith(5, expect.any(Date));
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalled();
     });
@@ -605,7 +655,7 @@ describe('AuthService', () => {
 
       const result = await service.refresh(makeRequest({ refresh_token: 'ok-token' }), reply);
       expect(result).toEqual({ accessToken: 'signed-jwt' });
-      expect(db.update).not.toHaveBeenCalled();
+      expect((db as unknown as Record<string, vi.Mock>).set).toHaveBeenCalledWith({ lastAuthenticatedAt: expect.any(Date) });
       expect((reply as unknown as { setCookie: vi.Mock }).setCookie).toHaveBeenCalledWith(
         'access_token',
         'signed-jwt',

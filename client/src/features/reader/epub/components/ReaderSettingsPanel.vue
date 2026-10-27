@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { BookOpen, LayoutGrid, Moon, Palette, ScrollText, Sun, Type } from '@lucide/vue'
-import type { ReaderState } from '../composables/useReaderState'
+import { epubReaderUiKey, type ReaderState } from '../composables/useReaderState'
 import type { useCustomFonts } from '../composables/useCustomFonts'
 import { themes } from '../constants/themes'
 import { BUILTIN_READER_FONT_OPTIONS } from '@/features/reader/shared/constants/font-options'
@@ -11,7 +11,8 @@ import { formatFontFamilyLabel } from '@/features/reader/shared/lib/font-display
 const { t } = useI18n()
 
 const props = defineProps<{
-  state: ReaderState
+  /** Fallback for unit tests when inject is not provided. */
+  state?: ReaderState
   customFonts?: ReturnType<typeof useCustomFonts>
   isFixedLayout?: boolean
 }>()
@@ -19,6 +20,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   update: [partial: Partial<ReaderState>]
 }>()
+
+const readerUi = inject(epubReaderUiKey, null)
 
 type Tab = 'appearance' | 'text' | 'layout'
 
@@ -30,6 +33,59 @@ const scrollMemory = ref<Record<Tab, number>>({
   text: 0,
   layout: 0,
 })
+
+function sourceState(): ReaderState {
+  return readerUi?.state.value ?? props.state!
+}
+
+// Local reactive mirror for open-panel chrome.
+// Mode/flow chip selection uses v-if branches with static classes (not :class
+// ternaries). Opera/Android WebView was observed keeping stale selected classes
+// even when viewState.isDark / flow already flipped.
+const viewState = reactive<ReaderState>({ ...sourceState() })
+/** Bumps on every local apply so mode/flow groups always remount. */
+const chromeTick = ref(0)
+let applyingLocally = false
+
+const selectedChipClass =
+  'flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors bg-background text-foreground shadow-sm ring-1 ring-border'
+const idleChipClass =
+  'flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors text-muted-foreground hover:text-foreground hover:bg-background/70'
+
+function pullFromSource() {
+  const next = sourceState()
+  if (!next) return
+  Object.assign(viewState, next)
+}
+
+watch(
+  () => readerUi?.state.value ?? props.state,
+  () => {
+    if (applyingLocally) return
+    pullFromSource()
+  },
+  { deep: true },
+)
+
+function applyUpdate(partial: Partial<ReaderState>) {
+  applyingLocally = true
+  Object.assign(viewState, partial)
+  chromeTick.value += 1
+  const finish = (resync: boolean) => {
+    applyingLocally = false
+    // Only resync when parent owns state via inject (emit-only tests may lag on purpose).
+    if (resync) pullFromSource()
+    chromeTick.value += 1
+  }
+  if (readerUi) {
+    void Promise.resolve(readerUi.applyUpdate(partial)).finally(() => {
+      void nextTick(() => finish(true))
+    })
+  } else {
+    emit('update', partial)
+    void nextTick(() => finish(false))
+  }
+}
 
 const allTabs = computed<{ id: Tab; icon: typeof Palette; label: string }[]>(() => [
   { id: 'appearance', icon: Palette, label: t('reader.settings.tabs.appearance') },
@@ -44,10 +100,10 @@ const stepperGroupClass = 'flex min-w-[11rem] items-center justify-end gap-2'
 const stepperValueClass = 'w-[4rem] text-center text-sm font-mono font-medium tabular-nums text-foreground'
 
 function step(field: keyof ReaderState, delta: number, min: number, max: number, precision = 0) {
-  const current = props.state[field] as number
+  const current = viewState[field] as number
   const next = Math.max(min, Math.min(max, current + delta))
   const rounded = precision > 0 ? Math.round(next * Math.pow(10, precision)) / Math.pow(10, precision) : Math.round(next)
-  emit('update', { [field]: rounded } as Partial<ReaderState>)
+  applyUpdate({ [field]: rounded } as Partial<ReaderState>)
 }
 
 function formatGap(v: number) {
@@ -123,20 +179,20 @@ watch(
 function selectCustomFont(familyName: string) {
   if (!props.customFonts) return
   const cssFamilyName = props.customFonts.getCssFamilyForDisplay(familyName)
-  if (cssFamilyName) emit('update', { fontFamily: cssFamilyName })
+  if (cssFamilyName) applyUpdate({ fontFamily: cssFamilyName })
 }
 
 function isCustomFontSelected(familyName: string): boolean {
   if (!props.customFonts) return false
-  return props.customFonts.isFontFamilySelected(familyName, props.state.fontFamily)
+  return props.customFonts.isFontFamilySelected(familyName, viewState.fontFamily)
 }
 
 function setFixedLayoutSpreadAuto() {
-  emit('update', { fixedLayoutSpread: 'auto' })
+  applyUpdate({ fixedLayoutSpread: 'auto' })
 }
 
 function setFixedLayoutSpreadNone() {
-  emit('update', { fixedLayoutSpread: 'none' })
+  applyUpdate({ fixedLayoutSpread: 'none' })
 }
 </script>
 
@@ -171,27 +227,44 @@ function setFixedLayoutSpreadNone() {
         <div class="space-y-6">
           <div>
             <p class="mb-2 text-[13px] font-medium text-foreground/90">{{ t('reader.settings.appearance.mode') }}</p>
-            <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
+            <!-- Static class branches (v-if) + chromeTick: avoid sticky :class on mobile WebView -->
+            <div :key="`mode-${viewState.isDark}-${chromeTick}`" class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
               <button
-                class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
-                :class="
-                  !state.isDark
-                    ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                "
-                @click="emit('update', { isDark: false })"
+                v-if="!viewState.isDark"
+                type="button"
+                :class="selectedChipClass"
+                aria-pressed="true"
+                @click="applyUpdate({ isDark: false })"
               >
                 <Sun :size="15" />
                 <span>{{ t('reader.settings.appearance.light') }}</span>
               </button>
               <button
-                class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
-                :class="
-                  state.isDark
-                    ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                "
-                @click="emit('update', { isDark: true })"
+                v-else
+                type="button"
+                :class="idleChipClass"
+                aria-pressed="false"
+                @click="applyUpdate({ isDark: false })"
+              >
+                <Sun :size="15" />
+                <span>{{ t('reader.settings.appearance.light') }}</span>
+              </button>
+              <button
+                v-if="viewState.isDark"
+                type="button"
+                :class="selectedChipClass"
+                aria-pressed="true"
+                @click="applyUpdate({ isDark: true })"
+              >
+                <Moon :size="15" />
+                <span>{{ t('reader.settings.appearance.dark') }}</span>
+              </button>
+              <button
+                v-else
+                type="button"
+                :class="idleChipClass"
+                aria-pressed="false"
+                @click="applyUpdate({ isDark: true })"
               >
                 <Moon :size="15" />
                 <span>{{ t('reader.settings.appearance.dark') }}</span>
@@ -208,14 +281,14 @@ function setFixedLayoutSpreadNone() {
                 v-for="theme in themes"
                 :key="theme.name"
                 class="group flex flex-col items-center gap-1.5"
-                @click="emit('update', { themeName: theme.name })"
+                @click="applyUpdate({ themeName: theme.name })"
               >
                 <div
                   class="flex h-9 w-9 items-center justify-center rounded-full border-2 shadow-sm transition-all"
-                  :class="state.themeName === theme.name ? 'scale-110 border-primary' : 'border-transparent group-hover:border-muted-foreground/40'"
-                  :style="{ background: state.isDark ? theme.dark.bg : theme.light.bg }"
+                  :class="viewState.themeName === theme.name ? 'scale-110 border-primary' : 'border-transparent group-hover:border-muted-foreground/40'"
+                  :style="{ background: viewState.isDark ? theme.dark.bg : theme.light.bg }"
                 >
-                  <div class="h-2.5 w-2.5 rounded-full" :style="{ background: state.isDark ? theme.dark.fg : theme.light.fg }" />
+                  <div class="h-2.5 w-2.5 rounded-full" :style="{ background: viewState.isDark ? theme.dark.fg : theme.light.fg }" />
                 </div>
                 <span class="w-full truncate text-center text-[10px] text-muted-foreground">{{ theme.label }}</span>
               </button>
@@ -233,7 +306,7 @@ function setFixedLayoutSpreadNone() {
             </div>
             <div :class="stepperGroupClass">
               <button :class="stepperButtonClass" @click="step('fontSize', -1, 10, 32)">−</button>
-              <span :class="stepperValueClass">{{ state.fontSize }}px</span>
+              <span :class="stepperValueClass">{{ viewState.fontSize }}px</span>
               <button :class="stepperButtonClass" @click="step('fontSize', 1, 10, 32)">+</button>
             </div>
           </div>
@@ -245,7 +318,7 @@ function setFixedLayoutSpreadNone() {
             </div>
             <div :class="stepperGroupClass">
               <button :class="stepperButtonClass" @click="step('lineHeight', -0.1, 0.8, 3, 1)">−</button>
-              <span :class="stepperValueClass">{{ state.lineHeight.toFixed(1) }}</span>
+              <span :class="stepperValueClass">{{ viewState.lineHeight.toFixed(1) }}</span>
               <button :class="stepperButtonClass" @click="step('lineHeight', 0.1, 0.8, 3, 1)">+</button>
             </div>
           </div>
@@ -265,12 +338,12 @@ function setFixedLayoutSpreadNone() {
                   :key="String(font.value)"
                   class="rounded-lg border px-3 py-1.5 text-sm transition-colors"
                   :class="
-                    state.fontFamily === font.value
+                    viewState.fontFamily === font.value
                       ? 'border-primary bg-primary text-primary-foreground'
                       : 'border-border hover:border-muted-foreground/40 hover:bg-muted'
                   "
                   :style="font.value ? { fontFamily: font.value } : {}"
-                  @click="emit('update', { fontFamily: font.value })"
+                  @click="applyUpdate({ fontFamily: font.value })"
                 >
                   {{ font.label }}
                 </button>
@@ -315,7 +388,7 @@ function setFixedLayoutSpreadNone() {
                 <button
                   class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
                   :class="
-                    state.fixedLayoutSpread === 'auto'
+                    viewState.fixedLayoutSpread === 'auto'
                       ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
                       : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
                   "
@@ -327,7 +400,7 @@ function setFixedLayoutSpreadNone() {
                 <button
                   class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
                   :class="
-                    state.fixedLayoutSpread === 'none'
+                    viewState.fixedLayoutSpread === 'none'
                       ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
                       : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
                   "
@@ -346,27 +419,43 @@ function setFixedLayoutSpreadNone() {
                 <p class="text-sm font-medium leading-tight">{{ t('reader.settings.layout.readingFlow') }}</p>
                 <p class="text-xs leading-tight text-muted-foreground">{{ t('reader.settings.layout.readingFlowDescription') }}</p>
               </div>
-              <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
+              <div :key="`flow-${viewState.flow}-${chromeTick}`" class="grid grid-cols-2 gap-1 rounded-lg bg-muted/55 p-1">
                 <button
-                  class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
-                  :class="
-                    state.flow === 'paginated'
-                      ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                  "
-                  @click="emit('update', { flow: 'paginated' })"
+                  v-if="viewState.flow === 'paginated'"
+                  type="button"
+                  :class="selectedChipClass"
+                  aria-pressed="true"
+                  @click="applyUpdate({ flow: 'paginated' })"
                 >
                   <BookOpen :size="15" />
                   <span>{{ t('reader.settings.layout.paginated') }}</span>
                 </button>
                 <button
-                  class="flex h-[2.125rem] items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors"
-                  :class="
-                    state.flow === 'scrolled'
-                      ? 'bg-background text-foreground shadow-sm ring-1 ring-border'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-background/70'
-                  "
-                  @click="emit('update', { flow: 'scrolled' })"
+                  v-else
+                  type="button"
+                  :class="idleChipClass"
+                  aria-pressed="false"
+                  @click="applyUpdate({ flow: 'paginated' })"
+                >
+                  <BookOpen :size="15" />
+                  <span>{{ t('reader.settings.layout.paginated') }}</span>
+                </button>
+                <button
+                  v-if="viewState.flow === 'scrolled'"
+                  type="button"
+                  :class="selectedChipClass"
+                  aria-pressed="true"
+                  @click="applyUpdate({ flow: 'scrolled' })"
+                >
+                  <ScrollText :size="15" />
+                  <span>{{ t('reader.settings.layout.scrolled') }}</span>
+                </button>
+                <button
+                  v-else
+                  type="button"
+                  :class="idleChipClass"
+                  aria-pressed="false"
+                  @click="applyUpdate({ flow: 'scrolled' })"
                 >
                   <ScrollText :size="15" />
                   <span>{{ t('reader.settings.layout.scrolled') }}</span>
@@ -384,7 +473,7 @@ function setFixedLayoutSpreadNone() {
                 </div>
                 <div :class="stepperGroupClass">
                   <button :class="stepperButtonClass" @click="step('maxColumnCount', -1, 1, 10)">−</button>
-                  <span :class="stepperValueClass">{{ state.maxColumnCount }}</span>
+                  <span :class="stepperValueClass">{{ viewState.maxColumnCount }}</span>
                   <button :class="stepperButtonClass" @click="step('maxColumnCount', 1, 1, 10)">+</button>
                 </div>
               </div>
@@ -396,7 +485,7 @@ function setFixedLayoutSpreadNone() {
                 </div>
                 <div :class="stepperGroupClass">
                   <button :class="stepperButtonClass" @click="step('gap', -0.01, 0, 0.5, 2)">−</button>
-                  <span :class="stepperValueClass">{{ formatGap(state.gap) }}</span>
+                  <span :class="stepperValueClass">{{ formatGap(viewState.gap) }}</span>
                   <button :class="stepperButtonClass" @click="step('gap', 0.01, 0, 0.5, 2)">+</button>
                 </div>
               </div>
@@ -408,7 +497,7 @@ function setFixedLayoutSpreadNone() {
                 </div>
                 <div :class="stepperGroupClass">
                   <button :class="stepperButtonClass" @click="step('maxInlineSize', -40, 400, 1600)">−</button>
-                  <span :class="stepperValueClass">{{ state.maxInlineSize }}px</span>
+                  <span :class="stepperValueClass">{{ viewState.maxInlineSize }}px</span>
                   <button :class="stepperButtonClass" @click="step('maxInlineSize', 40, 400, 1600)">+</button>
                 </div>
               </div>
@@ -424,12 +513,12 @@ function setFixedLayoutSpreadNone() {
                 </div>
                 <button
                   class="relative h-6 w-11 shrink-0 rounded-full transition-colors"
-                  :class="state.justify ? 'bg-primary' : 'bg-muted'"
-                  @click="emit('update', { justify: !state.justify })"
+                  :class="viewState.justify ? 'bg-primary' : 'bg-muted'"
+                  @click="applyUpdate({ justify: !viewState.justify })"
                 >
                   <div
                     class="absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
-                    :class="state.justify ? 'translate-x-6' : 'translate-x-1'"
+                    :class="viewState.justify ? 'translate-x-6' : 'translate-x-1'"
                   />
                 </button>
               </div>
@@ -441,12 +530,12 @@ function setFixedLayoutSpreadNone() {
                 </div>
                 <button
                   class="relative h-6 w-11 shrink-0 rounded-full transition-colors"
-                  :class="state.hyphenate ? 'bg-primary' : 'bg-muted'"
-                  @click="emit('update', { hyphenate: !state.hyphenate })"
+                  :class="viewState.hyphenate ? 'bg-primary' : 'bg-muted'"
+                  @click="applyUpdate({ hyphenate: !viewState.hyphenate })"
                 >
                   <div
                     class="absolute top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
-                    :class="state.hyphenate ? 'translate-x-6' : 'translate-x-1'"
+                    :class="viewState.hyphenate ? 'translate-x-6' : 'translate-x-1'"
                   />
                 </button>
               </div>

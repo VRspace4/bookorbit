@@ -193,8 +193,8 @@ export const compare = (a, b) => {
   return 0
 }
 
-const isTextNode = ({ nodeType }) => nodeType === 3 || nodeType === 4
-const isElementNode = ({ nodeType }) => nodeType === 1
+const isTextNode = (node) => !!node && (node.nodeType === 3 || node.nodeType === 4)
+const isElementNode = (node) => !!node && node.nodeType === 1
 
 const getChildNodes = (node, filter) => {
   const nodes = Array.from(node.childNodes)
@@ -308,16 +308,24 @@ export const toRange = (doc, parts, filter) => {
   const root = doc.documentElement
   const start = partsToNode(root, startParts[0], filter)
   const end = partsToNode(root, endParts[0], filter)
-
   const range = doc.createRange()
+
+  // Path miss (undefined node mid-walk) must not throw — callers treat throws as
+  // "section unreadable" and may skip to the next spine section.
+  if (!start?.node || !end?.node) {
+    if (root?.firstChild) range.selectNodeContents(root)
+    else range.setStart(root, 0)
+    range.collapse(true)
+    return range
+  }
 
   if (start.before) range.setStartBefore(start.node)
   else if (start.after) range.setStartAfter(start.node)
-  else range.setStart(start.node, start.offset)
+  else range.setStart(start.node, start.offset ?? 0)
 
   if (end.before) range.setEndBefore(end.node)
   else if (end.after) range.setEndAfter(end.node)
-  else range.setEnd(end.node, end.offset)
+  else range.setEnd(end.node, end.offset ?? 0)
   return range
 }
 

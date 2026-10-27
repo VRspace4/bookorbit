@@ -16,9 +16,10 @@ export class XaiTtsDto {
   @MaxLength(16)
   language?: string;
 
+  /** Desired speaking-rate multiplier. Clamped to xAI's 0.7–1.5 range in the service. */
   @IsOptional()
   @IsNumber()
   @Min(0.5)
-  @Max(2)
+  @Max(3)
   speed?: number;
 }

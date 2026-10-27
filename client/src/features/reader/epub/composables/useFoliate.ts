@@ -8,6 +8,8 @@ import type { EpubBookInfo, EpubReaderSettings } from '@bookorbit/types'
 export interface RelocateDetail {
   cfi?: string | null
   fraction?: number
+  /** Paginator section-local page fraction (page-1)/(pages-2), paginated only. */
+  sectionFraction?: number | null
   index?: number
   source?: string | null
   koboLocationType?: string | null
@@ -24,10 +26,13 @@ export interface RelocateDetail {
 export interface FoliateRenderer {
   heads?: HTMLElement[]
   feet?: HTMLElement[]
+  scrolled?: boolean
+  pages?: number
   setStyles?: (css: string) => void
   setAttribute: (name: string, value: string) => void
   removeAttribute: (name: string) => void
-  getContents?: () => { index: number }[]
+  getContents?: () => { index?: number; doc?: Document }[]
+  scrollToAnchor?: (anchor: Range | Element | number, select?: boolean) => Promise<void>
 }
 
 export interface FoliateLocationContext {
@@ -37,6 +42,15 @@ export interface FoliateLocationContext {
 
 export interface EpubOpenOptions {
   fixedLayoutSpread?: EpubReaderSettings['fixedLayoutSpread']
+  /** When true, show "Restoring reader…" instead of the full loading spinner. */
+  hasCachedProgress?: boolean
+  /** Prefer jumping straight to this spine section during open (TTS resume). */
+  initialSectionIndex?: number
+  /**
+   * Paginated EPUB: section-local page fraction (page-1)/(pages-2) from the last
+   * session. Applied after CFI so restore hits the same visual page.
+   */
+  sectionFraction?: number | null
 }
 
 type FoliateFetchFile = ((input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) & {
@@ -50,6 +64,33 @@ function isResolvedNavigation(value: unknown): boolean {
 
 function isFixedLayoutBook(book: unknown): boolean {
   return Boolean(book && typeof book === 'object' && (book as { rendition?: { layout?: unknown } }).rendition?.layout === 'pre-paginated')
+}
+
+/** Wait for post-load style application (setTimeout 0), paint, and section fonts. */
+async function waitForReaderLayoutSettle(view: {
+  renderer?: FoliateRenderer & { getContents?: () => { doc?: Document }[] }
+}): Promise<void> {
+  // Load handler applies styles on a macrotask; let that run first.
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0)
+  })
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+  const doc = view.renderer?.getContents?.()?.[0]?.doc
+  if (doc?.fonts?.ready) {
+    try {
+      await doc.fonts.ready
+    } catch {
+      // Font loading failures should not block position restore.
+    }
+  }
+  // One more frame after fonts so column pagination / scroll metrics match final layout.
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve())
+  })
 }
 
 function applyEpubOpenOptions(book: unknown, options: EpubOpenOptions | undefined) {
@@ -77,13 +118,27 @@ export function useFoliate(
   onRelocate?: (detail: RelocateDetail) => void,
   onApplyStyles?: (renderer: FoliateRenderer) => void,
   onMiddleTap?: () => void,
+  onDocumentLoad?: (doc: Document) => void,
 ) {
   const loading = ref(false)
+  const restoring = ref(false)
   const error = ref<string | null>(null)
   const fraction = ref(0)
   const viewRef = ref<unknown>(null)
   const bookLanguage = ref<string>('en')
   const isFixedLayout = ref(false)
+
+  let initialRestoreDone: Promise<void> | undefined
+  let resolveInitialRestore: (() => void) | undefined
+
+  function finishInitialRestore() {
+    resolveInitialRestore?.()
+    resolveInitialRestore = undefined
+  }
+
+  async function waitForInitialRestore() {
+    await initialRestoreDone
+  }
 
   let onAnnotationClick: ((cfi: string, popupPosition: { x: number; y: number; showBelow: boolean }) => void) | null = null
 
@@ -94,6 +149,16 @@ export function useFoliate(
   const annotations = useFoliateAnnotations()
   const selection = useFoliateSelection(() => viewRef.value)
   const input = useFoliateInput(() => viewRef.value, onMiddleTap, selection.handleSelectionEnd, selection.handleSelectionChange)
+
+  function notifyDocumentLoad(doc: Document | null | undefined) {
+    if (!doc) return
+    onDocumentLoad?.(doc)
+    input.attachIframeClicks(doc)
+  }
+
+  function getActiveDocument(): Document | null {
+    return getViewEl()?.renderer?.getContents?.()?.[0]?.doc ?? null
+  }
 
   async function loadScript() {
     if (customElements.get('foliate-view')) return
@@ -110,10 +175,19 @@ export function useFoliate(
   }
 
   async function open(bookId: number, fileId: number, format: string, cfi?: string | null, fallbackFraction?: number, options?: EpubOpenOptions) {
-    const el = container()
-    if (!el) return
+    initialRestoreDone = new Promise<void>((resolve) => {
+      resolveInitialRestore = resolve
+    })
 
-    loading.value = true
+    const el = container()
+    if (!el) {
+      finishInitialRestore()
+      return
+    }
+
+    const hasCachedProgress = options?.hasCachedProgress ?? false
+    restoring.value = hasCachedProgress
+    loading.value = !hasCachedProgress
     error.value = null
     isFixedLayout.value = false
 
@@ -154,6 +228,7 @@ export function useFoliate(
         clearTimeout(loadTimeoutId)
         if (!initialNavigationPending) {
           loading.value = false
+          restoring.value = false
         }
         // The paginator's internal #view reference is updated in a microtask after the
         // 'load' event fires. Deferring to a macrotask ensures setStyles targets the
@@ -162,7 +237,11 @@ export function useFoliate(
           if (onApplyStyles) onApplyStyles(view.renderer)
         }, 0)
         annotations.reAddAll(view)
-        if (detail?.doc) input.attachIframeClicks(detail.doc)
+        if (detail?.doc) {
+          notifyDocumentLoad(detail.doc)
+        } else {
+          notifyDocumentLoad(view.renderer?.getContents?.()?.[0]?.doc)
+        }
       })
 
       view.addEventListener('draw-annotation', (e: Event) => {
@@ -227,12 +306,16 @@ export function useFoliate(
         clearTimeout(loadTimeoutId)
         error.value = detail?.message ?? 'Reader error'
         loading.value = false
+        restoring.value = false
+        finishInitialRestore()
       })
 
       loadTimeoutId = setTimeout(() => {
-        if (loading.value) {
+        if (loading.value || restoring.value) {
           error.value = 'Could not open the book. Your browser may not fully support the reader. Try refreshing or using a different browser.'
           loading.value = false
+          restoring.value = false
+          finishInitialRestore()
         }
       }, 30_000)
 
@@ -270,13 +353,29 @@ export function useFoliate(
         const file = new File([blob], `book-file-${fileId}.${ext}`, { type: mimeType })
         await view.open(file)
       }
+      // Apply flow/font metrics before the first navigation so paginated pages and
+      // scrolled offsets resolve against the reader's real layout, not defaults.
       if (onApplyStyles) onApplyStyles(view.renderer)
+
+      type RestoreMode = 'cfi' | 'fraction' | 'section' | 'start'
+      let restoreMode: RestoreMode = 'start'
       let didNavigate = false
-      if (cfi && !shouldRestoreByFraction) {
+
+      if (options?.initialSectionIndex !== undefined) {
+        await view
+          .goTo(options.initialSectionIndex)
+          .then((result) => {
+            didNavigate = isResolvedNavigation(result) || result === undefined
+            if (didNavigate) restoreMode = 'section'
+          })
+          .catch(() => {})
+      }
+      if (!didNavigate && cfi && !shouldRestoreByFraction) {
         await view
           .goTo(cfi)
           .then((result) => {
             didNavigate = isResolvedNavigation(result)
+            if (didNavigate) restoreMode = 'cfi'
           })
           .catch(() => {})
       }
@@ -285,6 +384,7 @@ export function useFoliate(
           try {
             await view.goToFraction(fallbackFraction)
             didNavigate = true
+            restoreMode = 'fraction'
           } catch {
             didNavigate = false
           }
@@ -292,14 +392,50 @@ export function useFoliate(
       }
       if (!didNavigate) {
         await view.goTo(0).catch(() => {})
+        restoreMode = 'start'
       }
+
+      // Foliate may land on the chapter start first (section load + expand with
+      // anchor 0). After styles/fonts settle, re-apply the exact CFI so paginated
+      // mode restores the same page and scrolled mode restores the same offset.
+      if (restoreMode === 'cfi' || restoreMode === 'fraction') {
+        await waitForReaderLayoutSettle(view)
+        if (onApplyStyles) onApplyStyles(view.renderer)
+        await waitForReaderLayoutSettle(view)
+
+        if (restoreMode === 'cfi' && cfi) {
+          await view.goTo(cfi).catch(() => {})
+        } else if (restoreMode === 'fraction' && fallbackFraction !== undefined && fallbackFraction > 0) {
+          if (typeof view.goToFraction === 'function') {
+            await view.goToFraction(fallbackFraction).catch(() => {})
+          }
+        }
+
+        // After CFI/fraction, re-snap paginated view to the exact saved page.
+        const sectionFraction = options?.sectionFraction
+        if (
+          typeof sectionFraction === 'number' &&
+          Number.isFinite(sectionFraction) &&
+          view.renderer &&
+          view.renderer.scrolled !== true &&
+          typeof view.renderer.scrollToAnchor === 'function'
+        ) {
+          await view.renderer.scrollToAnchor(sectionFraction).catch(() => {})
+        }
+      }
+
       initialNavigationPending = false
       loading.value = false
+      restoring.value = false
+      notifyDocumentLoad(view.renderer?.getContents?.()?.[0]?.doc)
+      finishInitialRestore()
     } catch (e) {
       console.error('[useFoliate]', e)
       clearTimeout(loadTimeoutId)
       error.value = e instanceof Error ? e.message : 'Failed to open book'
       loading.value = false
+      restoring.value = false
+      finishInitialRestore()
     }
   }
 
@@ -360,6 +496,7 @@ export function useFoliate(
 
   return {
     loading,
+    restoring,
     error,
     fraction,
     bookLanguage,
@@ -375,6 +512,8 @@ export function useFoliate(
     getSectionFractions: (): number[] => getViewEl()?.getSectionFractions?.() ?? [],
     getChapters: (): unknown[] => getViewEl()?.book?.toc ?? [],
     getRenderer: (): FoliateRenderer | null => getViewEl()?.renderer ?? null,
+    getActiveDocument,
+    waitForInitialRestore,
     getLocationContext: (target: string): Promise<FoliateLocationContext> => getLocationContext(target),
     addAnnotation: (cfi: string, color = '#FACC15', style = 'highlight') => annotations.addAnnotation(viewRef.value, cfi, color, style),
     addAnnotations: (anns: { cfi: string; color: string; style: string }[]) => annotations.addAnnotations(viewRef.value, anns),

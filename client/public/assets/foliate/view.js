@@ -21,6 +21,57 @@ const getRangePoint = (range) => {
   return { node: range.startContainer, offset: range.startOffset }
 }
 
+/**
+ * Build a short in-range CFI target ~`fraction` through the visible text.
+ * Collapsing to the absolute start is unstable: uncollapse can promote to a
+ * multi-page parent element whose first client rect is on the previous page.
+ */
+const rangeAtTextFraction = (range, fraction = 0.35) => {
+  if (!range || range.collapsed) return range
+  const doc = range.startContainer?.ownerDocument
+  if (!doc) return range
+
+  try {
+    const textNodes = []
+    let total = 0
+    const root = range.commonAncestorContainer
+    const walker = doc.createTreeWalker(root.nodeType === 1 ? root : root.parentNode, NodeFilter.SHOW_TEXT)
+    let node = walker.nextNode()
+    while (node) {
+      if (range.intersectsNode(node)) {
+        const value = node.nodeValue ?? ''
+        let start = 0
+        let end = value.length
+        if (node === range.startContainer) start = range.startOffset
+        if (node === range.endContainer) end = range.endOffset
+        if (end > start) {
+          textNodes.push({ node, start, end })
+          total += end - start
+        }
+      }
+      node = walker.nextNode()
+    }
+    if (!total) return range
+
+    let remaining = Math.min(total - 1, Math.max(0, Math.floor(total * fraction)))
+    for (const part of textNodes) {
+      const len = part.end - part.start
+      if (remaining < len) {
+        const out = doc.createRange()
+        const offset = part.start + remaining
+        // Keep a 1-char range so getClientRects stays on this glyph (not a parent block).
+        out.setStart(part.node, offset)
+        out.setEnd(part.node, Math.min(part.end, offset + 1))
+        return out
+      }
+      remaining -= len
+    }
+  } catch {
+    // Fall through to the original range.
+  }
+  return range
+}
+
 export const getKoboSpanValue = (range) => {
   if (!range) return null
   const point = getRangePoint(range)
@@ -583,7 +634,10 @@ export class View extends HTMLElement {
     const progress = this.#sectionProgress?.getProgress(index, fraction, size) ?? {}
     const tocItem = this.#tocProgress?.getProgress(index, range)
     const pageItem = this.#pageProgress?.getProgress(index, range)
-    const cfi = this.getCFI(index, range)
+    // Anchor CFI ~⅓ through the visible page text so restore does not stick to a
+    // previous-page boundary glyph or a multi-page block's first client rect.
+    const cfiRange = rangeAtTextFraction(range, 0.35)
+    const cfi = this.getCFI(index, cfiRange)
     const source = this.book.sections[index]?.id ?? null
     const contentSourceProgressPercent = toPercent(fraction)
     const koboLocationValue = getKoboSpanValue(range)
@@ -596,6 +650,9 @@ export class View extends HTMLElement {
       pageItem,
       cfi,
       range,
+      // Paginator section-local page fraction (page-1)/(pages-2) — used to re-snap
+      // paginated restore after CFI loads the spine section.
+      sectionFraction: typeof fraction === 'number' && Number.isFinite(fraction) ? fraction : null,
       source,
       koboLocationType,
       koboLocationValue,
@@ -711,7 +768,18 @@ export class View extends HTMLElement {
   getCFI(index, range) {
     const baseCFI = this.book.sections[index].cfi ?? CFI.fake.fromIndex(index)
     if (!range) return baseCFI
-    return CFI.joinIndir(baseCFI, CFI.fromRange(range))
+    // Skip BookOrbit TTS highlight wrappers so saved CFIs stay valid after reload
+    // (when highlights are not yet injected).
+    const filter = (node) => {
+      if (node?.nodeType === 1) {
+        const cls = node.classList
+        if (cls?.contains('bo-tts-active') || cls?.contains('bo-tts-sentence')) {
+          return NodeFilter.FILTER_SKIP
+        }
+      }
+      return NodeFilter.FILTER_ACCEPT
+    }
+    return CFI.joinIndir(baseCFI, CFI.fromRange(range, filter))
   }
 
   resolveCFI(cfi) {
@@ -741,18 +809,48 @@ export class View extends HTMLElement {
 
   async goTo(target) {
     const resolved = this.resolveNavigation(target)
+    /**
+     * @returns {true|false|null} true = confirmed, false = wrong section loaded,
+     * null = contents not registered yet (do not treat as unreadable).
+     */
     const hasContentFor = (nextResolved) => {
       const contents = this.renderer.getContents?.() ?? []
-      if (!contents.length) return false
+      if (!contents.length) return null
       if (typeof nextResolved?.index !== 'number') return true
       return contents.some((content) => content?.index === nextResolved.index)
+    }
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    // Empty or stale previous-section contents can lag behind a successful load.
+    // Only treat as a hard miss after retries exhaust (never skip on first paint).
+    const waitForContent = async (nextResolved) => {
+      let last = null
+      for (let attempt = 0; attempt < 10; attempt++) {
+        last = hasContentFor(nextResolved)
+        if (last === true) return true
+        await wait(30)
+      }
+      // goTo did not throw; prefer staying on the target over spine-skipping.
+      return last !== false
     }
     const tryGoTo = async (nextResolved) => {
       try {
         await this.renderer.goTo(nextResolved)
-        return hasContentFor(nextResolved)
+        return waitForContent(nextResolved)
       } catch (e) {
         console.warn(e)
+        // CFI/anchor resolution can throw even when the spine section is fine
+        // (stale TTS-highlight CFIs, DOM drift). Open the section without the
+        // precise anchor instead of skipping to the next spine item
+        // (Part I → Part II on reload).
+        if (typeof nextResolved?.index === 'number' && nextResolved.anchor != null) {
+          try {
+            await this.renderer.goTo({ index: nextResolved.index })
+            return waitForContent({ index: nextResolved.index })
+          } catch (e2) {
+            console.warn(e2)
+            return false
+          }
+        }
         return false
       }
     }
@@ -760,6 +858,15 @@ export class View extends HTMLElement {
       let opened = await tryGoTo(resolved)
       let finalTarget = target
       let finalResolved = resolved
+      // Only skip to adjacent sections when the target INDEX itself cannot load.
+      // Never skip because a CFI/anchor inside an otherwise-valid section failed.
+      if (!opened && typeof resolved?.index === 'number' && resolved.anchor != null) {
+        const indexOnlyOpened = await tryGoTo({ index: resolved.index })
+        if (indexOnlyOpened) {
+          opened = true
+          finalResolved = { index: resolved.index }
+        }
+      }
       if (!opened && typeof resolved?.index === 'number') {
         const total = this.book?.sections?.length ?? 0
         for (let index = resolved.index + 1; index < total; index++) {

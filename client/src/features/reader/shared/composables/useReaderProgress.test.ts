@@ -70,10 +70,13 @@ describe('useReaderProgress', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.resetAllMocks()
+    // Isolate tests from local progress cache written by prior cases.
+    window.localStorage.clear()
   })
 
   afterEach(() => {
     vi.useRealTimers()
+    window.localStorage.clear()
   })
 
   describe('load()', () => {

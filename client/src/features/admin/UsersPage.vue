@@ -277,13 +277,6 @@ function setsEqual(a: Set<number>, b: Set<number>) {
 
   <!-- Users tab content -->
   <template v-if="activeTab === 'users'">
-    <div v-if="props.embedded" class="flex justify-end mb-4">
-      <button class="settings-btn-primary" @click="openCreate">
-        <UserPlus :size="14" />
-        Create user
-      </button>
-    </div>
-
     <div v-if="error" class="mb-4 text-sm text-destructive">{{ error }}</div>
     <div v-if="loading" class="text-sm text-muted-foreground">{{ t('common.loading') }}</div>
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -39,13 +39,14 @@ import TtsResumeDialog from './epub/components/TtsResumeDialog.vue'
 import PdfV4ReaderView from './pdf-v4/PdfV4ReaderView.vue'
 import CbzReaderView from './cbz/CbzReaderView.vue'
 import AudiobookReaderView from './audiobook/AudiobookReaderView.vue'
-import type { ReaderState } from './epub/composables/useReaderState'
+import { epubReaderUiKey, type ReaderState } from './epub/composables/useReaderState'
 import type { FoliateRenderer } from './epub/composables/useFoliate'
 import type { EpubReaderSettings } from '@bookorbit/types'
 import { getFormatGroup } from '@bookorbit/types'
 import { buildThemeHighlightPatch, buildThemeSwitchHighlightPatch } from './epub/theme-highlight'
 import { readCachedReaderProgress } from './shared/lib/reader-progress-cache'
 import { readTtsPlaybackSession, writeTtsPlaybackSession } from './epub/tts/tts-session-cache'
+import { isAwayFromLastTtsPosition } from './epub/lib/tts-resume'
 
 const route = useRoute()
 const router = useRouter()
@@ -250,7 +251,11 @@ function handleTranslate() {
 }
 
 function onRelocateHandler(detail: RelocateDetail) {
-  progress.onRelocate(detail)
+  // While the book is opening, Foliate may emit an intermediate relocate at the
+  // chapter start before the exact CFI page/scroll is applied. Keep in-memory
+  // state in sync but do not persist those intermediate positions.
+  const persist = !loading.value && !restoring.value
+  progress.onRelocate(detail, { persist })
   if (tts.isActive.value) tts.evaluateScrollFollow()
   onActivity()
   bookmarks.setCfi(detail?.cfi ?? null)
@@ -303,9 +308,10 @@ function alignTtsSessionWithProgress(position = progress.getTtsPosition()) {
   if (!saved) return
   const session = readTtsPlaybackSession(fileId)
   if (!session?.enabled) return
+  // Keep wasPlaying so reload can auto-resume audio when appropriate.
   writeTtsPlaybackSession(fileId, {
     enabled: true,
-    wasPlaying: false,
+    wasPlaying: session.wasPlaying,
     sectionIndex: saved.sectionIndex,
     wordIndex: saved.wordIndex,
   })
@@ -397,10 +403,36 @@ const tts = useEpubTts({
       scrolled?: boolean
       size?: number
       start?: number
+      scrollProp?: string
       scrollBy?: (dx: number, dy: number) => void
       scrollToAnchor?: (anchor: Range | Element, select?: boolean) => Promise<void>
     } | null
-    return renderer
+    if (!renderer) return null
+    // Foliate: vertical paginated uses scrollTop; vertical scrolled uses scrollLeft.
+    // Use live getters for size/start/scrolled — pinWordRangeAsViewportLead reads
+    // start *after* scrollToAnchor; a one-shot snapshot is stale and fine-tunes the wrong way.
+    const scrollProp = renderer.scrollProp
+    return {
+      get scrolled() {
+        return Boolean(renderer.scrolled)
+      },
+      get size() {
+        return renderer.size
+      },
+      get start() {
+        return renderer.start
+      },
+      get vertical() {
+        const scrolled = Boolean(renderer.scrolled)
+        return typeof scrollProp === 'string'
+          ? scrolled
+            ? scrollProp === 'scrollLeft'
+            : scrollProp === 'scrollTop'
+          : false
+      },
+      scrollBy: renderer.scrollBy?.bind(renderer),
+      scrollToAnchor: renderer.scrollToAnchor?.bind(renderer),
+    }
   },
 })
 handleLoadedDocument = tts.handleDocumentLoad
@@ -412,20 +444,18 @@ const ttsWordCount = computed(() => tts.wordCount.value)
 const ttsCurrentProvider = computed(() => tts.currentProvider.value)
 const isLeavingReader = ref(false)
 const ttsIsActive = computed(() => tts.isActive.value && !isLeavingReader.value)
-const ttsScrollFollowEnabled = computed(() => tts.scrollFollowEnabled.value)
 const ttsFollowTarget = computed(() => tts.followTarget.value)
+const ttsFollowTargetOffViewport = computed(() => tts.followTargetOffViewport.value)
 const ttsFollowTargetAway = computed(() => {
   const target = ttsFollowTarget.value
   return Boolean(target && target.sectionIndex !== sectionIndex.value)
 })
-const showTtsFollowAlong = computed(
-  () =>
-    ttsIsActive.value &&
-    (!ttsScrollFollowEnabled.value || ttsFollowTargetAway.value) &&
-    ttsStatus.value !== 'idle' &&
-    ttsStatus.value !== 'done' &&
-    ttsStatus.value !== 'error',
-)
+const showTtsFollowAlong = computed(() => {
+  if (!ttsIsActive.value || ttsStatus.value === 'error') return false
+  // Show whenever the spoken word is not on the current paginated page / scrolled viewport,
+  // or when the user is in a different spine section than the TTS word.
+  return ttsFollowTargetAway.value || ttsFollowTargetOffViewport.value
+})
 
 watch(ttsIsActive, async (active) => {
   await nextTick()
@@ -460,7 +490,17 @@ onMounted(async () => {
   setFontFaceCSS(customFonts.generateFontFaceCSS())
 
   await progress.load()
-  alignTtsSessionWithProgress()
+  // Snapshot restore targets before open so intermediate Foliate relocates cannot
+  // clobber the page we intend to reopen.
+  const restoreCfi = progress.cfi.value
+  const restoreFraction = progress.percentage.value > 0 ? progress.percentage.value / 100 : undefined
+  const restoreSectionFraction = progress.sectionFraction.value
+  const restoreTtsPosition = progress.getTtsPosition()
+  const pendingTtsSession = readTtsPlaybackSession(fileId)
+  const shouldRestoreTtsToolbar = Boolean(pendingTtsSession?.enabled)
+  if (shouldRestoreTtsToolbar) {
+    alignTtsSessionWithProgress(restoreTtsPosition ?? undefined)
+  }
 
   await bookSettings.load()
   void tts.warmUp()
@@ -479,32 +519,83 @@ onMounted(async () => {
   }
 
   const cachedProgress = readCachedReaderProgress(fileId)
-  const hadProgress = progress.percentage.value > 0 || cachedProgress !== null
-  await open(bookId, fileId, fileFormat, progress.cfi.value, hadProgress ? progress.percentage.value / 100 : undefined, {
+  const hadProgress = progress.percentage.value > 0 || Boolean(restoreCfi) || cachedProgress !== null
+
+  // 1) Restore TTS chrome first so pagination/scroll geometry matches last session.
+  if (shouldRestoreTtsToolbar) {
+    await settleTtsChromeLayout()
+  }
+
+  // 2) Only after chrome is settled, restore the exact previous page.
+  await open(bookId, fileId, fileFormat, restoreCfi, restoreFraction, {
     hasCachedProgress: hadProgress,
     fixedLayoutSpread: state.value.fixedLayoutSpread,
+    sectionFraction: restoreSectionFraction,
   })
   setChapters(getChapters())
   sectionFractions.value = getSectionFractions()
 
   await waitForInitialRestore()
 
-  const ttsSession = readTtsPlaybackSession(fileId)
-  const savedTts = progress.getTtsPosition()
-  if (ttsSession?.enabled && savedTts) {
-    alignTtsSessionWithProgress()
-    await ensureReaderAtTtsPosition(savedTts)
+  // Re-apply the snapshot after toolbar reflow so we do not land on a chapter-start
+  // intermediate page that Foliate may have emitted during open.
+  if (restoreCfi) {
+    await goTo(restoreCfi)
+  } else if (restoreFraction !== undefined && restoreFraction > 0) {
+    await goToFraction(restoreFraction)
   }
 
-  const ttsRestoreResult = await tts.restoreTtsAfterReload()
-  if (ttsRestoreResult === 'resumed') {
-    toast.info('Resumed read aloud', { duration: 2500 })
+  // Paginated EPUB: CFI alone can still land one visual page early (boundary glyphs /
+  // multi-page blocks). Re-snap with the saved section page fraction after CFI loads
+  // the correct spine section.
+  if (restoreSectionFraction != null && Number.isFinite(restoreSectionFraction)) {
+    const renderer = getRenderer() as FoliateRenderer | null
+    if (renderer && renderer.scrolled !== true && typeof renderer.scrollToAnchor === 'function') {
+      await renderer.scrollToAnchor(restoreSectionFraction).catch(() => {})
+    }
   }
 
-  if (tts.isActive.value) {
-    await nextTick()
-    attachTtsToolbarResizeObserver()
-    refreshReaderLayout()
+  // Persist the settled exact page/scroll once (saves were suppressed during open).
+  if (hadProgress && (progress.cfi.value || progress.percentage.value > 0)) {
+    void progress.save().catch(() => {})
+  }
+
+  // 3) Finish TTS mode: highlight/resume on the restored page without jumping away
+  // unless auto-resume needs the saved TTS section (playing across sections).
+  if (shouldRestoreTtsToolbar) {
+    const sectionBeforeTts = sectionIndex.value
+    const savedTts = restoreTtsPosition ?? progress.getTtsPosition()
+    if (savedTts && pendingTtsSession?.wasPlaying && savedTts.sectionIndex !== sectionIndex.value) {
+      await ensureReaderAtTtsPosition(savedTts)
+    }
+    alignTtsSessionWithProgress(savedTts ?? undefined)
+    const ttsRestoreResult = await tts.restoreTtsAfterReload()
+    if (ttsRestoreResult === 'resumed') {
+      toast.info('Resumed read aloud', { duration: 2500 })
+    } else if (tts.isActive.value) {
+      await nextTick()
+      attachTtsToolbarResizeObserver()
+      refreshReaderLayout()
+      tts.refreshTtsHighlight()
+    }
+
+    // TTS highlight restore / residual auto-resume must not leave us on the wrong
+    // page or the next spine section. Re-snap to the pre-TTS reading position when
+    // we are still on the same section the book opened to.
+    if (sectionIndex.value === sectionBeforeTts) {
+      if (restoreCfi) {
+        await goTo(restoreCfi).catch(() => {})
+      }
+      if (restoreSectionFraction != null && Number.isFinite(restoreSectionFraction)) {
+        const renderer = getRenderer() as FoliateRenderer | null
+        if (renderer && renderer.scrolled !== true && typeof renderer.scrollToAnchor === 'function') {
+          await renderer.scrollToAnchor(restoreSectionFraction).catch(() => {})
+        }
+      }
+      if (tts.isActive.value) {
+        tts.restoreTtsHighlightNow()
+      }
+    }
   }
 
   await bookmarks.load(bookId)
@@ -517,7 +608,7 @@ onMounted(async () => {
     }
   }
 
-  if (hadProgress && !readTtsPlaybackSession(fileId)?.enabled) {
+  if (hadProgress && !shouldRestoreTtsToolbar) {
     const pct = Math.round(progress.percentage.value)
     const label = chapterTitle.value || `Chapter ${sectionIndex.value + 1}`
     toast.info(`Resumed at ${pct}% - ${label}`, { duration: 2500 })
@@ -573,6 +664,11 @@ async function applyUpdate(partial: Partial<ReaderState>) {
     sectionFractions.value = getSectionFractions()
   }
 }
+
+provide(epubReaderUiKey, {
+  state,
+  applyUpdate,
+})
 
 function toggleFullscreen() {
   if (document.fullscreenElement) {
@@ -666,14 +762,96 @@ function formatSectionLabel(index: number, title?: string): string {
 const ttsResumeSavedLabel = computed(() => {
   const saved = pendingTtsResume.value
   if (!saved) return ''
+  if (saved.sectionIndex === sectionIndex.value) return 'your last position'
   return formatSectionLabel(saved.sectionIndex)
 })
 
-const ttsResumeCurrentLabel = computed(() => formatSectionLabel(sectionIndex.value, chapterTitle.value))
+const ttsResumeCurrentLabel = computed(() => {
+  const saved = pendingTtsResume.value
+  if (saved && saved.sectionIndex === sectionIndex.value) return 'this page'
+  return formatSectionLabel(sectionIndex.value, chapterTitle.value)
+})
+
+const ttsResumeSameView = computed(() => {
+  const saved = pendingTtsResume.value
+  return Boolean(saved && saved.sectionIndex === sectionIndex.value)
+})
+
+/**
+ * Wait for content-area height to reflow after TTS chrome appears or disappears.
+ * `.reader-content-area` uses a 300ms bottom transition — must wait past that or the
+ * final column layout (and our re-anchor) race mid-animation.
+ */
+async function waitForTtsChromeLayoutSettle() {
+  await nextTick()
+  refreshReaderLayout()
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+  // Match main.css `.reader-content-area { transition: bottom 300ms }` + a frame for
+  // Foliate's ResizeObserver → expand → columnize to finish after the height sticks.
+  await new Promise<void>((resolve) => {
+    window.setTimeout(resolve, 360)
+  })
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
+/**
+ * Pin Foliate to the first on-screen word, run a chrome change, then re-pin after reflow.
+ * Used when the TTS toolbar appears or disappears so page breaks don't drift.
+ */
+async function withViewportWordAnchor(runChromeChange: () => void | Promise<void>) {
+  const layoutAnchorWordIndex = await tts.anchorViewportToFirstVisibleWord()
+  await runChromeChange()
+  await waitForTtsChromeLayoutSettle()
+  if (layoutAnchorWordIndex !== null) {
+    // Re-pin with lead fine-tune after height has fully settled (fresh Range).
+    await tts.anchorViewportToWord(layoutAnchorWordIndex)
+  }
+}
+
+/** Show the TTS toolbar and wait for content-area height to reflow (reload restore + play entry). */
+async function settleTtsChromeLayout() {
+  // Before chrome appears: pin Foliate's layout anchor to the first on-screen word.
+  // The toolbar shrinks the content area and re-paginates; with this anchor set first,
+  // Foliate's resize/expand path keeps that word as the page start instead of drifting.
+  await withViewportWordAnchor(async () => {
+    tts.prepareUi()
+    await nextTick()
+    attachTtsToolbarResizeObserver()
+  })
+}
+
+/** Hide the TTS toolbar while keeping the first on-screen word as the layout anchor. */
+async function dismissTtsChromeLayout(stopOptions?: { checkpoint?: boolean }) {
+  // Before chrome leaves: pin the first visible word so expanding the content area
+  // re-paginates around that word instead of jumping the reading position.
+  await withViewportWordAnchor(() => {
+    tts.stop(stopOptions)
+    showTtsSettings.value = false
+    ttsColorPickerTarget.value = null
+    ttsToolbarResizeObserver?.disconnect()
+    ttsToolbarResizeObserver = null
+  })
+}
+
+function remindTapToStartReading() {
+  toast.info('Tap anywhere on the page to start reading from that sentence.', { duration: 4500 })
+}
 
 function cancelTtsResumeDialog() {
   showTtsResumeDialog.value = false
   pendingTtsResume.value = null
+  // Chrome may already be open from layout settle; dismiss if nothing is playing.
+  if (tts.status.value === 'idle' || tts.status.value === 'done' || tts.status.value === 'error') {
+    void dismissTtsChromeLayout({ checkpoint: false })
+  }
 }
 
 async function resumeTtsAtSavedPosition() {
@@ -686,13 +864,20 @@ async function resumeTtsAtSavedPosition() {
   await tts.start(saved.wordIndex)
 }
 
-async function startTtsFromCurrentSection() {
+/** Stay on this page: enable TTS and wait for a tap to pick the starting sentence. */
+async function startTtsFromHereAwaitingTap() {
   showTtsResumeDialog.value = false
   pendingTtsResume.value = null
-  progress.updateTtsPosition(sectionIndex.value, 0)
-  await tts.start(0)
+  await settleTtsChromeLayout()
+  remindTapToStartReading()
 }
 
+/**
+ * Speaker / play entry point.
+ * - Last-read page still in view → resume from that word.
+ * - Any other page with a saved position → prompt resume vs read from here.
+ * - No saved position → enable TTS only; tap a sentence to start.
+ */
 async function startTtsFromSavedProgress() {
   try {
     await progress.flush()
@@ -702,13 +887,28 @@ async function startTtsFromSavedProgress() {
   await progress.refreshFromServer()
 
   const saved = progress.getTtsPosition()
+  // Reserve chrome first so viewport metrics match the TTS layout.
+  await settleTtsChromeLayout()
+
   if (saved) {
-    await ensureReaderAtTtsPosition(saved)
-    await tts.start(saved.wordIndex)
+    const savedWordVisibleInViewport =
+      saved.sectionIndex === sectionIndex.value ? tts.isWordVisibleInViewport(saved.wordIndex) : false
+    const awayFromLastRead = isAwayFromLastTtsPosition({
+      savedSectionIndex: saved.sectionIndex,
+      currentSectionIndex: sectionIndex.value,
+      savedWordVisibleInViewport,
+    })
+    if (awayFromLastRead) {
+      pendingTtsResume.value = saved
+      showTtsResumeDialog.value = true
+      return
+    }
+    await tts.start(saved.wordIndex, { userInitiated: true, preserveViewport: true })
     return
   }
 
-  await tts.start(0)
+  // No prior TTS position — enable and wait for tap.
+  remindTapToStartReading()
 }
 
 async function startTtsPlayback() {
@@ -721,17 +921,41 @@ async function startTtsPlayback() {
     tts.stop({ checkpoint: false })
   }
 
+  // Already enabled and idle: play button resumes last position only if it is still in view;
+  // otherwise stay idle so the user can tap a sentence on this page.
+  if (tts.isActive.value && (tts.status.value === 'idle' || tts.status.value === 'done' || tts.status.value === 'error')) {
+    const saved = progress.getTtsPosition()
+    if (saved && saved.sectionIndex === sectionIndex.value && tts.isWordVisibleInViewport(saved.wordIndex)) {
+      await tts.start(saved.wordIndex, { userInitiated: true, preserveViewport: true })
+      return
+    }
+    // Not on last-read page — remind and wait for a page tap.
+    if (!showTtsResumeDialog.value) {
+      remindTapToStartReading()
+    }
+    return
+  }
+
   await startTtsFromSavedProgress()
 }
 
 async function followTtsPosition() {
   const target = ttsFollowTarget.value ?? progress.getTtsPosition()
+  // Jump to the TTS section when needed, rebuild the highlight, then scroll/page
+  // exactly to the spoken word (paginated page turn or scrolled keep-in-view).
   if (target && target.sectionIndex !== sectionIndex.value) {
     await ensureReaderAtTtsPosition(target)
     await nextTick()
-    tts.restoreTtsHighlightNow()
   }
+  tts.restoreTtsHighlightNow()
   await nextTick()
+  tts.resumeScrollFollow()
+  // Layout may still be settling after a section change — re-jump once more.
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
   tts.resumeScrollFollow()
 }
 
@@ -745,9 +969,7 @@ async function resumeTtsPlayback() {
 
 function toggleTts() {
   if (tts.isActive.value) {
-    tts.stop()
-    showTtsSettings.value = false
-    ttsColorPickerTarget.value = null
+    void dismissTtsChromeLayout()
     return
   }
   selection.dismiss()
@@ -1050,8 +1272,9 @@ function closeSearch() {
       v-if="showTtsResumeDialog && pendingTtsResume"
       :savedSectionLabel="ttsResumeSavedLabel"
       :currentSectionLabel="ttsResumeCurrentLabel"
+      :sameViewSection="ttsResumeSameView"
       @continueSaved="resumeTtsAtSavedPosition"
-      @startHere="startTtsFromCurrentSection"
+      @startHere="startTtsFromHereAwaitingTap"
       @cancel="cancelTtsResumeDialog"
     />
   </div>

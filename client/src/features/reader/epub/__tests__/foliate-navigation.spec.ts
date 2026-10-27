@@ -47,6 +47,9 @@ describe('Foliate navigation', () => {
   let getPageProgressionRtl: (bookDir: string | null | undefined, contentRtl: boolean) => boolean
   let usesNegativePageScroll: (vertical: boolean, pageProgressionRtl: boolean) => boolean
   let getPageScrollOffset: (page: number, size: number, vertical: boolean, pageProgressionRtl: boolean) => number
+  let getPaginatedAnchorPage: (left: number, right: number, size: number, negativeScroll?: boolean) => number
+  let getPaginatedFractionPage: (anchor: number, textPages: number) => number
+  let pickAnchorClientRect: (rects: DOMRect[], vertical?: boolean) => DOMRect | null
   let normalizeStylesheetForReader: (data: string, width?: number, height?: number) => string
   let FixedLayout: new () => HTMLElement & {
     open: (book: { rendition: { layout: string; spread: string }; sections: { load: () => Promise<string> }[] }) => void
@@ -71,13 +74,23 @@ describe('Foliate navigation', () => {
       getKoboSpanValue: typeof getKoboSpanValue
     })
     ;({ FixedLayout } = (await import(fixedLayoutModulePath)) as { FixedLayout: typeof FixedLayout })
-    ;({ Paginator, getPageProgressionRtl, usesNegativePageScroll, getPageScrollOffset, normalizeStylesheetForReader } = (await import(
-      paginatorModulePath
-    )) as {
+    ;({
+      Paginator,
+      getPageProgressionRtl,
+      usesNegativePageScroll,
+      getPageScrollOffset,
+      getPaginatedAnchorPage,
+      getPaginatedFractionPage,
+      pickAnchorClientRect,
+      normalizeStylesheetForReader,
+    } = (await import(paginatorModulePath)) as {
       Paginator: typeof Paginator
       getPageProgressionRtl: typeof getPageProgressionRtl
       usesNegativePageScroll: typeof usesNegativePageScroll
       getPageScrollOffset: typeof getPageScrollOffset
+      getPaginatedAnchorPage: typeof getPaginatedAnchorPage
+      getPaginatedFractionPage: typeof getPaginatedFractionPage
+      pickAnchorClientRect: typeof pickAnchorClientRect
       normalizeStylesheetForReader: typeof normalizeStylesheetForReader
     })
   })
@@ -123,6 +136,73 @@ describe('Foliate navigation', () => {
     await expect(view.goTo('chapter-1')).resolves.toEqual({ index: 1 })
 
     expect(view.renderer!.getContents!()).toEqual([{ index: 1 }])
+  })
+
+  it('does not skip to the next section when getContents is empty after a successful goTo', async () => {
+    // Regression: reload re-anchors CFI while Foliate contents lag; treating empty
+    // getContents as failure advanced the spine (Part I → Part II).
+    const view = new View()
+    const goToCalls: { index: number }[] = []
+    let contentsReady = false
+
+    view.book = {
+      sections: [{}, {}, {}],
+      resolveHref: (href: string) => ({ index: Number(href.replace('chapter-', '')) }),
+    }
+    view.renderer = {
+      async goTo(resolved: { index: number }) {
+        goToCalls.push(resolved)
+        // Contents register a moment later (or never in this first paint).
+        queueMicrotask(() => {
+          contentsReady = true
+        })
+      },
+      getContents: () => (contentsReady ? [{ index: 1 }] : []),
+    }
+
+    await expect(view.goTo('chapter-1')).resolves.toEqual({ index: 1 })
+    // Must not have walked forward to chapter 2.
+    expect(goToCalls).toEqual([{ index: 1 }])
+  })
+
+  it('stays on the target section when CFI/anchor resolve throws (does not skip spine)', async () => {
+    // Phone repro: epubcfi toRange threw nodeType of undefined → "Skipped unreadable
+    // section 11, opened section 12" (Part I → Part II on reload).
+    const view = new View()
+    const goToCalls: { index: number; hasAnchor: boolean }[] = []
+    let renderedIndex = -1
+
+    view.book = {
+      sections: [{}, {}, {}],
+      resolveHref: () => ({ index: 1 }),
+    }
+    view.resolveNavigation = () => ({
+      index: 1,
+      anchor: () => {
+        throw new TypeError("Cannot destructure property 'nodeType' of 'undefined' as it is undefined.")
+      },
+    })
+
+    view.renderer = {
+      async goTo(resolved: { index: number; anchor?: unknown }) {
+        goToCalls.push({ index: resolved.index, hasAnchor: resolved.anchor != null })
+        if (typeof resolved.anchor === 'function') {
+          // Paginator would invoke the anchor; simulate CFI failure.
+          resolved.anchor({} as Document)
+        }
+        renderedIndex = resolved.index
+      },
+      getContents: () => (renderedIndex >= 0 ? [{ index: renderedIndex }] : []),
+    }
+
+    const result = await view.goTo('epubcfi(/6/4!/4/2/2)')
+    // Stay on section 1 even though the CFI anchor threw.
+    expect(result?.index).toBe(1)
+    // First attempt with anchor fails; fallback opens same index without anchor.
+    expect(goToCalls.some((c) => c.index === 1 && c.hasAnchor)).toBe(true)
+    expect(goToCalls.some((c) => c.index === 1 && !c.hasAnchor)).toBe(true)
+    // Must not open section 2.
+    expect(goToCalls.every((c) => c.index === 1)).toBe(true)
   })
 
   it('rejects paginator navigation when a section load does not produce a source', async () => {
@@ -218,6 +298,42 @@ describe('Foliate navigation', () => {
     expect(getPageScrollOffset(1, 800, false, true)).toBe(-800)
     expect(getPageScrollOffset(1, 800, true, true)).toBe(800)
     expect(getPageScrollOffset(1, 800, true, false)).toBe(800)
+  })
+
+  it('anchors paginated restore to the visible page when the glyph straddles a column', () => {
+    // Leading-edge-only math floor(left/size)+1 wrongly picks page 1 for a glyph
+    // that started on the previous column but is visible on page 2 (start=size*2).
+    const size = 400
+    const left = size - 18
+    const right = size + 12
+    expect(Math.floor(left / size) + 1).toBe(1)
+    expect(getPaginatedAnchorPage(left, right, size)).toBe(2)
+
+    // Fully on-page glyphs still map to their page (padding blank page included).
+    expect(getPaginatedAnchorPage(10, 40, size)).toBe(1)
+    expect(getPaginatedAnchorPage(size + 10, size + 50, size)).toBe(2)
+  })
+
+  it('picks the median client rect so multi-page blocks do not restore one page early', () => {
+    const rect = (left: number, width = 40) =>
+      ({ left, right: left + width, top: 0, bottom: 20, width, height: 20, x: left, y: 0, toJSON: () => ({}) }) as DOMRect
+    // First rect on previous page, bulk of range on current page (left 400–800).
+    const rects = [rect(350), rect(420), rect(500), rect(600), rect(700)]
+    const picked = pickAnchorClientRect(rects)
+    expect(picked?.left).toBe(500)
+  })
+
+  it('maps section fractions to the current content page, not the next one', () => {
+    const textPages = 10
+    // Start of content page 1 / 2 / 5 (0-based content index 0 / 1 / 4).
+    expect(getPaginatedFractionPage(0, textPages)).toBe(0)
+    expect(getPaginatedFractionPage(1 / textPages, textPages)).toBe(1)
+    expect(getPaginatedFractionPage(4 / textPages, textPages)).toBe(4)
+    // End of book clamps to last content page.
+    expect(getPaginatedFractionPage(1, textPages)).toBe(textPages - 1)
+    // Old formula rounded end-of-page progress one page ahead.
+    expect(Math.round((1 / textPages) * (textPages - 1))).toBe(1)
+    expect(getPaginatedFractionPage(1 / textPages, textPages)).toBe(1)
   })
 
   it('does not intercept paginated touch movement while native text selection is active', () => {

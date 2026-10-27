@@ -3,6 +3,8 @@ export interface CachedReaderProgress {
   pageNumber: number | null
   positionSeconds: number | null
   percentage: number
+  /** Foliate paginated section page fraction (page-1)/(pages-2). Client restore aid. */
+  sectionFraction: number | null
   ttsSectionIndex: number | null
   ttsWordIndex: number | null
   updatedAt: string
@@ -33,6 +35,10 @@ function sanitizeProgress(value: unknown): CachedReaderProgress | null {
   if (typeof raw.updatedAt !== 'string' || Number.isNaN(Date.parse(raw.updatedAt))) return null
   if (!(typeof raw.cfi === 'string' || raw.cfi === null || raw.cfi === undefined)) return null
   if (!isNumberOrNull(raw.pageNumber ?? null) || !isNumberOrNull(raw.positionSeconds ?? null)) return null
+  const sectionFraction = raw.sectionFraction ?? null
+  if (sectionFraction !== null && (typeof sectionFraction !== 'number' || !Number.isFinite(sectionFraction) || sectionFraction < 0 || sectionFraction > 1)) {
+    return null
+  }
   const ttsSectionIndex = raw.ttsSectionIndex ?? null
   const ttsWordIndex = raw.ttsWordIndex ?? null
   if (!isNonNegativeIntegerOrNull(ttsSectionIndex) || !isNonNegativeIntegerOrNull(ttsWordIndex)) return null
@@ -42,6 +48,7 @@ function sanitizeProgress(value: unknown): CachedReaderProgress | null {
     pageNumber: raw.pageNumber ?? null,
     positionSeconds: raw.positionSeconds ?? null,
     percentage: clampPercentage(raw.percentage),
+    sectionFraction,
     ttsSectionIndex,
     ttsWordIndex,
     updatedAt: raw.updatedAt,
@@ -70,6 +77,10 @@ export function writeCachedReaderProgress(fileId: number, progress: Omit<CachedR
       pageNumber: progress.pageNumber ?? null,
       positionSeconds: progress.positionSeconds ?? null,
       percentage: clampPercentage(progress.percentage),
+      sectionFraction:
+        typeof progress.sectionFraction === 'number' && Number.isFinite(progress.sectionFraction)
+          ? Math.min(1, Math.max(0, progress.sectionFraction))
+          : null,
       ttsSectionIndex: progress.ttsSectionIndex ?? null,
       ttsWordIndex: progress.ttsWordIndex ?? null,
       updatedAt: progress.updatedAt ?? new Date().toISOString(),

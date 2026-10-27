@@ -301,7 +301,7 @@ describe('useReaderProgress', () => {
     vi.useRealTimers()
   })
 
-  it('prefers server progress over a newer local cache on load', async () => {
+  it('prefers a newer local cache over older server progress on load', async () => {
     localStorage.setItem(
       'reader:progress:12',
       JSON.stringify({
@@ -330,15 +330,52 @@ describe('useReaderProgress', () => {
     const progress = useReaderProgress(1, 12, elapsedMinutes)
     await progress.load()
 
+    expect(progress.cfi.value).toBe('epubcfi(/6/10)')
+    expect(progress.percentage.value).toBe(44)
+    expect(progress.getTtsPosition()).toEqual({ sectionIndex: 1, wordIndex: 2 })
+    // Fresher local progress is pushed back to the server.
+    await vi.waitFor(() => {
+      expect(apiMock).toHaveBeenCalledWith(
+        '/api/v1/books/files/12/progress',
+        expect.objectContaining({
+          method: 'POST',
+        }),
+      )
+    })
+  })
+
+  it('prefers newer server progress over an older local cache on load', async () => {
+    localStorage.setItem(
+      'reader:progress:15',
+      JSON.stringify({
+        cfi: 'epubcfi(/6/10)',
+        pageNumber: 4,
+        positionSeconds: null,
+        percentage: 44,
+        ttsSectionIndex: 1,
+        ttsWordIndex: 2,
+        updatedAt: new Date('2026-05-20T12:00:00.000Z').toISOString(),
+      }),
+    )
+    apiMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        cfi: 'epubcfi(/6/2)',
+        pageNumber: 1,
+        positionSeconds: null,
+        percentage: 10,
+        ttsSectionIndex: 5,
+        ttsWordIndex: 88,
+        updatedAt: new Date('2026-05-21T11:00:00.000Z').toISOString(),
+      }),
+    })
+
+    const progress = useReaderProgress(1, 15, elapsedMinutes)
+    await progress.load()
+
     expect(progress.cfi.value).toBe('epubcfi(/6/2)')
     expect(progress.percentage.value).toBe(10)
     expect(progress.getTtsPosition()).toEqual({ sectionIndex: 5, wordIndex: 88 })
-    expect(apiMock).not.toHaveBeenCalledWith(
-      '/api/v1/books/files/12/progress',
-      expect.objectContaining({
-        method: 'POST',
-      }),
-    )
   })
 
   it('falls back to cached progress when the server request fails', async () => {

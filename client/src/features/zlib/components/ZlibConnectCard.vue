@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { BookOpen, Link } from 'lucide-vue-next'
+import { BookOpen, Link } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 

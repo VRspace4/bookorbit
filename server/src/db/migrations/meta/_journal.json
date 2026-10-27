@@ -393,6 +393,13 @@
       "when": 1783968442390,
       "tag": "0055_add_refresh_token_successor",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1783999200000,
+      "tag": "0056_backfill_account_activity_timestamps",
+      "breakpoints": true
     }
   ]
 }

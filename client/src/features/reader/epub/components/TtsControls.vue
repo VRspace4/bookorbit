@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
-import { Bookmark, ChevronDown, ChevronUp, Loader2, Pause, Play, RotateCcw, Settings, SkipBack, SkipForward, Volume2 } from 'lucide-vue-next'
+import { Bookmark, ChevronDown, ChevronUp, Loader2, Pause, Play, RotateCcw, Settings, SkipBack, SkipForward, Volume2 } from '@lucide/vue'
 import type { EpubReaderSettings, TtsProvider } from '@bookorbit/types'
 import { CLOUD_TTS_PROVIDERS, resolveCloudTtsProvider, ttsProviderLabel } from '../tts/tts-provider-display'
 
@@ -40,8 +40,13 @@ const speedButtonRef = ref<HTMLElement | null>(null)
 const enginePopoverStyle = ref<Record<string, string>>({})
 const speedPopoverStyle = ref<Record<string, string>>({})
 
-const isLoading = computed(() => props.status === 'loading')
-const canPause = computed(() => props.status === 'speaking')
+/** Initial fetch only — not the brief gap between prefetched sentences. */
+const isInitialLoading = computed(() => props.status === 'loading' && props.activeIndex < 0)
+/**
+ * Keep showing Pause across sentence handoffs (status briefly goes `loading` while
+ * the next buffer is attached). Only pure idle/paused/done show Play.
+ */
+const canPause = computed(() => props.status === 'speaking' || props.status === 'loading')
 const canResume = computed(() => props.status === 'paused')
 const canReplay = computed(() => props.status === 'done' || props.status === 'error')
 
@@ -145,7 +150,13 @@ function selectRate(rate: number) {
             <span class="sr-only">{{ settings.ttsSkipBackSeconds }}</span>
           </button>
 
-          <button v-if="isLoading" type="button" class="tts-toolbar-play pointer-events-none opacity-70" aria-label="Loading TTS" disabled>
+          <button
+            v-if="isInitialLoading"
+            type="button"
+            class="tts-toolbar-play pointer-events-none opacity-70"
+            aria-label="Loading TTS"
+            disabled
+          >
             <Loader2 class="tts-toolbar-play-icon animate-spin" />
           </button>
           <button v-else-if="canPause" type="button" class="tts-toolbar-play" aria-label="Pause TTS" @click="emit('pause')">

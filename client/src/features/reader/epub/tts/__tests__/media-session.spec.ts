@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mediaSessionMock = vi.hoisted(() => ({
-  setMetadata: vi.fn<() => Promise<void>>(),
-  setPlaybackState: vi.fn<() => Promise<void>>(),
-  setActionHandler: vi.fn<() => Promise<void>>(),
-  setPositionState: vi.fn<() => Promise<void>>(),
+  setMetadata: vi.fn(async () => undefined),
+  setPlaybackState: vi.fn(async () => undefined),
+  setActionHandler: vi.fn(async () => undefined),
+  setPositionState: vi.fn(async () => undefined),
 }))
 
 vi.mock('@jofr/capacitor-media-session', () => ({
@@ -23,6 +23,7 @@ describe('tts media session', () => {
   beforeEach(() => {
     document.body.innerHTML = ''
     vi.clearAllMocks()
+    vi.unstubAllGlobals()
     resetTtsMediaSessionForTests()
     registerTtsMediaSessionController(null)
     vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
@@ -38,6 +39,7 @@ describe('tts media session', () => {
   afterEach(() => {
     resetTtsMediaSessionForTests()
     registerTtsMediaSessionController(null)
+    vi.unstubAllGlobals()
   })
 
   it('registers play and pause handlers that toggle playback', async () => {
@@ -73,8 +75,30 @@ describe('tts media session', () => {
     handlers.get('pause')?.()
     expect(status).toBe('paused')
 
+    // Media-key handlers share a debounce window; advance past it before play.
+    await new Promise((resolve) => setTimeout(resolve, 400))
     handlers.get('play')?.()
     expect(status).toBe('speaking')
+  })
+
+  it('registers all media actions even when setActionHandler never resolves (native Android)', async () => {
+    // Capacitor native only resolves each setActionHandler Promise when that action fires.
+    // Registration must not await those Promises or only the first action would be wired.
+    mediaSessionMock.setActionHandler.mockImplementation(() => new Promise(() => {}))
+
+    initTtsMediaSession()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const registered = mediaSessionMock.setActionHandler.mock.calls.map(
+      (call) => (call[0] as { action: string }).action,
+    )
+
+    expect(registered).toEqual(
+      expect.arrayContaining(['play', 'pause', 'stop', 'previoustrack', 'nexttrack', 'seekbackward', 'seekforward']),
+    )
+    expect(registered).toContain('pause')
+    expect(mediaSessionMock.setActionHandler.mock.calls.length).toBeGreaterThanOrEqual(7)
   })
 
   it('debounces duplicate play/pause events on Capacitor native', async () => {
@@ -335,7 +359,7 @@ describe('tts media session', () => {
     expect(skipForward).not.toHaveBeenCalled()
   })
 
-  it('does not prime keepalive audio when the first gesture is on TTS controls', async () => {
+  it('primes keepalive audio when the first gesture is on TTS controls', async () => {
     const play = vi.fn<() => Promise<void>>(async () => {})
     vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
       const audio = document.createElement('audio')
@@ -354,7 +378,8 @@ describe('tts media session', () => {
     document.body.appendChild(ttsButton)
     ttsButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
 
-    expect(play).not.toHaveBeenCalled()
+    // TTS toolbar taps must unlock HTML media so mobile Web Audio can resume.
+    expect(play).toHaveBeenCalled()
   })
 
   it('primes keepalive audio on the first non-TTS gesture', async () => {
@@ -382,7 +407,17 @@ describe('tts media session', () => {
     expect(pause).toHaveBeenCalled()
   })
 
-  it('does not start keepalive while status is loading', async () => {
+  it('starts keepalive while status is loading so mobile audio can unlock', async () => {
+    const play = vi.fn<() => Promise<void>>(async () => {})
+    vi.stubGlobal('Audio', function (this: HTMLAudioElement, src?: string) {
+      const audio = document.createElement('audio')
+      if (src) audio.src = src
+      audio.play = play as typeof audio.play
+      audio.pause = vi.fn<() => void>() as typeof audio.pause
+      Object.defineProperty(audio, 'paused', { configurable: true, value: true })
+      return audio
+    } as unknown as typeof Audio)
+
     initTtsMediaSession()
     registerTtsMediaSessionController({
       getStatus: () => 'loading',
@@ -396,11 +431,9 @@ describe('tts media session', () => {
     })
 
     syncTtsMediaSession()
-    await Promise.resolve()
-    await Promise.resolve()
-
-    const audio = document.querySelector('audio')
-    expect(audio?.paused).not.toBe(false)
+    await vi.waitFor(() => {
+      expect(play).toHaveBeenCalled()
+    })
   })
 
   it('does not pause TTS when keepalive play fails while loading', async () => {

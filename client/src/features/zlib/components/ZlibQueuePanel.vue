@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { BookOpen, Clock, Loader2, RefreshCw, Trash2, CheckCircle2, XCircle } from 'lucide-vue-next'
+import { BookOpen, Clock, Loader2, RefreshCw, Trash2, CheckCircle2, XCircle } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { api } from '@/lib/api'
 

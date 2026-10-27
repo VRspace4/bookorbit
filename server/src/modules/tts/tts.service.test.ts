@@ -58,7 +58,7 @@ describe('TtsService', () => {
     expect(result.contentType).toBe('audio/mpeg');
   });
 
-  it('forwards xAI speed through OpenRouter audio speech', async () => {
+  it('clamps xAI speed to the official 0.7–1.5 range', async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(new Uint8Array([1, 2, 3]), {
         status: 200,
@@ -73,7 +73,22 @@ describe('TtsService', () => {
       input: 'Hello.',
       voice: 'Eve',
       response_format: 'mp3',
-      speed: 1.6,
+      speed: 1.5,
+    });
+  });
+
+  it('clamps xAI speed floors to 0.7', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { 'content-type': 'audio/mpeg' },
+      }),
+    );
+
+    await service.synthesizeXai({ voice: 'Eve', text: 'Hello.', speed: 0.5 });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      speed: 0.7,
     });
   });
 

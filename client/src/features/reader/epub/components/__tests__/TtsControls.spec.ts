@@ -67,11 +67,19 @@ describe('TtsControls', () => {
     expect(wrapper.text()).toContain('Azure')
   })
 
-  it('shows a loading spinner instead of pause while prefetching audio', () => {
-    const wrapper = mountControls({ status: 'loading' })
+  it('shows a loading spinner only on the initial load before any word is active', () => {
+    const wrapper = mountControls({ status: 'loading', activeIndex: -1 })
 
     expect(wrapper.get('button[aria-label="Loading TTS"]').attributes('disabled')).toBeDefined()
     expect(wrapper.find('button[aria-label="Pause TTS"]').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="Start TTS"]').exists()).toBe(false)
+  })
+
+  it('keeps pause visible while loading the next sentence mid-playback', () => {
+    const wrapper = mountControls({ status: 'loading', activeIndex: 4 })
+
+    expect(wrapper.find('button[aria-label="Pause TTS"]').exists()).toBe(true)
+    expect(wrapper.find('button[aria-label="Loading TTS"]').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="Start TTS"]').exists()).toBe(false)
   })
 

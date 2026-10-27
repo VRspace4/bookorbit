@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { BookOpen, Clock, ExternalLink, Loader2, Plus, Search, X } from 'lucide-vue-next'
+import { BookOpen, Clock, ExternalLink, Loader2, Plus, Search, X } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { useRouter } from 'vue-router'
 import { api } from '@/lib/api'
@@ -47,7 +47,7 @@ const router = useRouter()
 
 const source = ref<'zlib' | 'anna'>('zlib')
 const query = ref('')
-const formatFilter = ref('')
+const formatFilter = ref('epub')
 const results = ref<ZlibBook[]>([])
 const total = ref(0)
 const searching = ref(false)
@@ -366,7 +366,7 @@ function handleKeydown(e: KeyboardEvent) {
         <div class="flex items-center justify-between px-5 py-4 border-b border-border shrink-0">
           <div class="flex items-center gap-2">
             <BookOpen :size="16" class="text-muted-foreground" />
-            <span class="text-sm font-semibold text-foreground">Search Books</span>
+            <span class="text-sm font-semibold text-foreground">Download Books</span>
           </div>
           <button
             class="flex items-center justify-center w-7 h-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
@@ -398,27 +398,40 @@ function handleKeydown(e: KeyboardEvent) {
 
         <!-- Search bar -->
         <div class="px-5 pt-4 pb-3 border-b border-border/50 shrink-0 space-y-2">
-          <div class="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
-            <button
-              type="button"
-              :class="[
-                'h-7 rounded px-3 text-xs font-medium transition-colors',
-                source === 'zlib' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-              ]"
-              @click="source = 'zlib'"
+          <div class="flex items-center justify-between gap-2">
+            <div class="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
+              <button
+                type="button"
+                :class="[
+                  'h-7 rounded px-3 text-xs font-medium transition-colors',
+                  source === 'zlib' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                ]"
+                @click="source = 'zlib'"
+              >
+                Z-Library
+              </button>
+              <button
+                type="button"
+                :class="[
+                  'h-7 rounded px-3 text-xs font-medium transition-colors',
+                  source === 'anna' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+                ]"
+                @click="source = 'anna'"
+              >
+                Anna's Archive
+              </button>
+            </div>
+            <select
+              v-model="formatFilter"
+              class="h-7 rounded-md border border-input bg-background px-2.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             >
-              Z-Library
-            </button>
-            <button
-              type="button"
-              :class="[
-                'h-7 rounded px-3 text-xs font-medium transition-colors',
-                source === 'anna' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
-              ]"
-              @click="source = 'anna'"
-            >
-              Anna's Archive
-            </button>
+              <option value="">All formats</option>
+              <option value="epub">EPUB</option>
+              <option value="pdf">PDF</option>
+              <option value="mobi">MOBI</option>
+              <option value="fb2">FB2</option>
+              <option value="azw3">AZW3</option>
+            </select>
           </div>
 
           <div class="flex items-center gap-2">
@@ -433,17 +446,6 @@ function handleKeydown(e: KeyboardEvent) {
                 @keydown="handleKeydown"
               />
             </div>
-            <select
-              v-model="formatFilter"
-              class="h-9 rounded-md border border-input bg-background px-2.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-            >
-              <option value="">All formats</option>
-              <option value="epub">EPUB</option>
-              <option value="pdf">PDF</option>
-              <option value="mobi">MOBI</option>
-              <option value="fb2">FB2</option>
-              <option value="azw3">AZW3</option>
-            </select>
             <button
               class="h-9 px-3 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
               :disabled="searching || !query.trim()"

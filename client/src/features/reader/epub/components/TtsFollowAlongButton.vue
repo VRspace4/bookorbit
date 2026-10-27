@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Crosshair } from 'lucide-vue-next'
+import { Crosshair } from '@lucide/vue'
 
 defineProps<{
   visible: boolean

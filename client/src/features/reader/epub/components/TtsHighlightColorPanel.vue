@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { GripVertical, Pipette, X } from 'lucide-vue-next'
+import { GripVertical, Pipette, X } from '@lucide/vue'
 import { hexToHsl, hslToHex, normalizeHex, type HslColor } from '../lib/color-utils'
 
 const props = defineProps<{

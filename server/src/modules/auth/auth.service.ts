@@ -227,9 +227,15 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    if ((user.failedLoginAttempts ?? 0) > 0 || user.lockedUntil) {
-      await this.db.update(schema.users).set({ failedLoginAttempts: 0, lockedUntil: null }).where(eq(schema.users.id, user.id));
-    }
+    const clearFailed = (user.failedLoginAttempts ?? 0) > 0 || Boolean(user.lockedUntil);
+    await this.db
+      .update(schema.users)
+      .set({
+        ...(clearFailed ? { failedLoginAttempts: 0, lockedUntil: null } : {}),
+        lastLoginAt: now,
+        lastAuthenticatedAt: now,
+      })
+      .where(eq(schema.users.id, user.id));
 
     const fullUser = await this.userService.findByIdWithPermissions(user.id);
     const { accessToken, rawRefreshToken } = await this.issueTokenPair(user.id, user.tokenVersion);
@@ -269,6 +275,7 @@ export class AuthService {
     const user = await this.userService.findByIdWithPermissions(userId);
     if (!user || !user.active) throw new UnauthorizedException();
     const { accessToken, rawRefreshToken, refreshExpiresAt } = await this.issueTokenPair(userId, user.tokenVersion);
+    await this.recordLoginActivity(userId);
     await this.oidcSessionRepo.touchActiveByUserId(userId, refreshExpiresAt);
     this.setRefreshCookie(reply, rawRefreshToken);
     this.setAccessCookie(reply, accessToken);
@@ -334,16 +341,19 @@ export class AuthService {
     });
 
     if (refreshResult.kind === 'reuse') {
+      await this.recordAuthenticatedActivity(refreshResult.userId);
       this.setAccessCookie(reply, refreshResult.accessToken);
       return { accessToken: refreshResult.accessToken };
     }
 
     if (refreshResult.kind === 'grace') {
+      await this.recordAuthenticatedActivity(refreshResult.userId);
       this.setAccessCookie(reply, refreshResult.accessToken);
       return { accessToken: refreshResult.accessToken };
     }
 
     if (refreshResult.kind === 'rotate') {
+      await this.recordAuthenticatedActivity(refreshResult.userId);
       await this.oidcSessionRepo.touchActiveByUserId(refreshResult.userId, refreshResult.refreshExpiresAt);
       this.setRefreshCookie(reply, refreshResult.rawRefreshToken);
       this.setAccessCookie(reply, refreshResult.accessToken);
@@ -626,7 +636,7 @@ export class AuthService {
       });
       if (successor && !successor.revokedAt && successor.expiresAt >= new Date()) {
         const accessToken = this.jwtService.sign({ sub: row.userId, ver: userForToken.tokenVersion });
-        return { kind: 'grace' as const, accessToken };
+        return { kind: 'grace' as const, accessToken, userId: row.userId };
       }
     }
 
@@ -707,6 +717,19 @@ export class AuthService {
       .where(eq(schema.users.id, userId));
 
     return lockedUntil;
+  }
+
+  /** Credential presentation (password / OIDC / magic-link / setup) — updates both login and auth activity. */
+  private async recordLoginActivity(userId: number, at: Date = new Date()): Promise<void> {
+    await this.db
+      .update(schema.users)
+      .set({ lastLoginAt: at, lastAuthenticatedAt: at })
+      .where(eq(schema.users.id, userId));
+  }
+
+  /** Successful session refresh — updates last authenticated only. */
+  private async recordAuthenticatedActivity(userId: number, at: Date = new Date()): Promise<void> {
+    await this.db.update(schema.users).set({ lastAuthenticatedAt: at }).where(eq(schema.users.id, userId));
   }
 
   private setRefreshCookie(reply: FastifyReply, rawToken: string) {

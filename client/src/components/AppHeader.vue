@@ -21,6 +21,7 @@ import {
   Highlighter,
   Check,
   Languages,
+  BookOpen,
 } from '@lucide/vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -640,6 +641,30 @@ function formatBadgeStyle(fmt: string) {
           <NotificationSheet v-if="canAccessNotifications" :icon-radius-class="iconRadiusClass" />
         </div>
 
+        <!-- Mobile: Download Books (zlib) -->
+        <Tooltip v-if="hasPermission('library_upload')">
+          <TooltipTrigger as-child>
+            <Button
+              variant="ghost"
+              size="icon"
+              :class="[
+                'md:hidden relative h-8 w-8 border border-primary/35 text-foreground/70 hover:border-primary/70 hover:text-foreground transition-colors',
+                iconRadiusClass,
+              ]"
+              @click="zlibOpen = true"
+            >
+              <BookOpen :size="15" />
+              <span
+                v-if="zlibQueueCount > 0"
+                class="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold text-primary-foreground tabular-nums leading-none"
+              >
+                {{ zlibQueueCount > 99 ? '99+' : zlibQueueCount }}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t('components.appHeader.downloadBooks') }}{{ zlibQueueCount > 0 ? ` · ${zlibQueueCount} queued` : '' }}</TooltipContent>
+        </Tooltip>
+
         <!-- Mobile: Kebab Menu -->
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
@@ -680,10 +705,6 @@ function formatBadgeStyle(fmt: string) {
             <DropdownMenuItem v-if="hasPermission('library_upload')" @click="uploadOpen = true">
               <Upload :size="15" class="mr-2 text-muted-foreground" />
               {{ t('components.appHeader.uploadBooks') }}
-            </DropdownMenuItem>
-            <DropdownMenuItem v-if="hasPermission('library_upload')" @click="zlibOpen = true">
-              <Search :size="15" class="mr-2 text-muted-foreground" />
-              {{ t('components.appHeader.searchBooks', 'Search Books') }}
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
@@ -848,9 +869,8 @@ function formatBadgeStyle(fmt: string) {
             <TooltipContent>{{ t('components.appHeader.achievements') }}</TooltipContent>
           </Tooltip>
 
-          <!-- Upload button -->
+          <!-- Download Books button -->
           <Tooltip v-if="hasPermission('library_upload')">
-                      <Tooltip v-if="hasPermission('library_upload')">
             <TooltipTrigger as-child>
               <Button
                 variant="ghost"
@@ -861,7 +881,7 @@ function formatBadgeStyle(fmt: string) {
                 ]"
                 @click="zlibOpen = true"
               >
-                <Search :size="15" />
+                <BookOpen :size="15" />
                 <span
                   v-if="zlibQueueCount > 0"
                   class="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold text-primary-foreground tabular-nums leading-none"
@@ -870,10 +890,12 @@ function formatBadgeStyle(fmt: string) {
                 </span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{{ t('components.appHeader.searchBooks', 'Search Books') }}{{ zlibQueueCount > 0 ? ` · ${zlibQueueCount} queued` : '' }}</TooltipContent>
+            <TooltipContent>{{ t('components.appHeader.downloadBooks') }}{{ zlibQueueCount > 0 ? ` · ${zlibQueueCount} queued` : '' }}</TooltipContent>
           </Tooltip>
 
-<TooltipTrigger as-child>
+          <!-- Upload button -->
+          <Tooltip v-if="hasPermission('library_upload')">
+            <TooltipTrigger as-child>
               <Button
                 data-tour="upload-button"
                 variant="ghost"

@@ -3,9 +3,12 @@ import type { SentenceInfo } from './word-index'
 
 export interface CachedPreparedAudio {
   sentence: SentenceInfo
-  buffer: AudioBuffer
-  boundaries?: Array<{ offset: number; audioOffsetSec: number }>
+  buffer?: AudioBuffer
+  mp3Data?: ArrayBuffer
+  boundaries?: Array<{ audioOffsetSec: number; wordIndex: number }>
   charStarts?: number[]
+  speechOffsetSec?: number
+  playbackRate?: number
 }
 
 const MAX_CACHE_ENTRIES = 64

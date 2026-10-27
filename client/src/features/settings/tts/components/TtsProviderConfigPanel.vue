@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Loader2, Save } from 'lucide-vue-next'
+import { Loader2, Save } from '@lucide/vue'
 import type { TtsProviderConfigKey, TtsProviderConfigurations, TtsProviderStatus } from '@bookorbit/types'
 import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'

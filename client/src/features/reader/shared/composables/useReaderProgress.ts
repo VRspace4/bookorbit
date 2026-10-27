@@ -61,6 +61,8 @@ export function useReaderProgress(
   const pageNumber = ref<number | null>(null)
   const positionSeconds = ref<number | null>(null)
   const percentage = ref(0)
+  /** Paginated EPUB: Foliate section page fraction for exact page restore. */
+  const sectionFraction = ref<number | null>(null)
   const koboLocationSource = ref<string | null>(null)
   const koboLocationType = ref<string | null>(null)
   const koboLocationValue = ref<string | null>(null)
@@ -93,6 +95,7 @@ export function useReaderProgress(
       pageNumber: pageNumber.value,
       percentage: percentage.value,
       positionSeconds: positionSeconds.value,
+      sectionFraction: sectionFraction.value,
       ttsSectionIndex: ttsSectionIndex.value,
       ttsWordIndex: ttsWordIndex.value,
       koboLocationSource: koboLocationSource.value,
@@ -108,6 +111,7 @@ export function useReaderProgress(
     pageNumber?: number | null
     positionSeconds?: number | null
     percentage?: number | null
+    sectionFraction?: number | null
     ttsSectionIndex?: number | null
     ttsWordIndex?: number | null
     koboLocationSource?: string | null
@@ -122,6 +126,11 @@ export function useReaderProgress(
     const pct = normalizePercentage(data.percentage)
     percentage.value = pct ?? 0
     lastValidPercentage = percentage.value
+    if ('sectionFraction' in data) {
+      const sf = data.sectionFraction
+      sectionFraction.value =
+        typeof sf === 'number' && Number.isFinite(sf) ? Math.min(1, Math.max(0, sf)) : null
+    }
     ttsSectionIndex.value =
       typeof data.ttsSectionIndex === 'number' && Number.isInteger(data.ttsSectionIndex) && data.ttsSectionIndex >= 0 ? data.ttsSectionIndex : null
     ttsWordIndex.value =
@@ -212,15 +221,47 @@ export function useReaderProgress(
 
   async function load() {
     if (!unref(trackingEnabled)) return
+    // Local-first: apply the device cache immediately so reloads reopen the last
+    // page even when the server is lagging behind the 2s debounce / keepalive save.
     const cached = readCachedReaderProgress(fileId)
+    if (cached) {
+      applyProgressSnapshot(cached)
+    }
+
     const res = await api(`/api/v1/books/files/${fileId}/progress`)
-    if (!res.ok) {
-      if (cached) applyProgressSnapshot(cached)
+    if (!res.ok) return
+
+    const data = await res.json()
+    const remoteUpdatedAt = typeof data.updatedAt === 'string' ? Date.parse(data.updatedAt) : NaN
+    const cachedUpdatedAt = cached ? Date.parse(cached.updatedAt) : NaN
+
+    // Prefer local cache only when both sides have timestamps and cache is newer.
+    // If the server omits updatedAt, trust the successful fetch (not a stale cache).
+    if (
+      cached &&
+      Number.isFinite(cachedUpdatedAt) &&
+      Number.isFinite(remoteUpdatedAt) &&
+      cachedUpdatedAt > remoteUpdatedAt
+    ) {
+      applyProgressSnapshot(cached)
+      // Push the fresher local position to the server in the background.
+      dirty = true
+      void save().catch(() => {
+        dirty = true
+      })
       return
     }
 
-    const data = await res.json()
+    // Server payload has no sectionFraction; keep the cached value for page snap.
+    const cachedSectionFraction = sectionFraction.value
     applyProgressSnapshot(data)
+    if (
+      sectionFraction.value == null &&
+      typeof cachedSectionFraction === 'number' &&
+      Number.isFinite(cachedSectionFraction)
+    ) {
+      sectionFraction.value = cachedSectionFraction
+    }
     cacheCurrentProgress(typeof data.updatedAt === 'string' ? data.updatedAt : undefined)
     dirty = false
   }
@@ -242,6 +283,11 @@ export function useReaderProgress(
     if (relocatedFraction !== null) {
       fraction.value = relocatedFraction
       updatePercentage(relocatedFraction * 100)
+    }
+    // Prefer paginator section-local page fraction when present (paginated EPUB).
+    const sectionLocal = normalizeFraction(detail?.sectionFraction)
+    if (sectionLocal !== null) {
+      sectionFraction.value = sectionLocal
     }
     koboLocationSource.value = normalizeString(detail?.source)
     koboLocationValue.value = normalizeString(detail?.koboLocationValue)
@@ -404,6 +450,7 @@ export function useReaderProgress(
     pageNumber,
     positionSeconds,
     percentage,
+    sectionFraction,
     koboLocationSource,
     koboLocationType,
     koboLocationValue,
