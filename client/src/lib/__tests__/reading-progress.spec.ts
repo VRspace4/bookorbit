@@ -17,6 +17,7 @@ const entry: ReadingProgressEntry = {
   narration: { seconds: 812.4, fragment: 'c9R.xhtml#s12', sectionIndex: 9, percentage: 6, updatedAt: '2026-10-21T09:00:00.000Z' },
   kobo: { source: 'OEBPS/c9R.xhtml', type: 'KoboSpan', value: 'kobo.12.3', contentPercent: 50 },
   koreader: '/body/DocFragment[10]/body/p[3]',
+  tts: { sectionIndex: 9, wordIndex: 41 },
 }
 
 function okJson(body: unknown): Response {
@@ -46,6 +47,8 @@ describe('reading progress client', () => {
       koboLocationValue: 'kobo.12.3',
       koboContentSourceProgressPercent: 50,
       koreaderProgress: '/body/DocFragment[10]/body/p[3]',
+      ttsSectionIndex: 9,
+      ttsWordIndex: 41,
     })
   })
 

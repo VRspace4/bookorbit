@@ -21,6 +21,8 @@ function storedRow(overrides: Record<string, unknown> = {}) {
     koboLocationValue: 'kobo.12.3',
     koboContentSourceProgressPercent: 50,
     koreaderProgress: '/body/DocFragment[10]/body/p[3]',
+    ttsSectionIndex: 9,
+    ttsWordIndex: 41,
     updatedAt: new Date('2026-10-21T10:00:00.000Z'),
     ...overrides,
   };
@@ -51,6 +53,7 @@ describe('toReadingProgressEntry', () => {
       narration: { seconds: 812.4, fragment: 'c9R.xhtml#s12', sectionIndex: 9, percentage: 40, updatedAt: '2026-10-20T10:00:00.000Z' },
       kobo: { source: 'OEBPS/c9R.xhtml', type: 'KoboSpan', value: 'kobo.12.3', contentPercent: 50 },
       koreader: '/body/DocFragment[10]/body/p[3]',
+      tts: { sectionIndex: 9, wordIndex: 41 },
     });
   });
 
@@ -62,6 +65,7 @@ describe('toReadingProgressEntry', () => {
     expect(entry.narration.fragment).toBeNull();
     expect(entry.kobo.value).toBeNull();
     expect(entry.koreader).toBeNull();
+    expect(entry.tts).toEqual({ sectionIndex: null, wordIndex: null });
   });
 });
 
@@ -142,6 +146,17 @@ describe('ReadingProgressService', () => {
     expect(cleared.positionSeconds).toBeNull();
     expect(cleared.mediaOverlayFragment).toBeNull();
     expect(cleared.mediaOverlaySectionIndex).toBeNull();
+  });
+
+  it('passes the read-aloud position through, and leaves it alone when the write omits it', async () => {
+    const { service, books } = makeService();
+    await service.save([{ fileId: 64, percentage: 8, tts: { sectionIndex: 3, wordIndex: 17 } }], user);
+    expect(books.saveProgress.mock.calls[0]![2]).toMatchObject({ ttsSectionIndex: 3, ttsWordIndex: 17 });
+
+    await service.save([{ fileId: 64, percentage: 8, text: { cfi: 'epubcfi(/6/2)' } }], user);
+    const omitted = books.saveProgress.mock.calls[1]![2];
+    expect(omitted.ttsSectionIndex).toBeUndefined();
+    expect(omitted.ttsWordIndex).toBeUndefined();
   });
 
   it('returns the stored position instead of saving a write made before it', async () => {

@@ -6,6 +6,42 @@ import type { RelocateDetail } from '../../../epub/composables/useFoliate'
 const apiMock = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown>>())
 vi.mock('@/lib/api', () => ({ api: apiMock }))
 
+/** `GET /reading-progress?fileId=` as the server answers it: one grouped entry. */
+function serverProgress(p: {
+  cfi: string | null
+  pageNumber: number | null
+  percentage: number
+  ttsSectionIndex: number | null
+  ttsWordIndex: number | null
+  updatedAt: string
+}) {
+  return {
+    ok: true,
+    json: async () => ({
+      items: [
+        {
+          fileId: 1,
+          percentage: p.percentage,
+          updatedAt: p.updatedAt,
+          text: { cfi: p.cfi, page: p.pageNumber, updatedAt: p.updatedAt },
+          narration: { seconds: null, fragment: null, sectionIndex: null, percentage: null, updatedAt: null },
+          kobo: { source: null, type: null, value: null, contentPercent: null },
+          koreader: null,
+          tts: { sectionIndex: p.ttsSectionIndex, wordIndex: p.ttsWordIndex },
+        },
+      ],
+    }),
+  }
+}
+
+function progressPuts() {
+  return apiMock.mock.calls.filter((c: unknown[]) => c[0] === '/api/v1/reading-progress' && (c[1] as { method?: string })?.method === 'PUT')
+}
+
+function writeOf(call: unknown[]) {
+  return JSON.parse((call[1] as { body: string }).body).writes[0]
+}
+
 describe('formatTimeRemaining', () => {
   it('returns empty string for NaN', () => {
     expect(formatTimeRemaining(NaN)).toBe('')
@@ -280,15 +316,13 @@ describe('useReaderProgress', () => {
 
     await progress.flush()
 
-    const saveCalls = apiMock.mock.calls.filter(
-      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
-    )
+    const saveCalls = progressPuts()
     expect(saveCalls.length).toBe(1)
-    const body = JSON.parse((saveCalls[0]![1] as { body: string }).body)
-    expect(body).toMatchObject({ cfi: 'epubcfi(/6/8)', percentage: 42 })
+    const body = writeOf(saveCalls[0]!)
+    expect(body).toMatchObject({ text: { cfi: 'epubcfi(/6/8)' }, percentage: 42 })
     // A page turn must not clear a narration or read-aloud position another device saved.
-    expect(body).not.toHaveProperty('positionSeconds')
-    expect(body).not.toHaveProperty('ttsSectionIndex')
+    expect(body).not.toHaveProperty('narration')
+    expect(body).not.toHaveProperty('tts')
 
     vi.useRealTimers()
   })
@@ -306,18 +340,16 @@ describe('useReaderProgress', () => {
         updatedAt: new Date('2026-05-22T12:00:00.000Z').toISOString(),
       }),
     )
-    apiMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    apiMock.mockResolvedValue(
+      serverProgress({
         cfi: 'epubcfi(/6/2)',
         pageNumber: 1,
-        positionSeconds: null,
         percentage: 10,
         ttsSectionIndex: 5,
         ttsWordIndex: 88,
         updatedAt: new Date('2026-05-21T11:00:00.000Z').toISOString(),
       }),
-    })
+    )
 
     const progress = useReaderProgress(1, 12, elapsedMinutes)
     await progress.load()
@@ -328,9 +360,9 @@ describe('useReaderProgress', () => {
     // Fresher local progress is pushed back to the server.
     await vi.waitFor(() => {
       expect(apiMock).toHaveBeenCalledWith(
-        '/api/v1/books/files/12/progress',
+        '/api/v1/reading-progress',
         expect.objectContaining({
-          method: 'POST',
+          method: 'PUT',
         }),
       )
     })
@@ -349,18 +381,16 @@ describe('useReaderProgress', () => {
         updatedAt: new Date('2026-05-20T12:00:00.000Z').toISOString(),
       }),
     )
-    apiMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    apiMock.mockResolvedValue(
+      serverProgress({
         cfi: 'epubcfi(/6/2)',
         pageNumber: 1,
-        positionSeconds: null,
         percentage: 10,
         ttsSectionIndex: 5,
         ttsWordIndex: 88,
         updatedAt: new Date('2026-05-21T11:00:00.000Z').toISOString(),
       }),
-    })
+    )
 
     const progress = useReaderProgress(1, 15, elapsedMinutes)
     await progress.load()
@@ -424,14 +454,9 @@ describe('useReaderProgress', () => {
 
     await vi.advanceTimersByTimeAsync(2500)
 
-    const saveCalls = apiMock.mock.calls.filter(
-      (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).includes('/progress') && (c[1] as { method?: string })?.method === 'POST',
-    )
+    const saveCalls = progressPuts()
     expect(saveCalls.length).toBe(1)
-    expect(JSON.parse((saveCalls[0]![1] as { body: string }).body)).toMatchObject({
-      ttsSectionIndex: 3,
-      ttsWordIndex: 42,
-    })
+    expect(writeOf(saveCalls[0]!)).toMatchObject({ tts: { sectionIndex: 3, wordIndex: 42 } })
 
     const cached = JSON.parse(localStorage.getItem('reader:progress:14') ?? '{}')
     expect(cached).toMatchObject({ ttsSectionIndex: 3, ttsWordIndex: 42 })
@@ -443,18 +468,16 @@ describe('useReaderProgress', () => {
     const progress = useReaderProgress(1, 16, elapsedMinutes)
     progress.updateTtsPosition(1, 10)
 
-    apiMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
+    apiMock.mockResolvedValueOnce(
+      serverProgress({
         cfi: 'epubcfi(/6/4)',
         pageNumber: null,
-        positionSeconds: null,
         percentage: 42,
         ttsSectionIndex: 7,
         ttsWordIndex: 21,
         updatedAt: new Date('2026-05-22T12:00:00.000Z').toISOString(),
       }),
-    })
+    )
 
     await progress.refreshFromServer()
 
@@ -463,18 +486,16 @@ describe('useReaderProgress', () => {
   })
 
   it('loads persisted TTS position from the server', async () => {
-    apiMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    apiMock.mockResolvedValue(
+      serverProgress({
         cfi: 'epubcfi(/6/2)',
         pageNumber: null,
-        positionSeconds: null,
         percentage: 10,
         ttsSectionIndex: 5,
         ttsWordIndex: 88,
         updatedAt: new Date('2026-05-21T12:00:00.000Z').toISOString(),
       }),
-    })
+    )
 
     const progress = useReaderProgress(1, 15, elapsedMinutes)
     await progress.load()
