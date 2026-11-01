@@ -371,6 +371,7 @@ export const RELEASE_SCORE_REASONS = [
   "seeders",
   "freeleech",
   "likelySeveralBooks",
+  "companionWork",
 ] as const;
 export type ReleaseScoreReasonCode = (typeof RELEASE_SCORE_REASONS)[number];
 

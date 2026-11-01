@@ -505,6 +505,7 @@ function prepareScoringRequest(
   return {
     scoringRequest: {
       title: overrides?.title ?? request.title,
+      subtitle: overrides?.title !== undefined ? null : request.subtitle,
       authors: overrides?.authors ?? request.authors ?? [],
       isbn13: activeIsbn,
       isbn10: null,

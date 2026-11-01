@@ -9494,7 +9494,8 @@
         "suspiciousSize": "Unlikely size {detail}",
         "seeders": "{detail} seeders",
         "freeleech": "Freeleech",
-        "likelySeveralBooks": "{detail} files, may be several books"
+        "likelySeveralBooks": "{detail} files, may be several books",
+        "companionWork": "A {detail}, not the book itself"
       },
       "errors": {
         "loadFailed": "Could not search for releases"

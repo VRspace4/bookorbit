@@ -10,7 +10,13 @@ import {
 import type { BookRequestMediaKind, ReleaseCandidateItem, ReleaseScoreReason, ReleaseTier } from '@bookorbit/types';
 
 import { normalizeIsbn, normalizeMetadataIsbn } from '../../../common/text-match/isbn-normalize';
-import { normalizeTitleText, significantTokens, symmetricTitleSimilarity, tokenizeTitleText } from '../../../common/text-match/title-match';
+import {
+  mainTitlePart,
+  normalizeTitleText,
+  significantTokens,
+  symmetricTitleSimilarity,
+  tokenizeTitleText,
+} from '../../../common/text-match/title-match';
 import type { ReleaseCandidate } from './indexer-adapter';
 
 /**
@@ -46,7 +52,17 @@ const WEIGHTS = {
    * than a broken import: the dock holds multi-file units, so ordinary packaging imports whole.
    */
   likelySeveralBooks: -5,
+  /**
+   * A workbook, summary or study guide carries the whole title, often the subtitle too, so the
+   * match alone rates it close to the book. Large enough to sink a perfect companion under any
+   * sensible auto-grab floor, while it stays in the picker for a person who wants it.
+   */
+  companionWork: -40,
 } as const;
+
+/** Words that mark a book about the requested book rather than the book, unless the request names them. */
+const COMPANION_WORK =
+  /\b(workbook|summary|summaries|study guide|companion|sparknotes|cliffsnotes|analysis of|key takeaways|conversation starters)\b/;
 
 const TITLE_WEIGHT = 0.7;
 const AUTHOR_WEIGHT = 0.3;
@@ -117,6 +133,8 @@ const RELEASE_TITLE_NOISE = new Set([
 /** The work a release is scored against: the request snapshot, never the library. */
 export interface ScoringRequest {
   title: string;
+  /** Tried with the title as well as without it; dropped when a search overrides the title. */
+  subtitle?: string | null;
   authors: string[];
   isbn13: string | null;
   isbn10: string | null;
@@ -175,6 +193,9 @@ export function scoreRelease(candidate: ReleaseCandidate, request: ScoringReques
   if (candidate.seeders !== null) {
     reasons.push({ code: 'seeders', points: round(seederScore(candidate.seeders)), detail: String(candidate.seeders) });
   }
+
+  const companion = companionWord(candidate, request);
+  if (companion) reasons.push({ code: 'companionWork', points: WEIGHTS.companionWork, detail: companion });
 
   if (candidate.freeleech) reasons.push({ code: 'freeleech', points: WEIGHTS.freeleech });
   if (candidate.fileCount !== undefined && candidate.fileCount > SEVERAL_BOOKS_SUSPICION_THRESHOLD) {
@@ -261,23 +282,45 @@ function matchReason(candidate: ReleaseCandidate, request: ScoringRequest): Rele
  * Compares the work, not the scene label. A requested number is retained because it may be the
  * whole identity of a title such as 1984; other bare numbers are years, series positions or
  * version flags. Requested author tokens are removed only where they are not also title tokens.
+ *
+ * Both the bare title and the title with its subtitle are tried, against the release's full title
+ * and its main title, as request verification does: trackers and catalogues add the subtitle a
+ * request left off, and a sequel extends a title without the punctuation `mainTitlePart` cuts at.
  */
 function titleSimilarity(candidate: ReleaseCandidate, request: ScoringRequest): number {
-  if (candidate.bookTitle?.trim()) return symmetricTitleSimilarity(request.title, candidate.bookTitle);
+  const requested = [request.title, request.subtitle ? `${request.title} ${request.subtitle}` : null].filter((value): value is string =>
+    Boolean(value),
+  );
+  const offered = candidate.bookTitle?.trim()
+    ? [candidate.bookTitle, mainTitlePart(candidate.bookTitle)]
+    : [candidate.title, mainTitlePart(candidate.title)].map((title) => comparableTitle(title, requested, request.authors));
 
-  const requestedTokens = new Set(significantTokens(tokenizeTitleText(normalizeTitleText(request.title))));
-  const authorTokens = new Set(request.authors.flatMap((author) => significantTokens(tokenizeTitleText(normalizeTitleText(author)))));
-  const candidateTokens = tokenizeTitleText(normalizeTitleText(candidate.title));
-  const hasTerminalReleaseGroup = /-\s*[\p{L}\p{N}]{2,20}$/u.test(candidate.title.trim());
-  const comparable = candidateTokens.filter((token, index) => {
-    if (requestedTokens.has(token)) return true;
-    if (authorTokens.has(token) || RELEASE_TITLE_NOISE.has(token)) return false;
-    if (/^\d+(?:\.\d+)?$/.test(token) || /^(?:v|ver|version)\d+$/.test(token)) return false;
-    if (hasTerminalReleaseGroup && index === candidateTokens.length - 1) return false;
-    return true;
-  });
+  let best = 0;
+  for (const asked of requested) for (const title of offered) best = Math.max(best, symmetricTitleSimilarity(asked, title));
+  return best;
+}
 
-  return symmetricTitleSimilarity(request.title, comparable.join(' '));
+/** A decorated release name with its author, scene labels, years and release group removed. */
+function comparableTitle(title: string, requested: string[], authors: string[]): string {
+  const requestedTokens = new Set(requested.flatMap((value) => significantTokens(tokenizeTitleText(normalizeTitleText(value)))));
+  const authorTokens = new Set(authors.flatMap((author) => significantTokens(tokenizeTitleText(normalizeTitleText(author)))));
+  const candidateTokens = tokenizeTitleText(normalizeTitleText(title));
+  const hasTerminalReleaseGroup = /-\s*[\p{L}\p{N}]{2,20}$/u.test(title.trim());
+  return candidateTokens
+    .filter((token, index) => {
+      if (requestedTokens.has(token)) return true;
+      if (authorTokens.has(token) || RELEASE_TITLE_NOISE.has(token)) return false;
+      if (/^\d+(?:\.\d+)?$/.test(token) || /^(?:v|ver|version)\d+$/.test(token)) return false;
+      if (hasTerminalReleaseGroup && index === candidateTokens.length - 1) return false;
+      return true;
+    })
+    .join(' ');
+}
+
+function companionWord(candidate: ReleaseCandidate, request: ScoringRequest): string | null {
+  const word = normalizeTitleText(candidate.bookTitle?.trim() || candidate.title).match(COMPANION_WORK)?.[1];
+  if (!word) return null;
+  return normalizeTitleText(`${request.title} ${request.subtitle ?? ''}`).match(COMPANION_WORK)?.[1] === word ? null : word;
 }
 
 /** An author embedded in a decorated release name is still an exact author signal. */

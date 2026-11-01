@@ -211,6 +211,76 @@ describe('scoreRelease', () => {
     expect(new Set([exact.score, pictureBook.score, sequel.score]).size).toBe(3);
   });
 
+  // Seen on 2026-11-01: MyAnonaMouse and LibGen title the book with its subtitle, so the real book
+  // scored below a companion workbook and every right copy stayed under the auto-grab floor.
+  it('matches a release that adds the subtitle the request left off', () => {
+    const asked = request({ title: 'Atomic Habits', authors: ['James Clear'] });
+    const book = scoreRelease(
+      release({ title: 'x', bookTitle: 'Atomic Habits: An Easy & Proven Way to Build Good Habits & Break Bad Ones', author: 'James Clear' }),
+      asked,
+    );
+    const workbook = scoreRelease(
+      release({ title: 'x', bookTitle: 'The Atomic Habits Workbook: Simple Exercises for Building the Habits You Want', author: 'James Clear' }),
+      asked,
+    );
+    const libgen = scoreRelease(
+      release({ title: 'Atomic Habits: An Easy & Proven Way to Build Good Habits & Break Bad Ones · LibGen', author: 'James Clear', seeders: null }),
+      asked,
+    );
+
+    expect(pointsFor(book, 'authorMatch')).toBe(61);
+    expect(pointsFor(libgen, 'authorMatch')).toBe(61);
+    expect(book.score).toBeGreaterThan(workbook.score);
+  });
+
+  it('matches the request subtitle against a release that spells it out', () => {
+    const scored = scoreRelease(
+      release({ title: 'x', bookTitle: 'Atomic Habits An Easy and Proven Way to Build Good Habits and Break Bad Ones', author: 'James Clear' }),
+      request({ title: 'Atomic Habits', subtitle: 'An Easy & Proven Way to Build Good Habits & Break Bad Ones', authors: ['James Clear'] }),
+    );
+
+    expect(pointsFor(scored, 'authorMatch')).toBe(61);
+  });
+
+  it('sinks a workbook or summary of the requested book far below the book itself', () => {
+    const asked = request({
+      title: 'Atomic Habits',
+      subtitle: 'An Easy & Proven Way to Build Good Habits & Break Bad Ones',
+      authors: ['James Clear'],
+    });
+    const book = scoreRelease(
+      release({ title: 'x', bookTitle: 'Atomic Habits: An Easy & Proven Way to Build Good Habits & Break Bad Ones', author: 'James Clear' }),
+      asked,
+    );
+    const companions = [
+      'WORKBOOK For Atomic Habits: An Easy & Proven Way to Build Good Habits & Break Bad Ones',
+      'The Atomic Habits Workbook: Simple Exercises for Building the Life You Want',
+      'Summary of Atomic Habits by James Clear',
+      'Atomic Habits: Study Guide',
+    ].map((bookTitle) => scoreRelease(release({ title: 'x', bookTitle, author: 'James Clear' }), asked));
+
+    for (const companion of companions) {
+      expect(pointsFor(companion, 'companionWork')).toBeLessThan(0);
+      expect(companion.score).toBeLessThan(book.score - 30);
+    }
+  });
+
+  it('does not penalise a companion work that was the thing requested', () => {
+    const scored = scoreRelease(
+      release({ title: 'x', bookTitle: 'The Atomic Habits Workbook', author: 'James Clear' }),
+      request({ title: 'The Atomic Habits Workbook', authors: ['James Clear'] }),
+    );
+
+    expect(pointsFor(scored, 'companionWork')).toBeUndefined();
+  });
+
+  it('still keeps a sequel that only extends the title below the requested work', () => {
+    const asked = request({ title: 'Dune', authors: ['Frank Herbert'] });
+    const sequel = scoreRelease(release({ title: 'x', bookTitle: 'Dune Messiah', author: 'Frank Herbert' }), asked);
+
+    expect(pointsFor(sequel, 'authorMatch')).toBeLessThan(61);
+  });
+
   it('retains numbers that are part of the requested title', () => {
     const scored = scoreRelease(
       release({ title: 'George Orwell - 1984 (Retail EPUB)', seeders: null }),
