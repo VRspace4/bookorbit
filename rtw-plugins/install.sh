@@ -22,8 +22,12 @@ fetch_pinned bookorbit-shadowlib-plugin \
 fetch_pinned audiobookbay \
   https://raw.githubusercontent.com/nabukado/bookorbit-audiobookbay-plugin/188a4a87ecc57cca9f480cd3a30cba9c0d965466/indexers/audiobookbay/index.mjs \
   d51d08858e36c324eb846e495e1105bc91bb3c4033613791e5c44bfe933ad258
+# orbit-plugins/bookorbit-plugins-extra myanonamouse at 138644f (MIT): session, search and grab for mam-guarded.
+fetch_pinned myanonamouse \
+  https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/138644f62198d1a1dc335b427f3d8d1b894ad954/indexers/myanonamouse/index.mjs \
+  3d875d4381a3bc817c6add8f02b5877f09a356d0d7c9c07733e66b9ccffa4792
 
-for plugin in anna-fast abb-torbox; do
+for plugin in anna-fast abb-torbox mam-guarded; do
   mkdir -p "$dest/$plugin" && install -m 644 "$here/indexers/$plugin/index.mjs" "$here/indexers/$plugin/wrap.mjs" "$dest/$plugin/"
 done
 echo "installed into $dest; restart BookOrbit to load them"
