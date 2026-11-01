@@ -26,6 +26,13 @@ const UNRELEASED_MIGRATION_HASHES = [
   '3cfef0ffd7a3186eaf80feb23623940df7f046aec3deee4404a73289f4bb0ad2',
   '0e06a28ec1229ec5240b3a4ec1e4f1263e6eafaed69ac1effc0b4a14814d2d86',
   'f1b13f01fff86cfc90939e708a0dbd8c899b9a1d1d832ad0edcc7f8bad65323c',
+  // Local fork 0125-0128 (TTS position, TTS usage, activity backfill, Z-Library tables), recorded
+  // before upstream 0125-0132 existed. Their rows sort after upstream 0124 and their timestamps
+  // would hide upstream 0125-0132; 0133-0136 recreate them idempotently.
+  '89b8926fe9e21a9ae0182365d3e38b899be8a8b2136d7449071e05db53060ebd',
+  'a41b65e96a8da2b615e57c30b444d05ee9a4c29e69641123fadef3fdfac39ccc',
+  '0528dcbca621b70bd4bdb7063ff1b0856028b4cc47a9ac302ced1c78b3e25c2b',
+  '7348d127c77472c08314af36cdf17d0b2bc13456b103d76b126343efd5a62062',
 ] as const;
 
 export async function dropUnreleasedMigrationRows(
