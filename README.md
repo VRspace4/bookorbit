@@ -1,3 +1,15 @@
+# Dynamic Ray BookOrbit (fork)
+
+> Dynamic Ray's copy of [bookorbit/bookorbit](https://github.com/bookorbit/bookorbit) (AGPL-3.0). Our notes come first; the original README follows the line.
+
+- **What it is:** our fork of BookOrbit. The BookOrbit app itself was retired on 2026-11-03; Dynamic Ray's books service now carries the parts it uses: the reader (EPUB, comics, DjVu, read-aloud) and book requests (sources, release scoring).
+- **How Dynamic Ray uses it:** `deploy/books/reader/build.sh` and `deploy/books/Dockerfile` in [`dynamicray`](https://github.com/VRspace4/dynamicray) fetch a **pinned revision** of this repo and bundle those parts (`deploy/books/reader/server/bundle.sh`). A commit here changes nothing live until that revision is bumped there.
+- **Our changes:** the commits by VRspace4 (`git log --author=VRspace4@gmail.com`), mostly reader and book-request fixes, plus upstream merges.
+- **AGPL:** the books service serves its own source (an offer in the app's license notices), so keep every change here public and the pinned revision pushed.
+- **Upstream updates:** `git remote add upstream https://github.com/bookorbit/bookorbit.git` (once), then merge `upstream/main` into `main` on a branch, check the reader, and push.
+
+---
+
 > [!IMPORTANT]
 > **Android beta testers needed:** The official BookOrbit Android app is in closed testing. [Join the Google Play beta](https://github.com/bookorbit/bookorbit/issues/2001) and stay enrolled for at least 14 days to help unlock its public release.
 
